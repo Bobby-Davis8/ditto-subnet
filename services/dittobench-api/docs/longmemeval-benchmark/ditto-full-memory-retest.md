@@ -76,6 +76,22 @@ isolated database. Commit the repair/audit procedures and final count/hash
 evidence. These additional changes further prevent attributing any historical
 score difference to Luna, dreaming, or graph retrieval alone.
 
+### Corrected input fixture verified; dreaming is a separate gate
+
+At `2026-09-12T20:17:18.511581+00:00`, the final strict read-only audit passed
+for all 500 isolated questions: 23,867 session occurrences, 19,195 distinct
+source session IDs, 124,366 memory pairs, and all 246,738 original non-empty
+turns. It verified exact role/text, original sequence in the ordered manifest,
+and exact question-specific occurrence dates. Missing/extra turns, wrong dates,
+scope errors, missing/unmapped IDs, and duplicate pair references were all zero.
+
+The [sanitized input-fixture audit](results/2026-09-12-ditto-corrected-fixture-audit.json)
+records the source report, audit-script, dataset, and manifest hashes without
+private database identifiers, paths, case IDs, or content. This verifies only
+the input fixture. Fresh dreaming was still the next preparation gate when
+this input evidence was recorded; this artifact does **not** establish
+completed subject generation, refinement, graph construction, QA, or a score.
+
 ## Dataset, isolation, and the preparation barrier
 
 Use all 500 cleaned LongMemEval-S questions, dataset revision
