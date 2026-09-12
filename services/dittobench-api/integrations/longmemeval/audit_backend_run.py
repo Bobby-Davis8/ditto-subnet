@@ -45,7 +45,8 @@ def load_dataset(path):
     for row in iter_json_array(Path(path)):
         qid = row["question_id"]
         require(qid not in result, "duplicate dataset question ID")
-        result[qid] = {"category": row["question_type"], "prompt_time": normalize_timestamp(row["question_date"])}
+        result[qid] = {"category": row["question_type"], "question": row["question"],
+                       "prompt_time": normalize_timestamp(row["question_date"])}
     require(len(result) == 500, "dataset must contain exactly 500 unique questions")
     return result
 
@@ -109,6 +110,7 @@ def audit_rows(report, rows, dataset, condition):
         require(row.get("suite") == "longmemeval", "unexpected suite")
         require(row.get("model") == condition["answer_model"], "answer model differs from declared condition")
         require(row.get("category") == dataset[qid]["category"], "question type differs from dataset")
+        require(row.get("query") == dataset[qid]["question"], "question text differs from pinned dataset")
         require(type(row.get("lme_correct")) is bool, "missing or non-boolean judge verdict")
         require(isinstance(row.get("hypothesis", ""), str), "hypothesis must be text")
         require(row.get("hypothesis", "").strip(), "empty final answer is incomplete under this strict condition")
@@ -165,6 +167,34 @@ def audit_rows(report, rows, dataset, condition):
     return summary, indexed
 
 
+def validate_paired_provenance(left, right):
+    """Graph implementation/tool hashes may differ; common inputs must not."""
+    checked, unavailable = [], []
+    for field in ("weights_sha", "prompt_sha", "judge_model"):
+        first, second = left.get(field), right.get(field)
+        if field == "weights_sha":
+            first = first.removeprefix("learned:") if isinstance(first, str) else first
+            second = second.removeprefix("learned:") if isinstance(second, str) else second
+        require(first and first == second, f"paired {field} differs or is missing")
+        checked.append(field)
+    # The combined condition hash includes source identity, so it legitimately
+    # differs between stock and graph implementations. Compare input hashes
+    # individually, never condition hashes or machine-local manifest paths.
+    for field in ("lme_dataset_sha256", "lme_manifest_sha256", "lme_fixture_snapshot_sha256"):
+        first, second = left.get("meta", {}).get(field), right.get("meta", {}).get(field)
+        if first is None and second is None:
+            unavailable.append(field)
+            continue
+        require(isinstance(first, str) and re.fullmatch(r"[0-9a-f]{64}", first) and first == second,
+                f"paired {field} differs, is malformed, or is available on only one side")
+        if field == "lme_dataset_sha256":
+            require(first == DATASET_SHA256, "paired dataset digest differs from pinned dataset")
+        checked.append(field)
+    return {"matched_provenance_fields": checked, "unavailable_provenance_fields": unavailable,
+            "fixture_snapshot_verified": "lme_fixture_snapshot_sha256" in checked,
+            "limitation": "Missing snapshot evidence is not equivalence; graph attribution still requires a frozen prepared-fixture audit."}
+
+
 def compare(left, right):
     require(set(left) == set(right), "paired comparison requires identical complete question IDs")
     both_correct = sum(left[q]["lme_correct"] and right[q]["lme_correct"] for q in left)
@@ -208,6 +238,10 @@ def main(argv=None):
     summary["evidence_sha256"] = digest(args.run)
     summary["backend_provenance"] = {key: report.get(key) for key in ("run_id", "git_sha", "prompt_sha", "tools_sha", "weights_sha", "started_at", "finished_at")}
     summary["backend_provenance"]["condition_sha256"] = report["meta"]["lme_condition_sha256"]
+    summary["cost_reporting"] = {
+        "backend_estimate_valid": report.get("meta", {}).get("lme_cost_estimate_valid") == "true",
+        "backend_estimate_invalid_reason": report.get("meta", {}).get("lme_cost_estimate_invalid_reason"),
+        "policy": "No monetary amounts exported. Invalid/missing model prices must not be quoted as spend; provider billing is separate."}
     summary["limitations"] = ["Research only; not a production DittoBench score or a held-out leaderboard claim.",
                              "Observed answer-provider identities do not attest judge or dreaming provider identities.",
                              "Requires separate fixture completeness, dreaming stage, and trained-retriever provenance evidence.",
@@ -217,7 +251,9 @@ def main(argv=None):
         other_report, other_rows = load_run(args.paired_run)
         validate_provenance(other_report)
         other_summary, other_indexed = audit_rows(other_report, other_rows, dataset, other_condition)
+        pairing = validate_paired_provenance(report, other_report)
         summary["paired_comparison"] = compare(indexed, other_indexed)
+        summary["paired_comparison"]["provenance_validation"] = pairing
         summary["paired_comparison"]["right_evidence_sha256"] = digest(args.paired_run)
         summary["paired_comparison"]["right_condition"] = other_summary["condition"]
     # No output is written until every requested evidence set passes.

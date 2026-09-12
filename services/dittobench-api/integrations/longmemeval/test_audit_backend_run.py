@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from audit_backend_run import AuditError, aggregate, audit_rows, compare, load_run, validate_provenance, wilson
+from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, load_run, validate_paired_provenance, validate_provenance, wilson
 
 
 def fixture():
@@ -14,9 +14,10 @@ def fixture():
     dataset, rows = {}, []
     for i in range(2):
         qid = f"q{i}"
-        dataset[qid] = {"category": "multi-session", "prompt_time": "2024-01-01T10:00:00Z"}
+        dataset[qid] = {"category": "multi-session", "question": f"Question {i}?", "prompt_time": "2024-01-01T10:00:00Z"}
         rows.append({"suite": "longmemeval", "case_id": qid, "model": condition["answer_model"],
                      "category": "multi-session", "lme_correct": i == 0, "hypothesis": "answer" if i == 0 else "wrong answer",
+                     "query": dataset[qid]["question"],
                      "data": {"qa_correct": i == 0, "judge_status": "ok", "judge_model": "judge-model",
                               "prompt_clock": "question-date", "prompt_time": dataset[qid]["prompt_time"],
                               "reasoning_effort": "medium", "require_graph": True, "graph_retrieval": False,
@@ -70,6 +71,7 @@ class BackendAuditTests(unittest.TestCase):
             lambda r: r["data"].update(answer_source="reasoning"),
             lambda r: r["data"].update(condition_sha256="b" * 64),
             lambda r: r.update(category="wrong"), lambda r: r.update(model="fallback-model"),
+            lambda r: r.update(query="a different question with the same ID"),
             lambda r: r["data"].pop("judge_status"), lambda r: r["data"].update(judge_status="error"),
             lambda r: r["data"].update(judge_error="timeout"), lambda r: r["data"].update(qa_correct=False),
             lambda r: r["data"].update(require_graph=1), lambda r: r["data"].pop("graph_retrieval"),
@@ -135,6 +137,30 @@ class BackendAuditTests(unittest.TestCase):
         self.assertEqual(result["right_only_correct"], 1)
         self.assertEqual(result["right_minus_left_accuracy"], 0.5)
         self.assertEqual(result["exact_mcnemar_two_sided_p"], 1)
+
+    def test_paired_provenance_rejects_changed_common_inputs(self):
+        left = {"weights_sha": "learned:" + "a" * 64, "prompt_sha": "b" * 64, "judge_model": "judge",
+                "git_sha": "c" * 40, "tools_sha": "d" * 64,
+                "meta": {"lme_dataset_sha256": DATASET_SHA256, "lme_manifest_sha256": "e" * 64,
+                         "lme_fixture_snapshot_sha256": "f" * 64}}
+        right = copy.deepcopy(left)
+        right.update(git_sha="1" * 40, tools_sha="2" * 64, weights_sha="a" * 64)
+        self.assertTrue(validate_paired_provenance(left, right)["fixture_snapshot_verified"])
+        for field in ("weights_sha", "prompt_sha", "judge_model"):
+            with self.subTest(field=field), self.assertRaises(AuditError):
+                validate_paired_provenance(left, dict(right, **{field: "different"}))
+        for field in left["meta"]:
+            for value in ("1" * 64, None):
+                changed = copy.deepcopy(right)
+                changed["meta"][field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(AuditError):
+                    validate_paired_provenance(left, changed)
+
+    def test_absent_snapshot_is_explicitly_unverified(self):
+        report = {"weights_sha": "a" * 64, "prompt_sha": "b" * 64, "judge_model": "judge"}
+        result = validate_paired_provenance(report, report)
+        self.assertFalse(result["fixture_snapshot_verified"])
+        self.assertIn("lme_fixture_snapshot_sha256", result["unavailable_provenance_fields"])
 
     def test_report_and_checkpoint_loading_and_truncated_rejection(self):
         with tempfile.TemporaryDirectory() as temp:

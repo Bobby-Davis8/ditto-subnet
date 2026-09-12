@@ -216,6 +216,16 @@ audit to distinguish those routes. The builder stamps a new `created_at`, and
 new embeddings/dreaming invoke hosted models: a rerun can reproduce the method
 without producing byte-identical manifest hashes or generated summaries.
 
+### Cost validity
+
+The current backend price table lacks a Luna entry and can substitute a generic
+price. The run metadata therefore records `lme_cost_estimate_valid=false` and
+`lme_cost_estimate_invalid_reason=unknown_answer_model_price`. Do not quote the
+resulting generic-fallback monetary estimate as Luna cost, billed spend, or an
+invoice. The auditor exports no monetary amounts and preserves this validity
+warning. Provider-reported usage/billing and dreaming cost require separate
+evidence; neither is established by reader token counters.
+
 ### Audit completed reader evidence
 
 From `services/dittobench-api/integrations/longmemeval`:
@@ -244,9 +254,15 @@ without this provenance remain historical, not retrospectively certified.
 For graph-on evidence add `--graph-retrieval` and use a distinct condition.
 To compare opposite graph conditions under otherwise identical checked reader,
 judge, reasoning, and date settings, add `--paired-run /private/other.json`.
-The requested run is the left side and paired run the right side. Source,
-fixture and graph-parameter equivalence still need manual manifest review;
-the script does not infer them from matching accuracy or flags.
+The requested run is the left side and paired run the right side. The auditor
+also requires equal learned-weight and system-prompt hashes. Source and tool
+hashes may legitimately differ for the graph implementation. Standalone dataset,
+seed-manifest, and prepared-fixture snapshot digests are compared when recorded;
+a mismatch or one-sided digest fails closed. Missing digests are explicitly
+listed as unavailable, not treated as matching. The combined condition digest
+is not compared across runs because it includes their different source commits.
+Graph parameters and absent fixture-snapshot evidence still need manual review;
+matching question IDs, accuracy, paths, or flags do not prove identical memories.
 
 Only the aggregate audit is safe to publish after review: it includes hashes,
 per-type QA counts, empty-answer count, Wilson intervals, aggregate tool usage,
