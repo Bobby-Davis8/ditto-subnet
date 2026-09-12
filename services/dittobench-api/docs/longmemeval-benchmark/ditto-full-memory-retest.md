@@ -231,6 +231,71 @@ case completion or full preparation completion is claimed. Native preparation
 using the older executable and resumed concurrency 8 remains a distinct process;
 a planned receipt-aware settle at concurrency 2 does not imply it started.
 
+The subsequent [wave-1 settle receipt](results/2026-09-12-ditto-receipt-settle-wave1.json)
+does verify runtime execution: the same VCS-stamped binary settled the selected
+27 closed users at concurrency 2 between `22:03:53Z` and `22:04:19Z`, with 27
+unique successful audit rows and no native warnings. Raw delimiter candidates,
+matched receipts, and remaining pending refinement were all zero afterward.
+The previously literal-delimiter subject no longer contained the delimiter
+after one native refinement; the receipt journal is empty. This verifies the
+ordinary zero-pending route, **not** an actual receipt-match exemption. The
+receipt-aware contract remains covered by tests, while other users were still
+in native preparation. The immutable earlier build artifact's scope is unchanged.
+
+#### Reproduce the frozen binary's configuration boundary
+
+Do not `source` these config files: the native loader is a literal key/value
+parser, not a shell evaluator. The successful process loaded local before
+common, retained already-present environment values (including explicit database
+and ADC overrides), and set no values from quoted shell expansion. Configuration
+file digests are retained in the wave receipt; values stay private. Execute from
+the frozen clean backend source checkout and use fresh audit/manifest output
+paths. The selected cohort is in that receipt's `selected_users` array.
+
+```sh
+# Explicit operator values; do not inherit a production/default database.
+export SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54339/ditto_lme_s_final
+export GOOGLE_APPLICATION_CREDENTIALS=/private/working-adc.json
+export LME_SETTLE_USERS="$(jq -r '.selected_users | join(",")' /path/to/2026-09-12-ditto-receipt-settle-wave1.json)"
+python3 - /private/.env.local /private/.env.common /private/dittobench-campaign-vcs-1b575560 \
+  -env local longmemeval-dream -stage settle -concurrency 2 \
+  -users "$LME_SETTLE_USERS" -manifest /private/input-manifest.json \
+  -out /private/new-settle-audit.jsonl -manifest-out /private/new-settle-manifest.json <<'PY'
+import hashlib, os, pathlib, subprocess, sys
+from urllib.parse import urlparse
+source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+assert source == "1b5755609b3ea95660fdba289e6a747adb8c5dae"
+assert not subprocess.check_output(["git", "status", "--porcelain"])
+binary = pathlib.Path(sys.argv[3]).resolve()
+with binary.open("rb") as stream:
+    assert hashlib.file_digest(stream, "sha256").hexdigest() == "695b6c3a0338b902949deb55456a87b17e1ba97e2b92dca63054e187ef75fa21"
+runtime = dict(os.environ)
+config_hashes = ["d2bee32f9749c311831f29637469c6633145ba38379b874e2d891dace2d03377",
+                 "6fb161f7c7b714ad851a2242ed0f9987a895321817a1de2c73f244368f54081f"]
+for filename, expected in zip(sys.argv[1:3], config_hashes, strict=True):
+    data = pathlib.Path(filename).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == expected
+    for line in data.decode().splitlines():
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key:
+            runtime.setdefault(key, value)
+target = urlparse(runtime["SUPABASE_DB_URL"])
+assert target.scheme in ("postgres", "postgresql") and target.hostname == "127.0.0.1"
+assert target.port and target.path.startswith("/ditto_lme") and not target.query and not target.fragment
+assert runtime.get("GCLOUD_PROJECT") and runtime.get("GOOGLE_APPLICATION_CREDENTIALS")
+os.execve(str(binary), [str(binary), *sys.argv[4:]], runtime)
+PY
+```
+
+This is the parser and executable boundary used by the successful phase, not
+permission to repeat settled users to improve an answer. Hashes and a clean
+checkout protect source identity; the native stage still checks eligibility
+and private-database scope. Preserve both the startup failure and successful
+attempt, and do not replace the new manifest with the earlier input manifest
+when proceeding to later preparation gates.
+
 ## Known learned-retriever overlap
 
 The backend repository's retrieval training dataset contains 474 unique
