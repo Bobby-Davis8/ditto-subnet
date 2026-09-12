@@ -160,6 +160,58 @@ build marker alone is not evidence every production stage succeeded. An edge
 count of zero can be legitimate for a small disconnected graph; report it,
 rather than inventing edges or dropping that question.
 
+### Refinement completion requires content-matched native receipts
+
+The legacy pending-refinement query treats a literal ASCII ` | ` in a subject
+description as accumulated context awaiting refinement. A successful native
+refinement can itself produce that literal delimiter. Counting it again as
+unfinished work can therefore prevent a completion barrier from settling.
+Removing or replacing that text, exempting selected cases, or accepting the
+subject name alone would change the evidence instead of proving completion.
+
+The production refinement observer added in backend `9cc8a942` records a receipt
+only after a successful scoped compare-and-save. It is optional and no-op by
+default. Its domain-separated semantic digest binds subject ID, user/KG scope,
+subject name, exact description (including NULL versus empty), and stored
+float32 embedding content. Operational timestamps and key-subject flags are
+excluded because later pipeline stages may update them without changing the
+refined content. A receipt is an observed native save, not a provider signature
+or a guarantee that a later row still matches.
+
+Report three counts distinctly: raw delimiter-matching candidates; receipts
+that match those candidates' **current** scoped semantic content; and remaining
+pending refinement (`raw - matched`). Only the remaining count may reach the
+zero-pending barrier. Changed descriptions, embeddings, names, or scope must
+invalidate the old receipt. Generation/storage/key-flag and graph completion
+checks remain separate requirements.
+
+The settle command writes a private append-only receipt journal and a new,
+exclusive-create output manifest embedding only receipts that still match the
+database; it preserves the input manifest. The reader uses that exact output
+manifest, whose bytes and receipt-set digest become immutable run provenance.
+The current reader metadata contract is
+`lme_refinement_receipt_version=native-semantic-save-v1`,
+`lme_refinement_receipts_sha256`, `lme_raw_pending_refinement`, and
+`lme_accepted_refinement_receipts`. The independent audit requires this version,
+a valid digest, nonnegative counts, and `raw == accepted`; it reports the
+remaining count separately and requires matching receipt-set hashes across
+paired runs. These offline checks validate the recorded contract, not an
+independent database read or a claim that every receipt has a provider signature.
+Do not claim the receipt path completed a particular case or all preparation
+until its native-save journal and current-content audit actually demonstrate
+that outcome.
+
+### Preparation interruption and source boundary
+
+Preparation encountered a resource interruption and was resumed with user
+concurrency reduced from 16 to 8, retaining the previous attempt evidence and
+durable processing watermarks. This changes scheduling, not an authority to
+discard incomplete cases or rewrite their content. The final reader source
+must advance beyond the earlier source `66669467e4825904a8fe01668f466328bc21ea08`
+to include the receipt-aware
+completion contract. Freeze and record the actual final source/binary after
+those changes; no final source hash or completed score is implied here.
+
 ## Known learned-retriever overlap
 
 The backend repository's retrieval training dataset contains 474 unique
@@ -286,7 +338,8 @@ SHA-256 prompt/tool/learned-weight digests. It also requires standalone manifest
 and selected-case digests, a prepared-fixture snapshot captured before/after
 answering, identical before/after fingerprints, and an explicit unchanged
 attestation with no snapshot error, plus the exact implemented ID-blinding
-scheme. Source-evidence metadata is retained without imposing an unagreed wire
+scheme and receipt-aware zero-remaining-refinement evidence. Source-evidence
+metadata is retained without imposing an unagreed wire
 format. Its loading utility understands
 JSONL checkpoints for diagnostics, but a checkpoint alone cannot attest source
 provenance and is rejected for a publishable audit. The auditor
@@ -303,7 +356,7 @@ judge, reasoning, and date settings, add `--paired-run /private/other.json`.
 The requested run is the left side and paired run the right side. The auditor
 also requires equal learned-weight and system-prompt hashes. Source and tool
 hashes may legitimately differ for the graph implementation. Seed-manifest,
-selected-case and prepared-fixture snapshot digests must match; a mismatch or
+selected-case, receipt-set and prepared-fixture snapshot digests must match; a mismatch or
 one-sided digest fails closed. An additional raw-dataset digest is compared
 when recorded; if absent it is explicitly unavailable, not treated as matching
 (the local pinned dataset and exact recorded questions are checked separately).

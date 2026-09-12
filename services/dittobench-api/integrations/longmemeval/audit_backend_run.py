@@ -21,6 +21,7 @@ DATASET_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a4
 DATASET_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
 EVALUATOR_REVISION = "9e0b455f4ef0e2ab8f2e582289761153549043fc"
 OPAQUE_ID_SCHEME = "lme-opaque-sha256-v1"
+REFINEMENT_RECEIPT_VERSION = "native-semantic-save-v1"
 
 
 class AuditError(ValueError):
@@ -95,6 +96,28 @@ def validate_provenance(report):
     require(meta.get("lme_prepared_snapshot_unchanged") == "true" and
             meta["lme_prepared_snapshot_sha256"] == meta["lme_prepared_snapshot_after_sha256"] and
             not meta.get("lme_prepared_snapshot_error"), "prepared fixture changed or could not be verified after answering")
+    validate_refinement_completion(meta)
+
+
+def validate_refinement_completion(meta):
+    require(meta.get("lme_refinement_receipt_version") == REFINEMENT_RECEIPT_VERSION,
+            "missing or incompatible native refinement receipt version")
+    require(re.fullmatch(r"[0-9a-f]{64}", meta.get("lme_refinement_receipts_sha256", "")),
+            "missing or invalid refinement receipt-set digest")
+    counts = {}
+    for field in ("lme_raw_pending_refinement", "lme_accepted_refinement_receipts"):
+        value = meta.get(field)
+        require(isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value),
+                f"missing or invalid nonnegative {field}")
+        counts[field] = int(value)
+    raw, matched = counts["lme_raw_pending_refinement"], counts["lme_accepted_refinement_receipts"]
+    require(matched <= raw, "matched refinement receipts exceed raw candidates")
+    require(raw == matched, "native refinement remains pending after current-content receipt matching")
+    return {"receipt_version": REFINEMENT_RECEIPT_VERSION,
+            "receipts_sha256": meta["lme_refinement_receipts_sha256"],
+            "raw_pending_refinement": raw, "accepted_refinement_receipts": matched,
+            "remaining_pending_refinement": raw - matched,
+            "evidence_boundary": "Backend matches native-save receipts to current scoped semantic content; offline counts do not independently query the database."}
 
 
 def aggregate(rows):
@@ -189,7 +212,7 @@ def validate_paired_provenance(left, right):
     # The combined condition hash includes source identity, so it legitimately
     # differs between stock and graph implementations. Compare input hashes
     # individually, never condition hashes or machine-local manifest paths.
-    for field in ("lme_dataset_sha256", "lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256"):
+    for field in ("lme_dataset_sha256", "lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_refinement_receipts_sha256"):
         first, second = left.get("meta", {}).get(field), right.get("meta", {}).get(field)
         if first is None and second is None:
             unavailable.append(field)
@@ -250,6 +273,7 @@ def main(argv=None):
     for field in ("lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_prepared_snapshot_after_sha256", "lme_prepared_snapshot_unchanged", "lme_id_blinding_scheme"):
         summary["backend_provenance"][field] = report["meta"][field]
     summary["backend_provenance"]["lme_source_evidence"] = report["meta"].get("lme_source_evidence")
+    summary["refinement_completion"] = validate_refinement_completion(report["meta"])
     summary["cost_reporting"] = {
         "backend_estimate_valid": report.get("meta", {}).get("lme_cost_estimate_valid") == "true",
         "backend_estimate_invalid_reason": report.get("meta", {}).get("lme_cost_estimate_invalid_reason"),

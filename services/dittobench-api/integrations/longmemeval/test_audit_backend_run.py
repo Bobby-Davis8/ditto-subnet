@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, load_run, validate_paired_provenance, validate_provenance, wilson
+from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, load_run, validate_paired_provenance, validate_provenance, validate_refinement_completion, wilson
 
 
 def fixture():
@@ -110,7 +110,9 @@ class BackendAuditTests(unittest.TestCase):
                   "started_at": "2026-09-12T12:00:00Z", "finished_at": "2026-09-12T13:00:00Z",
                   "meta": {"lme_manifest_sha256": "e" * 64, "lme_cases_sha256": "f" * 64,
                            "lme_prepared_snapshot_sha256": "1" * 64, "lme_prepared_snapshot_after_sha256": "1" * 64,
-                           "lme_prepared_snapshot_unchanged": "true", "lme_id_blinding_scheme": "lme-opaque-sha256-v1"}}
+                           "lme_prepared_snapshot_unchanged": "true", "lme_id_blinding_scheme": "lme-opaque-sha256-v1",
+                           "lme_refinement_receipt_version": "native-semantic-save-v1", "lme_refinement_receipts_sha256": "2" * 64,
+                           "lme_raw_pending_refinement": "0", "lme_accepted_refinement_receipts": "0"}}
         validate_provenance(report)
         for field in report:
             bad = dict(report)
@@ -157,7 +159,8 @@ class BackendAuditTests(unittest.TestCase):
         left = {"weights_sha": "learned:" + "a" * 64, "prompt_sha": "b" * 64, "judge_model": "judge",
                 "git_sha": "c" * 40, "tools_sha": "d" * 64,
                 "meta": {"lme_dataset_sha256": DATASET_SHA256, "lme_manifest_sha256": "e" * 64,
-                         "lme_cases_sha256": "3" * 64, "lme_prepared_snapshot_sha256": "f" * 64}}
+                         "lme_cases_sha256": "3" * 64, "lme_prepared_snapshot_sha256": "f" * 64,
+                         "lme_refinement_receipts_sha256": "4" * 64}}
         right = copy.deepcopy(left)
         right.update(git_sha="1" * 40, tools_sha="2" * 64, weights_sha="a" * 64)
         self.assertTrue(validate_paired_provenance(left, right)["fixture_snapshot_verified"])
@@ -176,6 +179,29 @@ class BackendAuditTests(unittest.TestCase):
         result = validate_paired_provenance(report, report)
         self.assertFalse(result["fixture_snapshot_verified"])
         self.assertIn("lme_prepared_snapshot_sha256", result["unavailable_provenance_fields"])
+
+    def test_refinement_raw_and_matched_receipts_are_not_conflated(self):
+        meta = {"lme_refinement_receipt_version": "native-semantic-save-v1", "lme_refinement_receipts_sha256": "a" * 64,
+                "lme_raw_pending_refinement": "2", "lme_accepted_refinement_receipts": "2"}
+        result = validate_refinement_completion(meta)
+        self.assertEqual(result["raw_pending_refinement"], 2)
+        self.assertEqual(result["accepted_refinement_receipts"], 2)
+        self.assertEqual(result["remaining_pending_refinement"], 0)
+        validate_refinement_completion(dict(meta, lme_raw_pending_refinement="0", lme_accepted_refinement_receipts="0"))
+        for field, value in (("lme_refinement_receipt_version", "unknown"),
+                             ("lme_refinement_receipts_sha256", "unknown"),
+                             ("lme_raw_pending_refinement", "-1"),
+                             ("lme_raw_pending_refinement", "2.0"),
+                             ("lme_accepted_refinement_receipts", True),
+                             ("lme_accepted_refinement_receipts", "1"),
+                             ("lme_accepted_refinement_receipts", "3")):
+            with self.subTest(field=field, value=value), self.assertRaises(AuditError):
+                validate_refinement_completion(dict(meta, **{field: value}))
+        for field in meta:
+            bad = dict(meta)
+            del bad[field]
+            with self.subTest(missing=field), self.assertRaises(AuditError):
+                validate_refinement_completion(bad)
 
     def test_report_and_checkpoint_loading_and_truncated_rejection(self):
         with tempfile.TemporaryDirectory() as temp:
