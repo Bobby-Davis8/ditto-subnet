@@ -207,10 +207,29 @@ Preparation encountered a resource interruption and was resumed with user
 concurrency reduced from 16 to 8, retaining the previous attempt evidence and
 durable processing watermarks. This changes scheduling, not an authority to
 discard incomplete cases or rewrite their content. The final reader source
-must advance beyond the earlier source `66669467e4825904a8fe01668f466328bc21ea08`
-to include the receipt-aware
-completion contract. Freeze and record the actual final source/binary after
-those changes; no final source hash or completed score is implied here.
+has advanced beyond the earlier source `66669467e4825904a8fe01668f466328bc21ea08`
+to include the receipt-aware completion contract.
+
+The [verified campaign build](results/2026-09-12-ditto-campaign-build-1b575560.json)
+freezes source `1b5755609b3ea95660fdba289e6a747adb8c5dae` and executable SHA-256
+`695b6c3a0338b902949deb55456a87b17e1ba97e2b92dca63054e187ef75fa21`
+(235,116,018 bytes, Go 1.26.5, Darwin arm64). A clean task-local clone with a
+`.git` directory produced embedded Git revision matching that source,
+`vcs.modified=false`, and `vcs.time=2026-09-12T21:59:33Z`. Both full 500-case
+arms are planned to reuse this exact executable/source after all preparation
+and opaque-ID barriers pass. The earlier `66669467` preparation executable did
+not have embedded VCS stamps and retains its separate, weaker provenance.
+
+Local full-harness and focused graph/receipt/tool checks passed; this is not
+proof of CI completion or a reader result. The first receipt-aware settle
+launch from the new build failed at startup, before preparation or inference,
+because its isolated build clone lacked ignored embedded local configuration.
+The recovery path supplies authorized local/common values as process environment
+without rebuilding, and must verify precedence and the private loopback database
+target before claiming success. At the build-evidence boundary no receipt-aware
+case completion or full preparation completion is claimed. Native preparation
+using the older executable and resumed concurrency 8 remains a distinct process;
+a planned receipt-aware settle at concurrency 2 does not imply it started.
 
 ## Known learned-retriever overlap
 
