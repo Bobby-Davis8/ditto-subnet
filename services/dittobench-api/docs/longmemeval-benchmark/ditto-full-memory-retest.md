@@ -118,9 +118,19 @@ opaque identifiers, retain the private mapping for provenance, and independently
 audit the new manifest/database. The rewrite must preserve conversation text,
 internal row UUIDs, embeddings, timestamps, and subject/graph relationships;
 it is not a new semantic seed or an opportunity to tune retrieval. The strict
-reader preflight must verify the agreed opaque-ID format before calling a
-provider. Record its actual version and audit status once implemented, not a
-guessed field or an assumed pass. Dreaming completion and opaque-ID/input
+reader preflight verifies both the selected manifest and actual database IDs
+before calling a provider. The implemented scheme is `lme-opaque-sha256-v1`:
+each public ID is `lme_mem_` plus SHA-256 of compact JSON containing the scheme,
+question ID, session index, and ordinal in the canonical session manifest.
+Neither the question ID nor evidence/abstention label is printed in that ID.
+Successful strict preflight records
+`lme_id_blinding_scheme=lme-opaque-sha256-v1`; the independent result auditor
+requires exactly that scheme and rejects missing, legacy, or unknown values.
+The rewrite also publishes a new manifest and private preservation receipt;
+the fixture auditor supports `require_opaque_ids`, `opaque_ids_valid`, and
+`opaque_id_scheme` evidence. Implementation of those checks is not proof that
+the rewrite has already been applied or that its final audit has passed.
+Dreaming completion and opaque-ID/input
 verification are separate gates, both required before the new measurement.
 
 ## Dataset, isolation, and the preparation barrier
@@ -275,7 +285,9 @@ The CLI requires a final JSON report with a full source commit and actual
 SHA-256 prompt/tool/learned-weight digests. It also requires standalone manifest
 and selected-case digests, a prepared-fixture snapshot captured before/after
 answering, identical before/after fingerprints, and an explicit unchanged
-attestation with no snapshot error. Its loading utility understands
+attestation with no snapshot error, plus the exact implemented ID-blinding
+scheme. Source-evidence metadata is retained without imposing an unagreed wire
+format. Its loading utility understands
 JSONL checkpoints for diagnostics, but a checkpoint alone cannot attest source
 provenance and is rejected for a publishable audit. The auditor
 rejects incomplete/duplicate/unexpected IDs, unknown/failed judgments, changed

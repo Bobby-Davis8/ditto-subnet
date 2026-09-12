@@ -110,7 +110,7 @@ class BackendAuditTests(unittest.TestCase):
                   "started_at": "2026-09-12T12:00:00Z", "finished_at": "2026-09-12T13:00:00Z",
                   "meta": {"lme_manifest_sha256": "e" * 64, "lme_cases_sha256": "f" * 64,
                            "lme_prepared_snapshot_sha256": "1" * 64, "lme_prepared_snapshot_after_sha256": "1" * 64,
-                           "lme_prepared_snapshot_unchanged": "true"}}
+                           "lme_prepared_snapshot_unchanged": "true", "lme_id_blinding_scheme": "lme-opaque-sha256-v1"}}
         validate_provenance(report)
         for field in report:
             bad = dict(report)
@@ -122,6 +122,11 @@ class BackendAuditTests(unittest.TestCase):
                 validate_provenance(dict(report, **{field: bad_value}))
         with self.assertRaisesRegex(AuditError, "checkpoint"):
             validate_provenance({})
+        for value in (None, "legacy", "lme-opaque-sha256-v2", True):
+            bad = copy.deepcopy(report)
+            bad["meta"]["lme_id_blinding_scheme"] = value
+            with self.subTest(blinding=value), self.assertRaisesRegex(AuditError, "opaque-ID"):
+                validate_provenance(bad)
         for field, value in (("lme_prepared_snapshot_unchanged", "false"),
                              ("lme_prepared_snapshot_after_sha256", "2" * 64),
                              ("lme_prepared_snapshot_error", "timeout")):

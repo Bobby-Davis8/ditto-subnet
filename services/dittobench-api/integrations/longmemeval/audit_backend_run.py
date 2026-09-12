@@ -20,6 +20,7 @@ from longmemeval_adapter import iter_json_array, normalize_timestamp
 DATASET_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
 DATASET_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
 EVALUATOR_REVISION = "9e0b455f4ef0e2ab8f2e582289761153549043fc"
+OPAQUE_ID_SCHEME = "lme-opaque-sha256-v1"
 
 
 class AuditError(ValueError):
@@ -87,6 +88,8 @@ def validate_provenance(report):
     for field in ("started_at", "finished_at"):
         require(isinstance(report.get(field), str) and report[field] and not report[field].startswith("0001-"), f"missing {field}")
     meta = report.get("meta", {})
+    require(meta.get("lme_id_blinding_scheme") == OPAQUE_ID_SCHEME,
+            "missing or incompatible opaque-ID blinding scheme; legacy labeled IDs are not clean accuracy evidence")
     for field in ("lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_prepared_snapshot_after_sha256"):
         require(re.fullmatch(r"[0-9a-f]{64}", meta.get(field, "")), f"missing or invalid {field}")
     require(meta.get("lme_prepared_snapshot_unchanged") == "true" and
@@ -244,8 +247,9 @@ def main(argv=None):
     summary["evidence_sha256"] = digest(args.run)
     summary["backend_provenance"] = {key: report.get(key) for key in ("run_id", "git_sha", "prompt_sha", "tools_sha", "weights_sha", "started_at", "finished_at")}
     summary["backend_provenance"]["condition_sha256"] = report["meta"]["lme_condition_sha256"]
-    for field in ("lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_prepared_snapshot_after_sha256", "lme_prepared_snapshot_unchanged"):
+    for field in ("lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_prepared_snapshot_after_sha256", "lme_prepared_snapshot_unchanged", "lme_id_blinding_scheme"):
         summary["backend_provenance"][field] = report["meta"][field]
+    summary["backend_provenance"]["lme_source_evidence"] = report["meta"].get("lme_source_evidence")
     summary["cost_reporting"] = {
         "backend_estimate_valid": report.get("meta", {}).get("lme_cost_estimate_valid") == "true",
         "backend_estimate_invalid_reason": report.get("meta", {}).get("lme_cost_estimate_invalid_reason"),
