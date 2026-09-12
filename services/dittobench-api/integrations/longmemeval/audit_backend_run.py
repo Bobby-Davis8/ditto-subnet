@@ -86,6 +86,12 @@ def validate_provenance(report):
     require(re.fullmatch(r"(?:learned:)?[0-9a-f]{64}", report.get("weights_sha", "")), "weights_sha must identify the actual learned-weight binary")
     for field in ("started_at", "finished_at"):
         require(isinstance(report.get(field), str) and report[field] and not report[field].startswith("0001-"), f"missing {field}")
+    meta = report.get("meta", {})
+    for field in ("lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_prepared_snapshot_after_sha256"):
+        require(re.fullmatch(r"[0-9a-f]{64}", meta.get(field, "")), f"missing or invalid {field}")
+    require(meta.get("lme_prepared_snapshot_unchanged") == "true" and
+            meta["lme_prepared_snapshot_sha256"] == meta["lme_prepared_snapshot_after_sha256"] and
+            not meta.get("lme_prepared_snapshot_error"), "prepared fixture changed or could not be verified after answering")
 
 
 def aggregate(rows):
@@ -180,7 +186,7 @@ def validate_paired_provenance(left, right):
     # The combined condition hash includes source identity, so it legitimately
     # differs between stock and graph implementations. Compare input hashes
     # individually, never condition hashes or machine-local manifest paths.
-    for field in ("lme_dataset_sha256", "lme_manifest_sha256", "lme_fixture_snapshot_sha256"):
+    for field in ("lme_dataset_sha256", "lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256"):
         first, second = left.get("meta", {}).get(field), right.get("meta", {}).get(field)
         if first is None and second is None:
             unavailable.append(field)
@@ -191,7 +197,7 @@ def validate_paired_provenance(left, right):
             require(first == DATASET_SHA256, "paired dataset digest differs from pinned dataset")
         checked.append(field)
     return {"matched_provenance_fields": checked, "unavailable_provenance_fields": unavailable,
-            "fixture_snapshot_verified": "lme_fixture_snapshot_sha256" in checked,
+            "fixture_snapshot_verified": "lme_prepared_snapshot_sha256" in checked,
             "limitation": "Missing snapshot evidence is not equivalence; graph attribution still requires a frozen prepared-fixture audit."}
 
 
@@ -238,6 +244,8 @@ def main(argv=None):
     summary["evidence_sha256"] = digest(args.run)
     summary["backend_provenance"] = {key: report.get(key) for key in ("run_id", "git_sha", "prompt_sha", "tools_sha", "weights_sha", "started_at", "finished_at")}
     summary["backend_provenance"]["condition_sha256"] = report["meta"]["lme_condition_sha256"]
+    for field in ("lme_manifest_sha256", "lme_cases_sha256", "lme_prepared_snapshot_sha256", "lme_prepared_snapshot_after_sha256", "lme_prepared_snapshot_unchanged"):
+        summary["backend_provenance"][field] = report["meta"][field]
     summary["cost_reporting"] = {
         "backend_estimate_valid": report.get("meta", {}).get("lme_cost_estimate_valid") == "true",
         "backend_estimate_invalid_reason": report.get("meta", {}).get("lme_cost_estimate_invalid_reason"),

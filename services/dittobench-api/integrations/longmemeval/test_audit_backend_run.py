@@ -107,7 +107,10 @@ class BackendAuditTests(unittest.TestCase):
     def test_complete_source_provenance_is_required(self):
         report = {"run_id": "frozen-run", "git_sha": "a" * 40, "prompt_sha": "b" * 64,
                   "tools_sha": "c" * 64, "weights_sha": "learned:" + "d" * 64,
-                  "started_at": "2026-09-12T12:00:00Z", "finished_at": "2026-09-12T13:00:00Z"}
+                  "started_at": "2026-09-12T12:00:00Z", "finished_at": "2026-09-12T13:00:00Z",
+                  "meta": {"lme_manifest_sha256": "e" * 64, "lme_cases_sha256": "f" * 64,
+                           "lme_prepared_snapshot_sha256": "1" * 64, "lme_prepared_snapshot_after_sha256": "1" * 64,
+                           "lme_prepared_snapshot_unchanged": "true"}}
         validate_provenance(report)
         for field in report:
             bad = dict(report)
@@ -119,6 +122,13 @@ class BackendAuditTests(unittest.TestCase):
                 validate_provenance(dict(report, **{field: bad_value}))
         with self.assertRaisesRegex(AuditError, "checkpoint"):
             validate_provenance({})
+        for field, value in (("lme_prepared_snapshot_unchanged", "false"),
+                             ("lme_prepared_snapshot_after_sha256", "2" * 64),
+                             ("lme_prepared_snapshot_error", "timeout")):
+            bad = copy.deepcopy(report)
+            bad["meta"][field] = value
+            with self.assertRaisesRegex(AuditError, "prepared fixture"):
+                validate_provenance(bad)
 
     def test_report_cannot_replace_qa_with_composite(self):
         report, rows, dataset, condition = fixture()
@@ -142,7 +152,7 @@ class BackendAuditTests(unittest.TestCase):
         left = {"weights_sha": "learned:" + "a" * 64, "prompt_sha": "b" * 64, "judge_model": "judge",
                 "git_sha": "c" * 40, "tools_sha": "d" * 64,
                 "meta": {"lme_dataset_sha256": DATASET_SHA256, "lme_manifest_sha256": "e" * 64,
-                         "lme_fixture_snapshot_sha256": "f" * 64}}
+                         "lme_cases_sha256": "3" * 64, "lme_prepared_snapshot_sha256": "f" * 64}}
         right = copy.deepcopy(left)
         right.update(git_sha="1" * 40, tools_sha="2" * 64, weights_sha="a" * 64)
         self.assertTrue(validate_paired_provenance(left, right)["fixture_snapshot_verified"])
@@ -160,7 +170,7 @@ class BackendAuditTests(unittest.TestCase):
         report = {"weights_sha": "a" * 64, "prompt_sha": "b" * 64, "judge_model": "judge"}
         result = validate_paired_provenance(report, report)
         self.assertFalse(result["fixture_snapshot_verified"])
-        self.assertIn("lme_fixture_snapshot_sha256", result["unavailable_provenance_fields"])
+        self.assertIn("lme_prepared_snapshot_sha256", result["unavailable_provenance_fields"])
 
     def test_report_and_checkpoint_loading_and_truncated_rejection(self):
         with tempfile.TemporaryDirectory() as temp:

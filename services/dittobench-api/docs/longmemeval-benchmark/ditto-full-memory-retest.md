@@ -39,9 +39,12 @@ Two graph concepts must not be conflated:
 | Full-memory Luna baseline | GPT-5.6 Luna, medium | Complete seed plus production dreaming barrier | Off |
 | Opt-in graph variant | Same Luna settings | Same completed fixture snapshot | On, bounded opt-in |
 
-Keep the baseline running against its frozen source revision while implementing
-the graph variant in a different checkout. The variant must not change the
-baseline database or run in-memory code. Freeze each source revision, prompt,
+Implement the graph variant in a separate checkout while fixture preparation
+runs. No full 500-question scoring run had started when the model-visible ID
+leakage below was discovered. The final planned comparison uses the same
+reviewed compiled source with the graph flag off/on, after opaque-ID repair
+and audit. The variant must not change the frozen preparation database or
+mutate a running process's source. Freeze each source revision, prompt,
 tool catalog, learned-weight binary, dataset, fixture, knobs, and judge before
 that condition starts. Record graph bounds and candidate counts in the private
 backend evidence. A baseline/variant paired comparison can isolate the intended
@@ -91,6 +94,34 @@ private database identifiers, paths, case IDs, or content. This verifies only
 the input fixture. Fresh dreaming was still the next preparation gate when
 this input evidence was recorded; this artifact does **not** establish
 completed subject generation, refinement, graph construction, QA, or a score.
+
+### Additional blinding defect: model-visible IDs carried labels
+
+A subsequent inspection found that legacy `firestore_pair_id` values exposed
+evaluation annotations: 5,479 pairs had answer-tagged session names, and 7,630
+rows belonged to abstention-tagged fixture users. Pair identifiers contained
+question IDs, including the `_abs` suffix, and some session IDs contained
+`answer_`. Even if raw conversation text is correct, handing those identifiers
+to the reader can reveal which memories are labeled as evidence or which
+questions are abstention cases.
+
+Consequently, the historical 89.6% result and both one-question Luna smoke
+artifacts are not clean, blinded accuracy evidence. Preserve them unchanged as
+historical/integration artifacts; do not aggregate or compare their verdicts
+as proof of memory quality. The earlier strict input-fidelity audit remains
+valid within its exact role/text/order/date scope, but did not test this
+model-visible identifier leakage. Its manifest hash describes the pre-blinding
+fixture and must not be reused to attest the repaired namespace.
+
+Before any full scoring, deterministically replace model-visible IDs with
+opaque identifiers, retain the private mapping for provenance, and independently
+audit the new manifest/database. The rewrite must preserve conversation text,
+internal row UUIDs, embeddings, timestamps, and subject/graph relationships;
+it is not a new semantic seed or an opportunity to tune retrieval. The strict
+reader preflight must verify the agreed opaque-ID format before calling a
+provider. Record its actual version and audit status once implemented, not a
+guessed field or an assumed pass. Dreaming completion and opaque-ID/input
+verification are separate gates, both required before the new measurement.
 
 ## Dataset, isolation, and the preparation barrier
 
@@ -241,7 +272,10 @@ python3 audit_backend_run.py \
 ```
 
 The CLI requires a final JSON report with a full source commit and actual
-SHA-256 prompt/tool/learned-weight digests. Its loading utility understands
+SHA-256 prompt/tool/learned-weight digests. It also requires standalone manifest
+and selected-case digests, a prepared-fixture snapshot captured before/after
+answering, identical before/after fingerprints, and an explicit unchanged
+attestation with no snapshot error. Its loading utility understands
 JSONL checkpoints for diagnostics, but a checkpoint alone cannot attest source
 provenance and is rejected for a publishable audit. The auditor
 rejects incomplete/duplicate/unexpected IDs, unknown/failed judgments, changed
@@ -256,13 +290,16 @@ To compare opposite graph conditions under otherwise identical checked reader,
 judge, reasoning, and date settings, add `--paired-run /private/other.json`.
 The requested run is the left side and paired run the right side. The auditor
 also requires equal learned-weight and system-prompt hashes. Source and tool
-hashes may legitimately differ for the graph implementation. Standalone dataset,
-seed-manifest, and prepared-fixture snapshot digests are compared when recorded;
-a mismatch or one-sided digest fails closed. Missing digests are explicitly
-listed as unavailable, not treated as matching. The combined condition digest
+hashes may legitimately differ for the graph implementation. Seed-manifest,
+selected-case and prepared-fixture snapshot digests must match; a mismatch or
+one-sided digest fails closed. An additional raw-dataset digest is compared
+when recorded; if absent it is explicitly unavailable, not treated as matching
+(the local pinned dataset and exact recorded questions are checked separately).
+The combined condition digest
 is not compared across runs because it includes their different source commits.
-Graph parameters and absent fixture-snapshot evidence still need manual review;
-matching question IDs, accuracy, paths, or flags do not prove identical memories.
+Graph parameters still need manual review. Snapshot hash equality attests the
+recorded fingerprint scope, not a broader deployment identity; matching question
+IDs, accuracy, paths, or flags alone does not prove identical memories.
 
 Only the aggregate audit is safe to publish after review: it includes hashes,
 per-type QA counts, empty-answer count, Wilson intervals, aggregate tool usage,
