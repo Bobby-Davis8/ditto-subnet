@@ -162,6 +162,62 @@ audit script.
 
 ## Reproduce the offline audit
 
+### Fresh-checkout input prerequisites
+
+The audit below operates on completed evidence; it does not seed a database.
+Likewise, backend `longmemeval-hydrate` repairs an existing isolated fixture,
+not an empty database: it requires a 500-case source manifest and existing
+users/pairs. A local database name or a `SOURCE/seed_manifest.json` placeholder
+is not a reproducible source location. The existing bootstrap inputs are:
+
+| Input | Immutable source |
+| --- | --- |
+| Public cleaned dataset | [Hugging Face file at pinned revision](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_s_cleaned.json), digest above |
+| Private pre-embedded histories | `ditto-assistant/ditto-backend-ops-log` at `667552e2386b9e647f1f5e3d12b77ffe9e9a99ca`, directory `longmemeval-full/` |
+| Shard manifest | `longmemeval-full/manifest.json`, SHA-256 `c5323906cab920dbc4d32d32db6c34c2f4b7910794847c8f4cf928bda5933edf`; 11 shards, 99,053 source pairs, Vertex `text-embedding-005` |
+| Existing isolated-fixture builder | `ditto-assistant/heyditto-stack` at `b5b8cf3cd9da00efbcbb6a0c0027428d44e8ee6d`, `.agents/skills/longmemeval-bench/scripts/build_lme_s_fixture.py`, SHA-256 `1371edb4acd00593b7decce27de22ada1335e171e2bb471e136d097c822c3109` |
+
+The two private repositories require authorized access. The builder verifies
+every compressed shard against its manifest before producing `users.tsv`,
+`memory_pairs.tsv`, `seed_manifest.json`, and `stats.json`. No copy of the old
+operator's Docker volume is required if these pinned repositories are available.
+The builder intentionally reconstructs the historical incomplete 122,416-pair
+starting point; its output is **not** the corrected 124,366-pair final fixture.
+
+The complete bootstrap sequence is: check out the pinned inputs; download and
+verify the dataset; create a fresh task-specific, loopback-only pgvector
+database; initialize `vector`, `uuid-ossp`, and `pgcrypto` extensions; run the
+selected backend revision's Postgres migrations; run the pinned builder; import
+its users and memory pairs; then execute hydration, the exact-date/turn audit,
+audit-authorized repair, and the final strict audit before dreaming. The builder
+emits all 500 isolated users. Import its users first, then use these columns for
+the TSV COPY (Postgres text format):
+
+```sql
+-- Execute only against the newly created isolated benchmark database.
+\copy users (uid, balance, first_name, plan_tier) FROM 'BOOTSTRAP/users.tsv' WITH (FORMAT text)
+\copy memory_pairs (firestore_pair_id, user_id, kg_id, prompt, response, conversation_embedding, session_id, source, timestamp) FROM 'BOOTSTRAP/memory_pairs.tsv' WITH (FORMAT text)
+```
+
+`go run ./cmd/dbmgr -env local migrate` is the current backend migration
+entrypoint; explicitly supply the isolated loopback `SUPABASE_DB_URL` and do
+not use a shared local reset. Backend env files and working Application Default
+Credentials are required for Secret Manager and newly recovered Vertex
+embeddings. The reader's local OpenRouter key alone does not satisfy those
+embedding/bootstrap dependencies. Use a data root containing
+`longmemeval/longmemeval_s_cleaned.json` for the final QA command, rather than
+pointing it at the file itself or the historical oracle dataset.
+
+This is a source-reviewed reconstruction recipe, not a claim that a second
+from-zero bootstrap was executed during the current retest. The measured task
+restored the preserved historical database and then repaired it. Retain the
+full source revision, migration state, exact input hashes, and final fixture
+audit to distinguish those routes. The builder stamps a new `created_at`, and
+new embeddings/dreaming invoke hosted models: a rerun can reproduce the method
+without producing byte-identical manifest hashes or generated summaries.
+
+### Audit completed reader evidence
+
 From `services/dittobench-api/integrations/longmemeval`:
 
 ```bash
