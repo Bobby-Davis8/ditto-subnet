@@ -11,6 +11,63 @@ The backend preparation and baseline implementation is tracked in
 [backend PR #2679](https://github.com/ditto-assistant/backend/pull/2679).
 PR publication does not mean the retest is complete, merged, or deployed.
 
+## Resource-pause handoff
+
+The campaign is paused for a resource decision; no full 500-question reader
+run or new score exists. The [immutable pause receipt](results/2026-09-12-ditto-resource-pause-221310.json)
+records the exact 169-user native-resume cohort and preserved progress.
+
+At `22:12:45Z` and `22:13:10Z` on September 12, available disk was 2,167,376
+and 2,118,236 KiB, both below the 5 GiB stop guard. The task-owned native
+process PID 3237 was identified by its exact command and gracefully signaled
+with SIGTERM; it drained cancellation records and exited 1. No unrelated
+process was stopped, and no cache, fixture, or workspace was deleted.
+Headroom subsequently rebounded to 8,322,832 KiB, then an independent reading
+near `22:15:11Z` found 6,774,492 KiB. These are point-in-time measurements:
+unstable headroom triggered the pause, not a claim the machine still has only
+2 GiB free. Remeasure before acting.
+
+The preserved database contains 124,366 pairs, with 83,987 generation and
+82,213 storage watermarks set. The interrupted native journal has 105 closed
+rows: 97 non-canceled completed attempts (58 strict successes) and 8 canceled
+attempts. The remaining native cohort is those 8 canceled scopes plus 161
+unattempted users. Completed attempts are not automatically full preparation
+successes. Separate settle waves completed 27 and 10 closed users without
+receipt exceptions. Canceled in-flight provider calls may have spent tokens
+without persisting results; no zero-lost-work claim is made.
+
+No auto-resume or automation is scheduled. Shared Go build-cache deletion is
+not authorized by the task or this handoff; explicit user direction is required
+before any proposed cleanup. After resource approval and sustained headroom,
+use the [committed portable resume guard](../../integrations/longmemeval/resume_backend_campaign.py)
+with the preserved backend and frozen backend-graph paths:
+
+```sh
+python3 integrations/longmemeval/resume_backend_campaign.py \
+  --base /private/task/backend --graph /private/task/backend-graph \
+  --adc /private/working-adc.json --dry-run
+```
+
+Only after explicit operator approval may `--execute` replace `--dry-run`.
+The guard requires the exact frozen source/binary, manifest and configuration
+digests, the pinned 169-user cohort, a fresh output path, and three fresh
+readings of at least 8 GiB over 60 seconds. It uses explicit checks that remain
+active under `python -O`, never clears caches, and defaults to no inference.
+The original private wrapper is preserved under SHA-256
+`c0c8bf1a746361c26258f3f8d840bdfd88a349974a8a32c65464ae9fa122ae69`;
+the portable counterpart removes hard-coded personal paths and strengthens
+cohort/guard validation. Its actual preserved-workspace dry run passed.
+
+Remaining phases are native resume from watermarks, remaining settle work,
+final graph/label barriers, opaque-ID rewrite plus independent full fixture
+audit, frozen prepared-snapshot verification, both 500-question reader arms
+using the same `1b575560` executable/source, and independent result auditing.
+Retain the latest receipt-bound manifest (SHA-256
+`a20eec7a9d772e153403b279faa919e0e24b9ea57fa2f9dc1ab2d6d0636f3095`)
+as the resume input. Keep all fixture containers/volumes, immutable audits,
+logs, binaries and prior attempts. PRs remain separate from merge/deployment
+authorization, and the pause receipt is not benchmark evidence.
+
 ## Why retest
 
 The historical isolated-user measurement reported 448/500 (89.6%) with Gemini
