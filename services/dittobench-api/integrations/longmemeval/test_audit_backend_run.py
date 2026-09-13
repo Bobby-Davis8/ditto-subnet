@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, load_run, validate_paired_provenance, validate_provenance, validate_refinement_completion, wilson
+from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, load_run, operational_diagnostics, validate_paired_provenance, validate_provenance, validate_refinement_completion, wilson
 
 
 def fixture():
@@ -31,6 +31,50 @@ def fixture():
 
 
 class BackendAuditTests(unittest.TestCase):
+    def test_graph_fallback_candidates_and_neighbor_traces_are_separate(self):
+        report, rows, _, _ = fixture()
+        report["meta"].update(lme_subject_graph_calls="10", lme_subject_graph_failures="8",
+                              lme_subject_graph_candidates="14", lme_subject_graph_total_ms="16000")
+        rows[0]["data"].update(graph_seed_pair_ids=["private-id"], tool_trace=[{
+            "name": "explore_subject_neighbors", "arguments": {"truncated": False}, "result": {"truncated": True}}])
+        rows[1]["data"].update(graph_seed_pair_ids=[], tool_trace=[])
+        result = operational_diagnostics(report, rows)
+        graph = result["graph_utilization"]
+        self.assertEqual(graph["discovery_failure_fallback_rate"], 0.8)
+        self.assertEqual(graph["discovered_candidate_occurrences_not_unique"], 14)
+        self.assertEqual(graph["cases_with_graph_seed_ids"], 1)
+        self.assertEqual(graph["graph_seed_recorded_cases"], 2)
+        self.assertEqual(graph["neighbor_tool_trace_calls"], 1)
+        self.assertEqual(graph["neighbor_tool_traces_with_truncated_text"], 1)
+        self.assertNotIn("private-id", json.dumps(result))
+        report["meta"]["lme_subject_graph_failures"] = "11"
+        with self.assertRaisesRegex(AuditError, "failures exceed"):
+            operational_diagnostics(report, rows)
+
+    def test_missing_graph_counters_are_unavailable_not_zero(self):
+        report, rows, _, _ = fixture()
+        graph = operational_diagnostics(report, rows)["graph_utilization"]
+        self.assertFalse(graph["discovery_counters_available"])
+        self.assertIsNone(graph["discovery_failure_fallback_rate"])
+        self.assertEqual(graph["graph_seed_recorded_cases"], 0)
+        report["meta"]["lme_subject_graph_calls"] = "0"
+        with self.assertRaisesRegex(AuditError, "partial"):
+            operational_diagnostics(report, rows)
+
+    def test_latency_uses_every_case_not_resumed_suite(self):
+        report, rows, _, _ = fixture()
+        report["suites"]["standard"] = {"incorrect_resumed_sample": 99999}
+        for value, row in zip([10, 30], rows):
+            row["data"].update(latency_ms=value, prompt_tokens=value * 2, output_tokens=value * 3)
+        result = operational_diagnostics(report, rows)["successful_per_case_metrics"]
+        self.assertEqual(result["latency_ms"]["mean"], 20)
+        self.assertEqual(result["latency_ms"]["p95_nearest_rank"], 30)
+        self.assertEqual(result["prompt_tokens"]["sum"], 80)
+        del rows[1]["data"]["latency_ms"]
+        partial = operational_diagnostics(report, rows)["successful_per_case_metrics"]["latency_ms"]
+        self.assertFalse(partial["complete_case_coverage"])
+        self.assertNotIn("mean", partial)
+
     def test_complete_score_and_empty_answer_count(self):
         summary, indexed = audit_rows(*fixture())
         self.assertEqual(summary["overall"]["correct"], 1)

@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import re
+import statistics
 import sys
 
 from longmemeval_adapter import iter_json_array, normalize_timestamp
@@ -127,6 +128,60 @@ def aggregate(rows):
             "empty_answers": sum(not row.get("hypothesis", "").strip() for row in rows)}
 
 
+def operational_diagnostics(report, rows):
+    """Count observed graph use separately from its flag and grade outcomes."""
+    meta = report.get("meta", {})
+    counters = {}
+    names = ("calls", "failures", "candidates", "total_ms")
+    available = ["lme_subject_graph_" + name in meta for name in names]
+    require(not any(available) or all(available), "partial graph discovery counters")
+    if all(available):
+        for name in names:
+            value = meta["lme_subject_graph_" + name]
+            require(isinstance(value, str) and re.fullmatch(r"\d+", value), "invalid graph discovery counter")
+            counters[name] = int(value)
+        require(counters["failures"] <= counters["calls"], "graph failures exceed calls")
+    graph = {"discovery_counters_available": all(available),
+             "discovery_calls": counters.get("calls"),
+             "discovery_failures": counters.get("failures"),
+             "discovery_failure_fallback_rate": counters["failures"] / counters["calls"] if counters.get("calls") else None,
+             "discovered_candidate_occurrences_not_unique": counters.get("candidates"),
+             "discovery_total_ms": counters.get("total_ms"),
+             "graph_seed_recorded_cases": 0, "cases_with_graph_seed_ids": 0,
+             "graph_seed_id_occurrences": 0, "tool_trace_recorded_cases": 0,
+             "neighbor_tool_trace_calls": 0, "cases_with_neighbor_tool_traces": 0,
+             "neighbor_tool_traces_with_truncated_text": 0,
+             "scope": "Discovery counters cover this invocation only, including seed-context preparation; not necessarily all resumed reader attempts. Candidate counts are occurrences, not globally unique IDs. Explicit neighbor-tool traces are separate and are not included in discovery counters. Graph seed IDs may also be found by stock retrieval, not graph-only additions. Enabled does not mean effective graph coverage."}
+    metrics = {}
+    for row in rows:
+        data = row["data"]
+        if "graph_seed_pair_ids" in data:
+            ids = data["graph_seed_pair_ids"] or []
+            require(isinstance(ids, list) and all(isinstance(i, str) and i for i in ids), "invalid graph seed IDs")
+            graph["graph_seed_recorded_cases"] += 1
+            graph["cases_with_graph_seed_ids"] += bool(ids)
+            graph["graph_seed_id_occurrences"] += len(ids)
+        if "tool_trace" in data:
+            traces = data["tool_trace"] or []
+            require(isinstance(traces, list) and all(isinstance(t, dict) for t in traces), "invalid tool trace records")
+            graph["tool_trace_recorded_cases"] += 1
+            neighbors = [t for t in traces if t.get("name") == "explore_subject_neighbors"]
+            graph["neighbor_tool_trace_calls"] += len(neighbors)
+            graph["cases_with_neighbor_tool_traces"] += bool(neighbors)
+            graph["neighbor_tool_traces_with_truncated_text"] += sum(
+                any(isinstance(t.get(part), dict) and t[part].get("truncated") is True
+                    for part in ("arguments", "result")) for t in neighbors)
+    for field in ("latency_ms", "prompt_tokens", "output_tokens"):
+        values = [row["data"][field] for row in rows if field in row["data"]]
+        require(all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in values), "invalid per-case latency/token metric")
+        metrics[field] = {"recorded_cases": len(values), "complete_case_coverage": len(values) == len(rows)}
+        if values and len(values) == len(rows):
+            metrics[field].update(sum=sum(values), mean=statistics.mean(values), median=statistics.median(values),
+                                  p95_nearest_rank=sorted(values)[math.ceil(0.95 * len(values)) - 1])
+    return {"graph_utilization": graph, "successful_per_case_metrics": metrics,
+            "metric_scope": "Recomputed from all recorded selected per-case observations, never resumed Standard/Speed aggregates. Excludes failed attempts, separate judge/preparation calls and seed-context re-preparation; sums are not campaign wall time or monetary spend."}
+
+
 def audit_rows(report, rows, dataset, condition):
     require(isinstance(rows, list), "per_case must be an array")
     require(len(rows) == len(dataset), "incomplete or overfull evidence: row count differs from dataset")
@@ -196,6 +251,7 @@ def audit_rows(report, rows, dataset, condition):
                                     for category in sorted({r["category"] for r in rows})},
                "answer_provider_turns": dict(providers), "tool_call_counts": dict(sorted(tool_calls.items())),
                "isolated_fixture_users": len(fixture_users), "unique_answer_provider_response_ids": len(response_ids)}
+    summary["operational_diagnostics"] = operational_diagnostics(report, rows)
     return summary, indexed
 
 
@@ -292,6 +348,7 @@ def main(argv=None):
         summary["paired_comparison"]["provenance_validation"] = pairing
         summary["paired_comparison"]["right_evidence_sha256"] = digest(args.paired_run)
         summary["paired_comparison"]["right_condition"] = other_summary["condition"]
+        summary["paired_comparison"]["right_operational_diagnostics"] = other_summary["operational_diagnostics"]
     # No output is written until every requested evidence set passes.
     with args.output.open("x") as out:
         out.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")

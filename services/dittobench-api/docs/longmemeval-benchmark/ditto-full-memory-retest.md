@@ -479,6 +479,29 @@ silently counted as a valid negative judgment. Preserve empty final answers in
 raw attempt evidence; this strict condition treats them as incomplete and
 does not certify a headline aggregate containing them. Do not choose a more
 favorable answer from private reasoning.
+
+Report effective graph use separately from the enabled flag. The independent
+auditor exports `lme_subject_graph_failures / lme_subject_graph_calls` as the
+discovery failure/fallback rate, candidate **occurrences** (not globally unique
+memories), cases with graph-discovered seed IDs, and explicit
+`explore_subject_neighbors` trace calls/cases/truncations separately. Frozen
+`pkg/services/retrieval/subject_graph.go` records those discovery counters around
+the best-effort candidate stage with a two-second maximum budget; failures fall
+back to stock candidates. Explicit neighbor-tool calls are outside these
+counters. Graph seed IDs may also have been discovered by stock retrieval, so
+they are not evidence of graph-only additions. A graph-enabled result is not
+automatically an evaluation with effective graph coverage on every case.
+
+Counters describe the final invocation, not necessarily all resumed attempts.
+Resume re-prepares seed contexts for all 500 cases before skipping already
+judged reader pairs, so retrying three answers does not mean only three total
+embedding/provider calls. Recompute latency/token summaries from all 500
+`per_case.data` observations; the resumed report's Standard/Speed block contains
+only new-invocation samples. The auditor reports full-case coverage and uses
+nearest-rank p95. These are selected successful observations, not failed-attempt
+cost, separate judging/preparation work, or total campaign wall time. Preserve
+both invocation intervals and the original slow tail separately.
+
 Checkpoint/resume must reject duplicate IDs and condition changes. Retry
 operational failures only, retaining attempt evidence; do not resample judged
 incorrect or empty native answers to improve a score.
