@@ -11,10 +11,14 @@ The backend preparation and baseline implementation is tracked in
 [backend PR #2679](https://github.com/ditto-assistant/backend/pull/2679).
 PR publication does not mean the retest is complete, merged, or deployed.
 
-## Resource-pause handoff
+## Resource pause and authorized resume
 
-The campaign is paused for a resource decision; no full 500-question reader
-run or new score exists. The [immutable pause receipt](results/2026-09-12-ditto-resource-pause-221310.json)
+The campaign paused on September 12 for a resource decision; the user explicitly
+authorized clearing the scoped Go build cache and resuming on September 13.
+The [cleanup and resume receipt](results/2026-09-13-ditto-authorized-cache-cleanup-resume.json)
+confirms that cleanup completed and native preparation actually resumed; no
+full 500-question reader run or new score is implied.
+The [immutable pause receipt](results/2026-09-12-ditto-resource-pause-221310.json)
 records the exact 169-user native-resume cohort and preserved progress.
 
 At `22:12:45Z` and `22:13:10Z` on September 12, available disk was 2,167,376
@@ -36,9 +40,10 @@ successes. Separate settle waves completed 27 and 10 closed users without
 receipt exceptions. Canceled in-flight provider calls may have spent tokens
 without persisting results; no zero-lost-work claim is made.
 
-No auto-resume or automation is scheduled. Shared Go build-cache deletion is
-not authorized by the task or this handoff; explicit user direction is required
-before any proposed cleanup. After resource approval and sustained headroom,
+No auto-resume or automation was scheduled. At the pause, shared Go build-cache
+deletion was not authorized; the subsequent explicit user approval covers the
+verified build-cache cleanup below, not unrelated cleanup. After resource
+approval and sustained headroom,
 use the [committed portable resume guard](../../integrations/longmemeval/resume_backend_campaign.py)
 with the preserved backend and frozen backend-graph paths:
 
@@ -67,6 +72,30 @@ Retain the latest receipt-bound manifest (SHA-256
 as the resume input. Keep all fixture containers/volumes, immutable audits,
 logs, binaries and prior attempts. PRs remain separate from merge/deployment
 authorization, and the pause receipt is not benchmark evidence.
+
+### September 13: scoped cleanup and actual resume
+
+The authorized operation was only `go clean -cache` with `GOCACHE` pinned to
+the active build-cache directory after directory, canonical-path and `go env`
+agreement checks. Immediately before cleanup the cache measured 17,924,968 KiB
+(about 17.1 GiB), not a historical larger estimate. Available space was already
+308,616,044 KiB at `03:29:37Z`; cleanup exited 0 at `03:29:56Z`, after which
+available space was 326,583,984 KiB and the cache directory measured 1,500 KiB.
+Only rebuildable build-cache artifacts were removed. Sources, fixtures, module
+cache, container volumes and unrelated processes were not touched.
+
+The committed resume guard then passed three fresh headroom readings over 60
+seconds: 326,579,920, 326,580,384 and 326,579,456 KiB. Native preparation entered
+at `03:32:14Z`, using the unchanged frozen `1b575560` executable/source, exact
+169-user cohort, configuration digests and receipt-bound manifest. Process
+identity and native pipeline activity were verified, and the first two closed
+audit rows both passed. Their immutable prefix hash is recorded separately
+from the still-growing full audit. No Go rebuild or fixture reset was needed.
+
+This supersedes only the earlier then-current paused status: the pause and its
+resource readings remain preserved. Resume is not completion. The remaining
+preparation/blinding/snapshot/reader/audit gates above still apply, and this
+operational receipt publishes no new accuracy or spending claim.
 
 ## Why retest
 
