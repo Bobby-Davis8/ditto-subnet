@@ -199,6 +199,7 @@ describe('Backroom MCP tools', () => {
         'get_agent_scores',
         'get_leaderboard',
         'get_miner_owner_footprint',
+        'get_miner_fee_summary',
         'get_score_history',
         'get_scored_policy_rescreen',
         'get_screened_image_rebuild',
