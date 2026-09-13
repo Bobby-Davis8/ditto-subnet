@@ -440,7 +440,7 @@ func TestV12KnownVector(t *testing.T) {
 
 func TestUnsupportedVersionRejected(t *testing.T) {
 	prof, _ := ProfileFor("small")
-	if _, err := GenerateDataset(42, prof, protocol.BenchVersionV12+1); err == nil {
+	if _, err := GenerateDataset(42, prof, protocol.BenchVersionV13+1); err == nil {
 		t.Fatal("unsupported version accepted")
 	}
 }
@@ -448,7 +448,7 @@ func TestUnsupportedVersionRejected(t *testing.T) {
 // TestSameSeedSameBytes is the core determinism guarantee: one seed, one artifact.
 func TestSameSeedSameBytes(t *testing.T) {
 	prof, _ := ProfileFor("full")
-	for _, version := range []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4, protocol.BenchVersionV5, protocol.BenchVersionV6, protocol.BenchVersionV7, protocol.BenchVersionV8, protocol.BenchVersionV9, protocol.BenchVersionV10, protocol.BenchVersionV11, protocol.BenchVersionV12} {
+	for _, version := range []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4, protocol.BenchVersionV5, protocol.BenchVersionV6, protocol.BenchVersionV7, protocol.BenchVersionV8, protocol.BenchVersionV9, protocol.BenchVersionV10, protocol.BenchVersionV11, protocol.BenchVersionV12, protocol.BenchVersionV13} {
 		artifactA, err := GenerateDataset(42, prof, version)
 		if err != nil {
 			t.Fatalf("v%d generate a: %v", version, err)

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
@@ -120,6 +121,13 @@ type Fixture struct {
 	recovery  bool   // an error-recovery case: the first content-tool call returns a transient error
 	linkDep   bool   // a dependent link chain: read_links gates the needle on pageURL
 	pageURL   string // the stable URL search_web serves for a link chain
+	// Bench v13 (BuildFixtureForVersion, toolexec/v13.go): zero for every
+	// earlier contract, so BuildFixture behavior is untouched.
+	version   int                      // bench_version the fixture serves (0 = frozen pre-v13 behavior)
+	category  string                   // the case category (result-usage detection for the coined list tools)
+	decoys    map[string]catalog.Decoy // the seed's coined decoy tools by name
+	inventory catalog.Inventory        // the seed's appearance inventory
+	coined    Coined                   // the seed's coined list/discover content
 }
 
 // jobChainMarker tags a dependent-arg result-usage category: execute_agent_job
@@ -286,6 +294,11 @@ func (f Fixture) Result(name string, args json.RawMessage) (string, bool) {
 	// bearer; every other content tool serves a plausible decoy (a wrong number),
 	// so a harness cannot fish the answer from the easiest/wrong tool.
 	serveNeedle := f.has && name == f.bearer
+	if f.version >= protocol.BenchVersionV13 {
+		if out, handled := f.resultV13(name, args, r, serveNeedle); handled {
+			return out, true
+		}
+	}
 	switch name {
 	case "search_web":
 		src := webSources[r.Intn(len(webSources))]
@@ -755,6 +768,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// on the retry, so a harness that does not recover cannot answer.
 	if fixture.recovery && contentTools[req.Name] && priorSameTool == 0 {
 		writeJSON(w, http.StatusOK, protocol.ToolExecResponse{Error: "transient upstream error (503); retry"})
+		return
+	}
+
+	// Bench v13: a decoy that is not this case's bearer is "not configured",
+	// and a setter given an unlisted/invalid value is refused without echoing
+	// any canonical spelling. Both are recorded above as ordinary calls.
+	if msg, refused := fixture.unavailable(req.Name, req.Args); refused {
+		writeJSON(w, http.StatusOK, protocol.ToolExecResponse{Error: msg})
 		return
 	}
 

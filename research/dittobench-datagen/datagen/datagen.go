@@ -1860,6 +1860,9 @@ func categoriesForVersion(benchVersion int) []category {
 			}
 		}
 	}
+	if benchVersion >= protocol.BenchVersionV13 {
+		out = v13Categories(out)
+	}
 	return out
 }
 
@@ -1891,7 +1894,17 @@ func GenerateCasesWithFillersForVersion(r *rand.Rand, seed int64, n, benchVersio
 	}
 	cats := categoriesForVersion(benchVersion)
 	var order []int
-	if benchVersion >= protocol.BenchVersionV9 {
+	if benchVersion >= protocol.BenchVersionV13 {
+		// v13: set_effort is optional (weight 2, off the floor) and the family
+		// mix stream is keyed on the v13 version so the histogram rotates.
+		weights := make([]int, len(cats))
+		optional := make([]bool, len(cats))
+		for i, c := range cats {
+			weights[i] = toolCategoryWeightV13(c.name)
+			optional[i] = v13OptionalFamilies[c.name]
+		}
+		order = sampledCategoryOrderV13(toolCategoryMixRNG(seed, benchVersion, n), n, weights, optional)
+	} else if benchVersion >= protocol.BenchVersionV9 {
 		weights := make([]int, len(cats))
 		mandatory := -1
 		for i, c := range cats {
@@ -1955,6 +1968,12 @@ func GenerateCasesWithFillersForVersion(r *rand.Rand, seed int64, n, benchVersio
 		if benchVersion >= protocol.BenchVersionV8 && cat.argKey != "" {
 			intents = v8ArgIntents[cat.name]
 			useIntent = len(intents) > 0
+		}
+		if benchVersion >= protocol.BenchVersionV13 && cat.argKey != "" {
+			if bank, ok := v13ArgIntents[cat.name]; ok {
+				intents = bank
+				useIntent = true
+			}
 		}
 		switch {
 		case useIntent:
@@ -2058,7 +2077,11 @@ func GenerateCasesWithFillersForVersion(r *rand.Rand, seed int64, n, benchVersio
 			}}
 		}
 		if benchVersion >= protocol.BenchVersionV8 {
-			applyV8CapabilityResolution(&tc, argValue, i)
+			// v13 closes set_theme's enum on the wire (catalog.ThemeEnum), so the
+			// `settings` family no longer needs a discovery call.
+			if !(benchVersion >= protocol.BenchVersionV13 && cat.name == "settings") {
+				applyV8CapabilityResolution(&tc, argValue, i)
+			}
 		}
 
 		cases = append(cases, tc)
@@ -2071,6 +2094,9 @@ func GenerateCasesWithFillersForVersion(r *rand.Rand, seed int64, n, benchVersio
 	}
 	if benchVersion >= protocol.BenchVersionV10 {
 		applyV10StateDependentActions(seed, benchVersion, cases)
+	}
+	if benchVersion >= protocol.BenchVersionV13 {
+		applyV13ToolBench(seed, cases)
 	}
 	if benchVersion >= protocol.BenchVersionV8 {
 		applyV8WritingNoise(seed, cases)

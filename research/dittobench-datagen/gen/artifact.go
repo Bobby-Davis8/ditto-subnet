@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
 	"github.com/ditto-assistant/dittobench-datagen/internal/assistantvoice"
 	v2gen "github.com/ditto-assistant/dittobench-datagen/internal/v2gen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
@@ -35,6 +36,12 @@ type DatasetArtifact struct {
 	// re-score sees identical tool results. Sorted by CaseID (no Go map) so the
 	// JSON stays byte-stable. Omitted when no tool endpoint was served.
 	ToolFixtures []FixtureDigest `json:"tool_fixtures,omitempty"`
+	// Catalog pins the per-seed tool surface a bench_version 13+ run advertises
+	// (catalog.CatalogForSeed): paraphrased descriptions, enum schemas, and the
+	// seed's coined decoy tools. It is a pure function of (seed, bench_version),
+	// but recording it makes the served surface explicit in the dispute
+	// artifact. Omitted below v13 so every earlier vector is byte-identical.
+	Catalog []protocol.ToolDefinition `json:"catalog,omitempty"`
 }
 
 // ArtifactCase is a memory case as it enters the hashed artifact: the case plus
@@ -140,7 +147,7 @@ func BuildArtifactForVersion(seed int64, benchVersion int, toolCases []protocol.
 	}
 	fixtures := make([]FixtureDigest, 0, len(toolCases))
 	for _, c := range toolCases {
-		f := toolexec.BuildFixture(seed, c)
+		f := toolexec.BuildFixtureForVersion(seed, benchVersion, c)
 		fixtures = append(fixtures, FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()})
 	}
 	sort.Slice(fixtures, func(i, j int) bool { return fixtures[i].CaseID < fixtures[j].CaseID })
@@ -152,6 +159,9 @@ func BuildArtifactForVersion(seed int64, benchVersion int, toolCases []protocol.
 		MemoryWaves:  memWaves,
 		MemoryCases:  flat,
 		ToolFixtures: fixtures,
+	}
+	if benchVersion >= protocol.BenchVersionV13 {
+		artifact.Catalog = catalog.CatalogForSeed(benchVersion, seed)
 	}
 	if benchVersion >= protocol.BenchVersionV8 {
 		artifact.ToolCases, artifact.MemoryWaves = cloneV8TranscriptSurfaces(toolCases, memWaves)

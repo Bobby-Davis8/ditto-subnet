@@ -116,6 +116,23 @@ import (
 //     seed instead of drawn from finite variant banks, and labels sample a
 //     widened superset with opaque, role-free session identifiers.
 //
+// v13 is the TOOL-BENCH release (issues #1843/#1842/#1580/#1840): the tool
+// catalog becomes a per-seed surface. Every lever is gated on
+// bench_version >= 13 so v12 and earlier regenerate byte-identically:
+//   - three to five coined decoy tools per seed whose descriptions say what
+//     they are NOT; the mock serves them as "not configured" errors except on
+//     the decoy-correct result-usage cases where the coined decoy IS the tool;
+//   - per-tool paraphrased description banks, JSON-schema enums on set_theme and
+//     set_reasoning_effort, and runtime-described option lists for the
+//     discovery-grounded setters;
+//   - the set_model/set_main_model and set_font/set_chat_font families are
+//     dropped; appearance values survive only in schema-enum cases and in
+//     discovery-grounded cases whose canonical spelling exists only in the
+//     served discover_capabilities result (per-seed font/colour inventories with
+//     one planted near-miss and a unique-nearest-option margin);
+//   - per-seed coined fixtures for the list/discover tools so their dependent
+//     cases are result-usage graded.
+//
 // The deterministic grader, run sizes, inference boundary, LongMemEval
 // deep-history floors, and the v9 signed-evidence/score-gate/curve-v3
 // efficiency stack all carry forward unchanged.
@@ -131,6 +148,7 @@ const (
 	BenchVersionV10     = 10
 	BenchVersionV11     = 11
 	BenchVersionV12     = 12
+	BenchVersionV13     = 13
 	CurrentBenchVersion = BenchVersionV8
 
 	// BenchVersion is retained as a source-compatible alias for consumers that
@@ -151,6 +169,7 @@ var (
 	datasetEpochV10 = time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)
 	datasetEpochV11 = time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 	datasetEpochV12 = time.Date(2027, 4, 1, 0, 0, 0, 0, time.UTC)
+	datasetEpochV13 = time.Date(2027, 5, 1, 0, 0, 0, 0, time.UTC)
 
 	// DatasetEpoch and DatasetEpochRFC3339 retain the v2 values for legacy
 	// package callers. Canonical versioned generation uses DatasetEpochForVersion.
@@ -165,7 +184,7 @@ func SupportedBenchVersion(version int) bool {
 		version == BenchVersionV6 || version == BenchVersionV7 ||
 		version == BenchVersionV8 || version == BenchVersionV9 ||
 		version == BenchVersionV10 || version == BenchVersionV11 ||
-		version == BenchVersionV12
+		version == BenchVersionV12 || version == BenchVersionV13
 }
 
 // DatasetEpochForVersion returns the immutable reference instant for version.
@@ -193,8 +212,10 @@ func DatasetEpochForVersion(version int) (time.Time, error) {
 		return datasetEpochV11, nil
 	case BenchVersionV12:
 		return datasetEpochV12, nil
+	case BenchVersionV13:
+		return datasetEpochV13, nil
 	default:
-		return time.Time{}, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", version)
+		return time.Time{}, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)", version)
 	}
 }
 
@@ -202,7 +223,7 @@ func DatasetEpochForVersion(version int) (time.Time, error) {
 // It is deterministic and retains the exact historical v2 mixing function.
 func RotateSeedForVersion(seed int64, version int) (int64, error) {
 	if !SupportedBenchVersion(version) {
-		return 0, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", version)
+		return 0, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)", version)
 	}
 	v := uint64(version)
 	x := uint64(seed) ^ (v * 0x9E3779B97F4A7C15)
