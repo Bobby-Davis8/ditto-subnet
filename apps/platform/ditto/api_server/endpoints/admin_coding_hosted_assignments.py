@@ -47,6 +47,10 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 AdminDep = Annotated[None, Depends(require_admin)]
 
 CODING_CONTRACT_VERSION = 2
+# The only supported capability certification lease, receipt and persistence path
+# is typed to contract v1 (coding_certification.py, coding_certifications.py), so
+# a hosted-v2 subject is gated on its current v1 capability certification.
+CERTIFICATION_CONTRACT_VERSION = 1
 
 
 def canary_schedule_sha256(
@@ -109,7 +113,7 @@ async def _plan(
         agent=agent,
         validator_hotkey=subject.validator_hotkey,
         bench_version=bench_version,
-        coding_contract_version=CODING_CONTRACT_VERSION,
+        coding_contract_version=CERTIFICATION_CONTRACT_VERSION,
         active_through=deadline,
     )
     if certification is None:
