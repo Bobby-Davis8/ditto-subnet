@@ -37,7 +37,7 @@ func main() {
 		shaOnly bool
 		version int
 	)
-	flag.IntVar(&version, "bench-version", 0, "required benchmark generation version (2 through 10)")
+	flag.IntVar(&version, "bench-version", 0, "required benchmark generation version (2 through 13)")
 	flag.Int64Var(&seed, "seed", 0, "dataset seed (omit for a fresh random seed)")
 	flag.StringVar(&runSize, "run-size", "full", "profile: small | medium | full")
 	flag.StringVar(&outPath, "out", "", "write canonical JSON here (default: stdout)")

@@ -116,6 +116,21 @@ import (
 //     seed instead of drawn from finite variant banks, and labels sample a
 //     widened superset with opaque, role-free session identifiers.
 //
+// v13 is the PUBLIC-CORPORA AND LABEL-HYGIENE release (issues #1825, #1827).
+// It keeps every v12 program semantic and gates two changes on
+// bench_version >= 13 so v12 and earlier regenerate byte-identically:
+//   - the shared world draws its vocabulary from frozen, SHA-pinned public
+//     corpora (internal/publicdata: GeoNames cities, O*NET occupations, Google
+//     Fonts families, xkcd/CSS colours, Wikidata organisation stems) instead of
+//     hand lists of 6-24 entries, so no pool below 500 entries remains except
+//     closed product enums;
+//   - every MemoryPair session id crosses /seed as an OpaqueCaseID and every
+//     timestamp comes from a seeded business-hours timeline (OpaqueTimeline), so
+//     neither field carries the generator family, story arc, or record slot.
+//
+// The remaining v13 contract (mix rebalance, surface pass, gates) lands in the
+// sibling v13 issues; the envelope is pinned only after they land.
+//
 // The deterministic grader, run sizes, inference boundary, LongMemEval
 // deep-history floors, and the v9 signed-evidence/score-gate/curve-v3
 // efficiency stack all carry forward unchanged.
@@ -131,6 +146,7 @@ const (
 	BenchVersionV10     = 10
 	BenchVersionV11     = 11
 	BenchVersionV12     = 12
+	BenchVersionV13     = 13
 	CurrentBenchVersion = BenchVersionV8
 
 	// BenchVersion is retained as a source-compatible alias for consumers that
@@ -151,6 +167,7 @@ var (
 	datasetEpochV10 = time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)
 	datasetEpochV11 = time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 	datasetEpochV12 = time.Date(2027, 4, 1, 0, 0, 0, 0, time.UTC)
+	datasetEpochV13 = time.Date(2027, 5, 1, 0, 0, 0, 0, time.UTC)
 
 	// DatasetEpoch and DatasetEpochRFC3339 retain the v2 values for legacy
 	// package callers. Canonical versioned generation uses DatasetEpochForVersion.
@@ -165,7 +182,7 @@ func SupportedBenchVersion(version int) bool {
 		version == BenchVersionV6 || version == BenchVersionV7 ||
 		version == BenchVersionV8 || version == BenchVersionV9 ||
 		version == BenchVersionV10 || version == BenchVersionV11 ||
-		version == BenchVersionV12
+		version == BenchVersionV12 || version == BenchVersionV13
 }
 
 // DatasetEpochForVersion returns the immutable reference instant for version.
@@ -193,8 +210,10 @@ func DatasetEpochForVersion(version int) (time.Time, error) {
 		return datasetEpochV11, nil
 	case BenchVersionV12:
 		return datasetEpochV12, nil
+	case BenchVersionV13:
+		return datasetEpochV13, nil
 	default:
-		return time.Time{}, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", version)
+		return time.Time{}, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)", version)
 	}
 }
 
@@ -202,7 +221,7 @@ func DatasetEpochForVersion(version int) (time.Time, error) {
 // It is deterministic and retains the exact historical v2 mixing function.
 func RotateSeedForVersion(seed int64, version int) (int64, error) {
 	if !SupportedBenchVersion(version) {
-		return 0, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", version)
+		return 0, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)", version)
 	}
 	v := uint64(version)
 	x := uint64(seed) ^ (v * 0x9E3779B97F4A7C15)
