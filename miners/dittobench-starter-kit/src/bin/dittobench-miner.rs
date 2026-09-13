@@ -509,7 +509,7 @@ fn submit() -> anyhow::Result<()> {
     // OPENROUTER_API_KEY, `*.db` is your local Turso DB and `*.db-*` its
     // WAL/SHM sidecars. The tarball is uploaded to the platform — keep them out.
     let excludes = [
-        "target", ".git", "*.tgz", "*.db", "*.db-*", ".env", ".env.*",
+        "target", ".git", ".agents", ".claude", "*.tgz", "*.db", "*.db-*", ".env", ".env.*",
     ];
     let mut cmd = std::process::Command::new("tar");
     for pat in excludes {
