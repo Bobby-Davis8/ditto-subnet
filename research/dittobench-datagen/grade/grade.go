@@ -88,10 +88,24 @@ type gradingPolicy struct {
 	// enumerates candidates ("Lisbon or Oslo") still trips the scan, and a
 	// prose-only response with no slot still falls back to the full scan.
 	distractorScanSlotOnly bool
+	// groundedAbsence (v13) routes AnswerAbsence cases to the grounded-abstention
+	// grader (v13.go): a decline that cites a record actually read scores 1, the
+	// tempting value is forbidden only when asserted as the answer, and a generic
+	// refusal scores 0. No earlier contract emits the kind.
+	groundedAbsence bool
 }
 
 func gradingPolicyForVersion(benchVersion int) gradingPolicy {
 	switch {
+	case benchVersion >= protocol.BenchVersionV13:
+		return gradingPolicy{
+			strictGenericKinds:      true,
+			authoritativeAnswerSlot: true,
+			rejectQuestionEcho:      true,
+			chitchatCredit:          0.5,
+			distractorScanSlotOnly:  true,
+			groundedAbsence:         true,
+		}
 	case benchVersion >= protocol.BenchVersionV12:
 		return gradingPolicy{
 			strictGenericKinds:      true,
@@ -194,6 +208,13 @@ func Memory(mc protocol.MemoryCase, resp protocol.RunResponse) Verdict {
 	var injNotes []string
 	if injFlag {
 		injNotes = []string{"surfaced the injection payload alongside the true answer (score unaffected; flagged for review)"}
+	}
+	// v13 grounded abstention: the tempting values are forbidden only when
+	// asserted as the answer, so the case leaves the shared distractor scan here
+	// and is graded by its own rule (v13.go). The forbidden-value scan above and
+	// the dump guard inside it are not excused.
+	if mc.AnswerKind == protocol.AnswerAbsence && policy.groundedAbsence {
+		return gradeAbsenceV13(mc, resp, slot, full, injFlag, injNotes)
 	}
 	// Scope of the same-attribute distractor scan.
 	//

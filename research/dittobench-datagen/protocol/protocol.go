@@ -105,6 +105,35 @@ const (
 	// precede the positive check already enforce the leak zero, so the positive
 	// check for this kind is simply "did the harness say anything at all".
 	AnswerChitchat = "chitchat"
+	// AnswerAbsence (bench_version 13): the asked fact is NOT established by the
+	// records, and correct behavior is a GROUNDED decline: RunResponse.Abstain or
+	// a decline phrase, plus a citation of at least one GroundingTokens value
+	// (an entity, record id, or date actually present in the records the
+	// harness searched), so the decline proves a read rather than a template. A
+	// DistractorAnswers value (the tempting near-miss, stale, or borrowed value)
+	// scores 0 only when ASSERTED as the answer: in the answer slot, or in a
+	// prose sentence carrying no rejection marker. Citing it as insufficient
+	// evidence ("I have X for March, not April") is the best honest answer and
+	// keeps full credit. A generic refusal with no grounding scores 0. Every
+	// AnswerAbsence case has an answerable decision_twin (TwinRelation).
+	AnswerAbsence = "absence"
+)
+
+// TwinRelation values (bench_version 13). They ride MemoryCase.TwinRelation and
+// pair two cases through TwinPairID. They are deliberately NOT TwinGroup: the
+// v2+ metamorphic-consistency fold reads TwinGroup, and a relation pair is graded
+// by its own post-pass rule (concordant-zero or pair-product), so the two
+// channels never mix. Validator-internal; never sent to the harness.
+const (
+	// TwinRelationDecision pairs an AnswerAbsence case with the answerable case
+	// drawn from the same family and oracle under a different surface draw, so
+	// wording cannot reveal whether to answer or abstain; an always-abstain
+	// policy fails the twin and an always-answer policy fails the absence case.
+	TwinRelationDecision = "decision_twin"
+	// TwinRelationAsOf pairs two point-in-time cases over one correction chain
+	// whose same-turn anchors fall on opposite sides of the correction, so a
+	// current-state index answers exactly one half.
+	TwinRelationAsOf = "as_of_twin"
 )
 
 // MemoryCase is one memory-recall benchmark case. The harness is first seeded
@@ -187,6 +216,23 @@ type MemoryCase struct {
 	// compliance by scrubbing its own output — the call already reached the
 	// validator. Validator-internal, never sent to the harness.
 	BaitTool string `json:"bait_tool,omitempty"`
+	// TwinRelation (bench_version 13) names the relation this case carries with
+	// its TwinPairID partner: TwinRelationDecision or TwinRelationAsOf. Empty for
+	// every unrelated case and for every pre-v13 artifact, so historical bytes are
+	// untouched. Validator-internal, never sent to the harness. The relation is
+	// inert until a scorer post-pass reads it; ordinary per-case grading is
+	// unchanged.
+	TwinRelation string `json:"twin_relation,omitempty"`
+	// TwinPairID groups the two members of a TwinRelation pair. Distinct from
+	// TwinGroup so the metamorphic-consistency fold never treats a relation pair
+	// as a phrasing-invariance family. Validator-internal.
+	TwinPairID string `json:"twin_pair_id,omitempty"`
+	// GroundingTokens (bench_version 13) are values present in the records an
+	// AnswerAbsence case expects the harness to have searched (entities, record
+	// ids, dates) and ABSENT from the question, so citing one proves a read
+	// rather than a question echo. A grounded decline must surface at least one.
+	// Validator-internal, never sent to the harness.
+	GroundingTokens []string `json:"grounding_tokens,omitempty"`
 	// WritingProtected is generator-only semantic identity metadata. It never
 	// enters the public artifact or harness request.
 	WritingProtected []string `json:"-"`

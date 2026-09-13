@@ -1277,7 +1277,7 @@ var difficultyCategoriesV7 = []category{
 // deterministic. MaxToolCalls describes the expected envelope; it is not a hard
 // cap and creative agents may legitimately exceed it.
 func applyV8WorldActions(seed int64, cases []protocol.ToolCase) {
-	applyWorldActions(seed, cases, false)
+	applyWorldActions(seed, protocol.BenchVersionV8, cases, false)
 }
 
 const (
@@ -1303,8 +1303,8 @@ const (
 // stale-context and memory-fetch programs, at least half of the run remains
 // evidence-bound or composed. The explicit legacy replacements below remain
 // authoritative retirements of obsolete product behavior.
-func applyV9WorldActions(seed int64, cases []protocol.ToolCase) {
-	applyWorldActions(seed, cases, true)
+func applyV9WorldActions(seed int64, benchVersion int, cases []protocol.ToolCase) {
+	applyWorldActions(seed, benchVersion, cases, true)
 }
 
 // applyV10StateDependentActions removes the last easy prompt-to-tool shortcut
@@ -1425,7 +1425,7 @@ func v9ComposedFamily(category string) bool {
 	return v9WorldFamily(category) || category == "stale_context_web" || category == "memory_fetch"
 }
 
-func applyWorldActions(seed int64, cases []protocol.ToolCase, preserveSemanticFloor bool) {
+func applyWorldActions(seed int64, benchVersion int, cases []protocol.ToolCase, preserveSemanticFloor bool) {
 	if len(cases) == 0 {
 		return
 	}
@@ -1441,7 +1441,13 @@ func applyWorldActions(seed int64, cases []protocol.ToolCase, preserveSemanticFl
 	} else if len(cases) >= 30 {
 		scale = 2
 	}
-	world := universe.Generate(seed, scale)
+	// Below v13 this is exactly universe.Generate. At v13 the world also carries
+	// the absence probes, and the initial seed EXCLUDES the trip corrections the
+	// memory suite stages into later /seed waves (universe.StagedCorrectionWaves);
+	// both sides derive the membership from the world alone, so the tool-side
+	// carrier and the memory waves never disagree on which records arrive when.
+	world := universe.GenerateForVersion(seed, scale, benchVersion)
+	initialPairs := world.InitialPairs(world.StagedCorrectionMembership(world.V13Allocation(0)))
 	target := (65*len(cases) + 99) / 100
 	if target >= len(cases) {
 		target = len(cases) - 1 // retain at least one plain v7-style coverage case
@@ -1505,7 +1511,7 @@ func applyWorldActions(seed int64, cases []protocol.ToolCase, preserveSemanticFl
 			tc = v8WorldAgentJob(caseID, world, converted+i)
 		}
 		if !attachedWorld {
-			tc.PrerequisitePairs = append([]protocol.MemoryPair(nil), world.Pairs...)
+			tc.PrerequisitePairs = append([]protocol.MemoryPair(nil), initialPairs...)
 			attachedWorld = true
 			worldCarrier = i
 		}
@@ -1605,7 +1611,7 @@ func applyWorldActions(seed int64, cases []protocol.ToolCase, preserveSemanticFl
 		if worldCarrier < 0 {
 			worldCarrier = 0
 		}
-		cases[worldCarrier].PrerequisitePairs = append(cases[worldCarrier].PrerequisitePairs, world.Pairs...)
+		cases[worldCarrier].PrerequisitePairs = append(cases[worldCarrier].PrerequisitePairs, initialPairs...)
 		attachedWorld = true
 	}
 	protected := world.ProtectedTerms()
@@ -2065,7 +2071,7 @@ func GenerateCasesWithFillersForVersion(r *rand.Rand, seed int64, n, benchVersio
 		fillers = append(fillers, usedFiller)
 	}
 	if benchVersion >= protocol.BenchVersionV9 {
-		applyV9WorldActions(seed, cases)
+		applyV9WorldActions(seed, benchVersion, cases)
 	} else if benchVersion >= protocol.BenchVersionV8 {
 		applyV8WorldActions(seed, cases)
 	}

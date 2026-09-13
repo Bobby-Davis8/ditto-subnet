@@ -438,9 +438,34 @@ func TestV12KnownVector(t *testing.T) {
 	}
 }
 
+// TestV13KnownVector pins the evidence-bounded release: same-turn point-in-time
+// twins (gen/pointintime.go), grounded-abstention decision pairs
+// (gen/abstention_v13.go), the appended absence-probe world records, and the
+// realism-only staged trip corrections (universe.StagedCorrectionWaves). All are
+// gated on bench_version >= 13, so every vector above is untouched; a move in
+// any v2..v12 vector means a gate leaked.
+func TestV13KnownVector(t *testing.T) {
+	const (
+		seed = int64(123456789)
+		want = "160d598a2cd0c096525d75894640b6528b951dc2bcc2ab97a9163e80e5931cb0"
+	)
+	prof, _ := ProfileForVersion("full", protocol.BenchVersionV13)
+	artifact, err := GenerateDataset(seed, prof, protocol.BenchVersionV13)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	got, _, err := artifact.SHA256Hex()
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if got != want {
+		t.Fatalf("v13 known-vector hash drift for seed %d full:\n got %s\nwant %s", seed, got, want)
+	}
+}
+
 func TestUnsupportedVersionRejected(t *testing.T) {
 	prof, _ := ProfileFor("small")
-	if _, err := GenerateDataset(42, prof, protocol.BenchVersionV12+1); err == nil {
+	if _, err := GenerateDataset(42, prof, protocol.BenchVersionV13+1); err == nil {
 		t.Fatal("unsupported version accepted")
 	}
 }

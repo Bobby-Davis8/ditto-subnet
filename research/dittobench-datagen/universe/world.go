@@ -117,6 +117,13 @@ type World struct {
 	Accent         string
 	Preferences    []Preference
 	Integrity      IntegrityFacts
+	// Version is the benchmark contract the world was generated for. It is zero
+	// for Generate (the frozen v8-v12 world) and set only by GenerateForVersion
+	// at bench_version >= 13, where it unlocks the appended absence probes and
+	// staged-correction planning.
+	Version int
+	// Probes are the v13 planted absence-probe records (nil below v13).
+	Probes *V13Probes
 }
 
 // ProtectedTerms returns semantic identity and join-key surfaces that writing

@@ -119,6 +119,23 @@ import (
 // The deterministic grader, run sizes, inference boundary, LongMemEval
 // deep-history floors, and the v9 signed-evidence/score-gate/curve-v3
 // efficiency stack all carry forward unchanged.
+//
+// v13 is the EVIDENCE-BOUNDED release. It keeps the v12 substrate and adds, all
+// gated on bench_version >= 13 so v12 and earlier regenerate byte-identically:
+//   - same-turn point-in-time corrections: the "as of <anchor>" context arrives
+//     inside the /run user_input, so a state index compiled at ingest time
+//     cannot answer it; each anchor has an as_of_twin whose anchor falls on
+//     the other side of the correction;
+//   - realism-only staged seeding: the shared world is seeded first, a bounded
+//     share of ordinary corrections arrives in later /seed waves whose 2xx is
+//     the harness's ingest acknowledgement, and dependent cases dispatch only
+//     after that ack;
+//   - grounded abstention: six absence-proof families on the shared world
+//     (pure absence, near miss, stale/removed, false premise, cross-user only,
+//     insufficient composition), each with a distributionally matched
+//     answerable decision_twin, graded by the AnswerAbsence kind (a decline
+//     that cites a record actually read; the tempting value is forbidden only
+//     when asserted as the answer).
 const (
 	BenchVersionV2      = 2
 	BenchVersionV3      = 3
@@ -131,6 +148,7 @@ const (
 	BenchVersionV10     = 10
 	BenchVersionV11     = 11
 	BenchVersionV12     = 12
+	BenchVersionV13     = 13
 	CurrentBenchVersion = BenchVersionV8
 
 	// BenchVersion is retained as a source-compatible alias for consumers that
@@ -151,6 +169,7 @@ var (
 	datasetEpochV10 = time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)
 	datasetEpochV11 = time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 	datasetEpochV12 = time.Date(2027, 4, 1, 0, 0, 0, 0, time.UTC)
+	datasetEpochV13 = time.Date(2027, 5, 1, 0, 0, 0, 0, time.UTC)
 
 	// DatasetEpoch and DatasetEpochRFC3339 retain the v2 values for legacy
 	// package callers. Canonical versioned generation uses DatasetEpochForVersion.
@@ -165,7 +184,7 @@ func SupportedBenchVersion(version int) bool {
 		version == BenchVersionV6 || version == BenchVersionV7 ||
 		version == BenchVersionV8 || version == BenchVersionV9 ||
 		version == BenchVersionV10 || version == BenchVersionV11 ||
-		version == BenchVersionV12
+		version == BenchVersionV12 || version == BenchVersionV13
 }
 
 // DatasetEpochForVersion returns the immutable reference instant for version.
@@ -193,8 +212,10 @@ func DatasetEpochForVersion(version int) (time.Time, error) {
 		return datasetEpochV11, nil
 	case BenchVersionV12:
 		return datasetEpochV12, nil
+	case BenchVersionV13:
+		return datasetEpochV13, nil
 	default:
-		return time.Time{}, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", version)
+		return time.Time{}, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)", version)
 	}
 }
 
@@ -202,7 +223,7 @@ func DatasetEpochForVersion(version int) (time.Time, error) {
 // It is deterministic and retains the exact historical v2 mixing function.
 func RotateSeedForVersion(seed int64, version int) (int64, error) {
 	if !SupportedBenchVersion(version) {
-		return 0, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", version)
+		return 0, fmt.Errorf("unsupported bench_version %d (supported: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)", version)
 	}
 	v := uint64(version)
 	x := uint64(seed) ^ (v * 0x9E3779B97F4A7C15)
