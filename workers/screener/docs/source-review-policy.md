@@ -26,6 +26,70 @@ recorded schedule plus the readiness, transition, and emission-gate conditions
 listed in the v13 document. Historical policy-v10-v12 invariant assessments keep
 their seven-decision schema; policy v13 signs the eight-decision I1-I8 schema.
 
+### Policy v14 leads (2026-09-13 top-5 board review; shipped under v13)
+
+The 2026-09-13 review rejected the whole top five (lets_623, comeτ-2 v1,
+Pentagon v1, Clear v14, unione v27). Four of the five shared one construct no
+fingerprint had named: a request-keyed classifier **wrote the tool catalog**
+offered to the deciding model — emptied it (`host_tools = if
+withhold_host_tools(...) { Vec::new() }`, `tools = [] if disable_tools`,
+`Route { mode: ReadOnly, ops: Vec::new() }`), narrowed it to one host-selected
+capability (`host_tools.retain(...)` under a cue table), or forced
+`"tool_choice": "none"` — so the graded zero-call / single-call outcome was
+decided by the host. The v13 prompt therefore requires an **I7 catalog-writer
+inventory**: every site on the served path that assigns, clears, filters, or
+omits the `tools` / `defs` / `host_tools` handed to a deciding model call (or
+sets `tool_choice`), the classifier that selects the branch, and whether the
+branch is reachable when the request supplied a non-empty catalog. One note
+per writer; the I7 decision summary states the writer count, how many are
+reachable with a non-empty request catalog, and the source of the deciding
+turn's catalog (request / filtered / empty / omitted). An I7 PASS with an
+unfinished inventory is not available — record `inconclusive`.
+
+Deterministic leads in `source_signals.py` (each a lead, never a verdict; all
+map to I7 except `draft-replacement-guard` → I3):
+
+- `catalog-writer-empty-tools` — a catalog binding set to `Vec::new()` /
+  `[]` / `set()` / `None` / `.clear()` or a `ReadOnly` route constructor within
+  twelve lines of a request classifier (`*_tool_free`, `disable_tools`,
+  `withhold_*`, `forced_read_only`, `declarative_*`, `missing_action_*`,
+  `is_recall`, a `wants_/requests_/states_` predicate, a literal
+  `.contains("` test).
+- `catalog-narrowing-retain` — `host_tools.retain(` or a filtering
+  comprehension beside a request-keyed selector (`requested_*`,
+  `approved_route`, `memory_mutation`, `Capability::`, `needs_*`). Embedding /
+  similarity / score / threshold / top_k vocabulary in-window suppresses it:
+  that is the published semantic-preloading safe harbor.
+- `tool-choice-none-literal` — `"tool_choice": "none"`, `ToolChoice::None`, or
+  a `tool_choice = None` statement.
+- `tool-schema-mutation` — `description +=` / `.description.push_str(` /
+  `properties[...]["enum" | "const"] =` / `schema.insert(` within sixteen lines
+  of a `name ==` / `.get("name") ==` / `properties.get_mut(` /
+  `capabilities.contains(` selector (baked option vocabularies, host-grounded
+  one-value enums).
+- `draft-replacement-guard` — the served text field reassigned within forty
+  lines of a content classifier over the model's draft (`dumpish`,
+  `looks_like_decline`, chained `.contains("...")` predicates, `"the search
+  returned"`).
+- `fixture-generator-ngram` (inventory key `fixture_generator_ngrams`) — a
+  file whose quoted spans match at least two hashed private generator template
+  n-grams (`ditto_screener/data/generator_ngram_corpus.json`, rebuilt by
+  `scripts/build_generator_ngram_corpus.py`; public starter-kit surfaces are
+  subtracted). Tests, docs, fixtures, and Rust `#[cfg(test)]` blocks carry
+  `admissible: false`: `_is_non_runtime_path` keeps them inadmissible as
+  citations, so the hit is a search prompt into the served path only.
+
+Known one-commit evasions (recorded so nobody mistakes a miss for evidence):
+`Vec::with_capacity(0)` or an iterator-built catalog instead of `Vec::new()`;
+`format!` / `String::from` instead of `description +=`; the decline or dump
+predicate behind a trait method; the classifier and the writer split across
+files or more than the window apart. The AST-level lead — any path that yields
+an empty tool vector while `req.tools` is non-empty — is the filed follow-up.
+Negative fixtures pinned in `tests/test_catalog_writer_leads.py`: the public
+starter kit, an embedding top-k semantic preloader, a threshold preloader, and
+a pass-through client with a conditional `tools` key all produce zero
+catalog-writer leads.
+
 ## Policy v12 (activated 2026-09-06)
 
 Policy v12 was the second scheduled activation under the bench-scaling loop. It

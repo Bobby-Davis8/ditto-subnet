@@ -41,6 +41,7 @@ from ditto_screener.source_reachability import analyze_reachability
 from ditto_screener.source_signals import (
     find_benchmark_emulation_fingerprints,
     find_decisive_malicious_source,
+    find_fixture_generator_ngram_leads,
     find_source_review_leads,
     is_executable_source_path,
     mask_comments,
@@ -520,6 +521,14 @@ _STATIC_INVARIANT_BY_KIND = {
     "worksheet-fallback-overwrite": SourceReviewInvariant.DERIVED_VALUE_AUTHORITY,
     "predetermined-tool-plan": SourceReviewInvariant.MODEL_TOOL_PLANNING,
     "forced-single-tool-turn": SourceReviewInvariant.MODEL_TOOL_PLANNING,
+    # Screener policy v14 catalog-writer, schema-mutation, and draft-replacement
+    # leads (2026-09-13 board review). Location-only; the reviewer still owns
+    # reachability and the two-location causal bar.
+    "catalog-writer-empty-tools": SourceReviewInvariant.MODEL_TOOL_PLANNING,
+    "catalog-narrowing-retain": SourceReviewInvariant.MODEL_TOOL_PLANNING,
+    "tool-choice-none-literal": SourceReviewInvariant.MODEL_TOOL_PLANNING,
+    "tool-schema-mutation": SourceReviewInvariant.MODEL_TOOL_PLANNING,
+    "draft-replacement-guard": SourceReviewInvariant.MODEL_DISSENT,
 }
 _STATIC_INVARIANT_BY_BASIS = {
     "scorer_field_manipulation": SourceReviewInvariant.MODEL_DISSENT,
@@ -1899,6 +1908,62 @@ Missing predefined evidence or incomplete mandatory verification cannot CLEAR,
 but neither proves misconduct. Final operator eligibility outcomes are CLEAR or
 REJECT with a reason and violation_proven flag; screening pass, quarantine,
 retry and review states remain processing evidence, not those final outcomes.
+
+I7 CATALOG-WRITER INVENTORY (policy v14 leads, 2026-09-13 board review). Four
+of the five top-5 rejects shared one construct: a request-keyed classifier
+wrote the tool catalog offered to the deciding model (emptied it, narrowed it
+to a host-selected subset, or forced tool_choice none) so the graded zero-call
+or single-call outcome was decided by the host, not the model. Before deciding
+I7, enumerate every catalog writer on the served path: each site that assigns,
+clears, filters, or omits the tools / defs / host_tools handed to a deciding
+model call, or sets tool_choice, together with the classifier that selects the
+branch and whether that branch is reachable when the request supplied a
+non-empty catalog. Record one note per writer (kind observation or concern,
+area tool dispatch) citing path:line, and make the I7 decision summary state
+the writer count, how many are reachable with a non-empty request catalog, and
+the source of the deciding turn's catalog (request / filtered / empty /
+omitted). An I7 PASS with an unfinished inventory is not available; use
+inconclusive. Semantic or budget preselection that keeps the applicable
+capability class on the deciding request and still executes an unlisted valid
+call is the published safe harbor; a phrase table or word set that yields zero
+tools or one host-selected tool is not.
+
+The inventory's "emulation_fingerprints" also carry the policy v14 leads. Each
+is a lead, never a verdict, and every one is dodged in one commit
+(Vec::with_capacity(0), an iterator-built catalog, format! instead of +=, a
+decline predicate behind a trait method), so absence of a hit is not evidence:
+- catalog-writer-empty-tools: a tools / defs / host_tools / *_tool_names /
+  fallback_tool binding or a Route { mode: ReadOnly, ops } constructor set to
+  Vec::new(), [], set(), None or .clear() within twelve lines of a request
+  classifier (*_tool_free, disable_tools, withhold_*, forced_read_only,
+  declarative_*, missing_action_*, is_recall, a wants_/requests_/states_
+  predicate, a literal .contains(" test). Trace whether req.tools was
+  non-empty on that path; forwarding an already-empty request catalog is the
+  honest look-alike.
+- catalog-narrowing-retain: host_tools.retain( or a filtering comprehension
+  beside a request-keyed selector (requested_*, approved_route,
+  memory_mutation, Capability::, needs_*). Embedding / similarity / score /
+  threshold / top_k vocabulary in-window suppresses the lead as the semantic
+  preloading safe harbor; confirm the retained set keeps the applicable class.
+- tool-choice-none-literal: "tool_choice": "none", ToolChoice::None, or a
+  tool_choice = None statement. Find who empties the catalog upstream.
+- tool-schema-mutation: description += / .description.push_str( /
+  properties[...]["enum" | "const"] = / schema.insert( within sixteen lines of
+  a name == / .get("name") == / properties.get_mut( / capabilities.contains(
+  selector. A baked option vocabulary or a host-grounded one-value enum in the
+  live request catalog is the I7/I4 effect; one uniform note appended to every
+  tool is not.
+- draft-replacement-guard: the served text field reassigned within forty lines
+  of a content classifier over the model's draft (dumpish, looks_like_decline,
+  a decline/dump signal list, chained .contains("...") predicates, "the search
+  returned"). A parseable first draft that never ships is the I3 breach; a
+  transport failover is the honest look-alike.
+The inventory's "fixture_generator_ngrams" list files whose quoted spans match
+at least two hashed private generator template n-grams. Those locations are
+search prompts into the served path only: a test, doc, fixture, or Rust
+#[cfg(test)] block is inadmissible as a citation (admissible: false), and a
+fixture that asserts a generator sentence is an I5 tuning lead, never a
+finding by itself.
 """
 _POLICY_TAILS[13] = _POLICY_TAILS[12] + _POLICY_V13_ADDENDUM
 
@@ -2633,6 +2698,7 @@ class TarSourceRepository:
                 :_MAX_LEAD_SCAN_FILES
             ],
             "emulation_fingerprints": find_benchmark_emulation_fingerprints(readable),
+            "fixture_generator_ngrams": find_fixture_generator_ngram_leads(readable),
             "unmatchable_category_guards": guard_report(
                 find_unmatchable_category_guards(
                     (path, mask_comments(text)) for path, text in readable

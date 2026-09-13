@@ -12,6 +12,8 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from ditto_screener import generator_ngrams
+
 _MAX_LEADS = 32
 _MAX_LEADS_PER_RULE_FILE = 4
 _WINDOW_LINES = 18
@@ -79,6 +81,11 @@ class _Fingerprint:
     scan: str = "code"
     languages: frozenset[str] = frozenset()
     min_hits: int = 1
+    # When set, two anchors that resolve to the same lines for THESE roles are
+    # one finding, so a writer beside several classifier lines surfaces once
+    # per writer site instead of consuming the per-file cap on near-duplicates.
+    # Empty keeps the historical all-roles signature.
+    dedupe_roles: tuple[str, ...] = ()
 
 
 def _words(value: str) -> re.Pattern[str]:
@@ -1600,6 +1607,257 @@ _EMULATION_FINGERPRINTS = (
         window=40,
         scan="code",
     ),
+    # Screener policy v14 leads (2026-09-13 top-5 board review: lets_623,
+    # comeτ-2 v1, Pentagon v1, Clear v14, unione v27). Four of the five
+    # rejects share one construct the older fingerprints never named: a
+    # request-keyed classifier WRITES the tool catalog offered to the deciding
+    # model (empties it, narrows it, or forces tool_choice none) so the graded
+    # zero-call / single-call outcome is decided by the host. The remaining two
+    # seams are a live tool schema mutated per tool name (baked option
+    # vocabularies, one-value enums) and a content classifier that replaces a
+    # parseable model draft. Every kind below is a lead, never a verdict, and
+    # every regex is dodged in one commit (`Vec::with_capacity(0)`, an
+    # iterator-built catalog, `format!` instead of `+=`, a decline predicate
+    # behind a trait method); the requirement is only that each fires at the
+    # decisive line of the five known artifacts while the starter kit, an
+    # honest semantic preloader, and a threshold preloader stay clear. An
+    # AST-level lead for any path yielding an empty tool vector while
+    # `req.tools` is non-empty is the filed follow-up.
+    _Fingerprint(
+        # catalog-writer-empty-tools (I7, S1): the tool catalog binding
+        # (`host_tools` / `tools` / `defs` / `selected_*_tool_names` /
+        # `fallback_tool` / a `Route { ops }` constructor) is assigned an empty
+        # or absent value (`Vec::new()`, `[]`, `set()`, `None`, `.clear()`)
+        # within twelve lines of a request-keyed classifier (`*_tool_free`,
+        # `disable_tools`, `withhold_*`, `forced_read_only`, `declarative_*`,
+        # `missing_action_*`, `is_recall`, a `wants_/requests_/states_` predicate,
+        # or a literal `.contains("` test). The honest look-alike -- forwarding an
+        # already-empty request catalog -- carries no classifier role.
+        kind="catalog-writer-empty-tools",
+        severity="high",
+        roles=(
+            _Role(
+                "tool-catalog-binding",
+                re.compile(
+                    r"\b(?:host_tools|tools|defs|tool_defs|toolset|tool_names|"
+                    r"[a-z0-9_]*tool_names|[a-z0-9_]*_tools|fallback_tool|ops)\b"
+                    r"\s*[\"']?\s*(?::\s*[A-Za-z0-9_<>&\[\]:, ]+?)?\s*[=:](?!=)"
+                    r"|\b(?:host_tools|tools|defs|tool_defs|tools_by_name)"
+                    r"\.clear\(\)"
+                    r"|\bmode\s*:\s*(?:Mode::)?ReadOnly\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "empty-catalog-value",
+                re.compile(
+                    r"\bVec::new\(\)|\bvec!\[\s*\]|\bVec::with_capacity\(\s*0\s*\)"
+                    r"|(?<![\w\]\)])\[\s*\](?!\s*[A-Za-z_])"
+                    r"|\bNone\b|\bset\(\)|\bfrozenset\(\)|\.clear\(\)"
+                    r"|\bnull\b|\bnil\b|=\s*\{\s*\}"
+                    r"|\bmode\s*:\s*(?:Mode::)?ReadOnly\b",
+                ),
+            ),
+            _Role(
+                "request-keyed-classifier",
+                re.compile(
+                    r"\b[a-z0-9_]*(?:tool_free|disable_tools?|withhold|"
+                    r"forced_read_only|read_only_turn|read_only_route|"
+                    r"deterministic_read_only|no_tool_turn|declarative|"
+                    r"preference_(?:advisory|acknowledg|declaration|turn|only)|"
+                    r"chitchat|chit_chat|missing_action|"
+                    r"underspecified|action_negat|is_recall|recall_only|"
+                    r"suppress_incidental|suppress_tools)[a-z0-9_]*\b"
+                    r"|\b(?:wants|requests|states|needs|declines|asks|mentions|"
+                    r"looks_like|clearly|classify|classif)_[a-z0-9_]+\s*\("
+                    r"|\.contains\(\s*[\"']|\bmatches!\s*\(|\bfind_phrase\s*\("
+                    r"|\bword_set\b|\bphrase_table\b"
+                    r"|\bre\.(?:search|match|fullmatch|compile)\s*\("
+                    r"|\bRegex::new\s*\(",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        window=12,
+        scan="code",
+        dedupe_roles=("tool-catalog-binding", "empty-catalog-value"),
+    ),
+    _Fingerprint(
+        # catalog-narrowing-retain (I7, S10): the request catalog is filtered in
+        # place (`host_tools.retain(`, a `tools = [t for t in tools if ...]`
+        # comprehension) beside a request-keyed selector (`requested_*`,
+        # `approved_route`, `memory_mutation`, `Capability::`, `needs_*`). A
+        # semantic or budget preselection (embedding / similarity / score /
+        # threshold / top_k vocabulary in-window) is the published safe harbor
+        # and suppresses the lead.
+        kind="catalog-narrowing-retain",
+        severity="medium",
+        roles=(
+            _Role(
+                "catalog-retain-filter",
+                re.compile(
+                    r"\b(?:host_tools|tools|defs|tool_defs|toolset|catalog)"
+                    r"\.retain\("
+                    r"|\b(?:host_tools|tools|defs)\s*=\s*(?:host_tools|tools|defs)"
+                    r"\s*\.\s*(?:into_iter\(\)\s*\.)?filter\("
+                    r"|\b(?:tools|defs|tool_defs)\s*=\s*\[\s*"
+                    r"(?:t|tool|d|definition|td)\s+for\b[^\n]*\bif\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "request-keyed-selector",
+                re.compile(
+                    r"\b(?:requested|approved)_[a-z0-9_]+\b"
+                    r"|\bmemory_mutation\b|\bmemory_read_route\b"
+                    r"|\broute\.capabilities\b|\bCapability::[A-Z]"
+                    r"|\bcapabilities\.contains\("
+                    r"|\b(?:needs|wants|requests|states|asks)_[a-z0-9_]+\b"
+                    r"|\.contains\(\s*[\"']|\bmatches!\s*\(|\bproviding_for\(",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        window=10,
+        scan="code",
+        dedupe_roles=("catalog-retain-filter",),
+        suppressors=(
+            _Role(
+                "semantic-or-budget-preselection",
+                re.compile(
+                    r"\b(?:embedding|embeddings|embed|cosine|similarity|semantic|"
+                    r"score|scores|scored|threshold|top_k|topk|top_n|rank|ranked|"
+                    r"token_budget|context_budget)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+    ),
+    _Fingerprint(
+        # tool-choice-none-literal (I7, S1): a completion request that forbids
+        # tool calls outright (`"tool_choice": "none"`, `ToolChoice::None`,
+        # `tool_choice = None` as a statement). An honest harness that passes
+        # the request catalog through has no reason to disable calling; a
+        # parameter default (`tool_choice=None,`) does not match.
+        kind="tool-choice-none-literal",
+        severity="medium",
+        roles=(
+            _Role(
+                "tool-choice-none",
+                re.compile(
+                    r"[\"']tool_choice[\"']\s*:\s*[\"']none[\"']"
+                    r"|\btool_choice\s*[:=]\s*[\"']none[\"']"
+                    r"|\btool_choice\s*[:=]\s*None\b(?!\s*[,)])"
+                    r"|\b(?:Rig)?ToolChoice::None\b",
+                ),
+            ),
+        ),
+        scan="code",
+    ),
+    _Fingerprint(
+        # tool-schema-mutation (I7/I4, S3): a live tool definition is rewritten
+        # per tool name -- `description +=` / `.description.push_str(` /
+        # `properties[...]["enum" | "const"] =` / `schema.insert(` within
+        # sixteen lines of a `name ==` / `.get("name") ==` / `properties.get_mut(`
+        # / `capabilities.contains(&Capability::` selector. Baked option
+        # vocabularies ("canonical examples include ...") and one-value enums
+        # injected into the request catalog are the served effect. Appending
+        # one uniform note to every tool carries no name selector.
+        kind="tool-schema-mutation",
+        severity="high",
+        roles=(
+            _Role(
+                "live-schema-writer",
+                re.compile(
+                    r"\bdescription\s*\+=|\.description\s*\+=|"
+                    r"\bdescription\.push_str\(|\.description\.push_str\("
+                    r"|\.description\s*=(?!=)"
+                    r"|\[[\"']description[\"']\]\s*(?:\+=|=(?!=))"
+                    r"|\[[\"'](?:enum|const)[\"']\]\s*=(?!=)"
+                    r"|\.insert\(\s*[\"'](?:enum|const|description)[\"']"
+                    r"|\bschema\.insert\(|\bproperty\.insert\(|\bproperties\.insert\("
+                    r"|\.setdefault\(\s*[\"'](?:enum|const)[\"']"
+                    r"|\bappend_runtime_definition_guidance\b"
+                    r"|\b_definition_with_authoring_guidance\b"
+                    r"|\.with_description\(",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "tool-name-selector",
+                re.compile(
+                    r"\bname\s*==\s*[\"']|\.name\s*==|\[[\"']name[\"']\]\s*=="
+                    r"|\.get\([\"']name[\"']\)\s*==|\bmatch\s+[\w.]*name\b"
+                    r"|\bname\.as_str\(\)\s*==|\bcapabilities\.contains\(&Capability::"
+                    r"|\bproperties\.get_mut\(|\bproperties\.get\("
+                    r"|\bproperties\[[\"'\w]|\bdef(?:inition)?\.name\b"
+                    r"|\bfor\s+(?:field|name|prop|key)\s+in\s+\["
+                    r"|\bcase\s+[\"'][a-z_]+[\"']",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        window=16,
+        scan="code",
+        dedupe_roles=("live-schema-writer",),
+    ),
+    _Fingerprint(
+        # draft-replacement-guard (I3, S6): the served text field is reassigned
+        # (`result.text = chunk.text.clone()`, `final_text = revised`) within
+        # forty lines of a content classifier over the model's draft (`dumpish`,
+        # `looks_like_decline`, a decline/dump signal list, chained
+        # `.contains("...") || .contains("...")` predicates, `"the search
+        # returned"`). A transport failover that lets a model still author the
+        # text carries no content predicate.
+        kind="draft-replacement-guard",
+        severity="medium",
+        roles=(
+            _Role(
+                "served-text-reassignment",
+                re.compile(
+                    r"\b(?:result|response|resp|turn|reply|output|draft|final)"
+                    r"\.(?:text|content|final_text|answer|message)\s*=(?!=)\s*"
+                    r"(?![\"']\s*[\"']|String::new\(\)|None\b|\[\s*\])"
+                    r"|\bfinal_text\s*=(?!=)\s*(?![\"']\s*[\"']|None\b)"
+                    r"|\[[\"'](?:final_text|answer|text)[\"']\]\s*=(?!=)"
+                    r"|\b(?:answer|final_answer)\s*=\s*(?:chunk|review|second|"
+                    r"retry|revised|repaired|cleaned|replacement)[a-z0-9_.]*",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "draft-content-classifier",
+                re.compile(
+                    r"\bdumpish\b|\blooks_like_(?:decline|dump|refusal|dissent)\b"
+                    r"|\bis_(?:dump|refusal|decline|dumpish)[a-z0-9_]*\s*\("
+                    r"|\b(?:decline|refusal|dump)_(?:signals|markers|phrases|"
+                    r"patterns|words)\b"
+                    r"|\b(?:DECLINE|REFUSAL|DUMP)_(?:SIGNALS|MARKERS|PHRASES|"
+                    r"PATTERNS|WORDS)\b"
+                    r"|\b_keep_better\b"
+                    r"|\.contains\(\s*[\"'](?:```|the search returned|"
+                    r"following memories|\*\*p-|<\|)"
+                    r"|\.matches\(\s*[\"']preview[\"']\)"
+                    r"|\.contains\([^\n]{1,40}\)\s*(?:\|\||or)\s*!?[a-z_.]*"
+                    r"\.contains\(",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        window=40,
+        scan="code",
+        dedupe_roles=("served-text-reassignment",),
+    ),
+)
+
+# Fingerprint kinds introduced by the screener policy v14 leads. The I7 decision
+# record must inventory every hit of the catalog-writer kinds on the served path.
+CATALOG_WRITER_FINGERPRINT_KINDS = frozenset(
+    {
+        "catalog-writer-empty-tools",
+        "catalog-narrowing-retain",
+        "tool-choice-none-literal",
+    }
 )
 
 
@@ -1866,7 +2124,11 @@ def _cooccurrence_fingerprint(
         else:
             if any(abs(hit - anchor) <= fingerprint.window for hit in suppressor_hits):
                 continue
-            normalized = tuple(signature)
+            normalized = tuple(
+                item
+                for item in signature
+                if not fingerprint.dedupe_roles or item[0] in fingerprint.dedupe_roles
+            )
             if normalized in seen:
                 continue
             seen.add(normalized)
@@ -1892,6 +2154,108 @@ def _aggregate_fingerprint(
         for line_number in hits[: _MAX_FINGERPRINT_PER_RULE_FILE + 2]
     ]
     return [_fingerprint_finding(fingerprint, locations)]
+
+
+_MAX_NGRAM_LEAD_FILES = 8
+_MAX_NGRAM_LEAD_LOCATIONS = 6
+# Two distinct template grams in one file: a single five-word overlap with an
+# English request is plausible in any test; two distinct generator grams in
+# the same fixture file is the tuning signal.
+_MIN_NGRAM_HITS_PER_FILE = 2
+_QUOTED_SPAN = re.compile(r"\"((?:[^\"\\\n]|\\.)*)\"|'((?:[^'\\\n]|\\.)*)'")
+_RUST_CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
+# Fixture data directories are inadmissible n-gram citation sites even though
+# the executable-surface classifier (which the static preflight relies on)
+# leaves them alone.
+_FIXTURE_PATH_PARTS = frozenset({"fixtures", "fixture", "testdata", "snapshots"})
+
+
+def _is_fixture_path(path: str) -> bool:
+    parts = tuple(
+        part for part in path.casefold().removeprefix("./").split("/") if part
+    )
+    return bool(_FIXTURE_PATH_PARTS.intersection(parts[:-1]))
+
+
+def _rust_test_block_start(path: str, lines: list[str]) -> int | None:
+    """Return the 1-based line where a Rust file's trailing test module begins."""
+    if _fingerprint_language(path) != "rust":
+        return None
+    for line_number, line in enumerate(lines, 1):
+        if _RUST_CFG_TEST.match(line):
+            return line_number
+    return None
+
+
+def find_fixture_generator_ngram_leads(
+    files: Iterable[tuple[str, str]],
+) -> list[dict[str, object]]:
+    """Return location-only leads for fixtures that quote generator templates.
+
+    Every readable file is scanned -- tests, docs, and the served tree alike --
+    because Rust fixtures live inside ``src/*.rs`` ``#[cfg(test)]`` modules. A
+    file surfaces one lead when at least ``_MIN_NGRAM_HITS_PER_FILE`` distinct
+    hashed generator n-grams appear inside its quoted spans (or anywhere on a
+    non-runtime line). Each lead carries ``admissible: False`` whenever the
+    location is a non-runtime path or sits inside a Rust test block, so the
+    reviewer treats it as a search prompt into the served path and never as a
+    citation: ``_is_non_runtime_path`` keeps the fixture itself inadmissible.
+    Neither the matched text nor the hash leaves the archive.
+    """
+    corpus = generator_ngrams.load_corpus()
+    if not corpus:
+        return []
+    findings: list[dict[str, object]] = []
+    for path, text in sorted(files, key=lambda item: _path_priority(item[0])):
+        lines = text.splitlines()
+        if not lines:
+            continue
+        non_runtime = _is_non_runtime_path(path) or _is_fixture_path(path)
+        test_block_start = _rust_test_block_start(path, lines)
+        matched: set[str] = set()
+        locations: list[dict[str, object]] = []
+        for line_number, line in enumerate(lines, 1):
+            clipped = line[:4096]
+            if non_runtime:
+                spans = [clipped]
+            else:
+                spans = [
+                    span.group(1) or span.group(2) or ""
+                    for span in _QUOTED_SPAN.finditer(clipped)
+                ]
+            hits: set[str] = set()
+            for span in spans:
+                hits.update(generator_ngrams.hash_text(span) & corpus)
+            if not hits:
+                continue
+            matched.update(hits)
+            if len(locations) < _MAX_NGRAM_LEAD_LOCATIONS:
+                in_test_block = (
+                    test_block_start is not None and line_number >= test_block_start
+                )
+                locations.append(
+                    {
+                        "path": path,
+                        "line": line_number,
+                        "role": "generator-template-literal",
+                        "admissible": not (non_runtime or in_test_block),
+                    }
+                )
+        if len(matched) < _MIN_NGRAM_HITS_PER_FILE:
+            continue
+        findings.append(
+            {
+                "category": "benchmark_emulation",
+                "kind": "fixture-generator-ngram",
+                "severity": "medium",
+                "matched_grams": len(matched),
+                "admissible": any(bool(item["admissible"]) for item in locations),
+                "locations": locations,
+            }
+        )
+        if len(findings) >= _MAX_NGRAM_LEAD_FILES:
+            break
+    return findings
 
 
 def _static_role_search_text(
@@ -2206,8 +2570,10 @@ def mask_comments(text: str) -> str:
 
 
 __all__ = [
+    "CATALOG_WRITER_FINGERPRINT_KINDS",
     "find_benchmark_emulation_fingerprints",
     "find_decisive_malicious_source",
+    "find_fixture_generator_ngram_leads",
     "find_source_review_leads",
     "is_executable_source_path",
     "mask_comments",
