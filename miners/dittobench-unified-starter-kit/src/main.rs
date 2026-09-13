@@ -24,9 +24,23 @@ const SOURCE_CRATES: [&str; 3] = [
     "dittobench-starter-kit",
     "dittobench-coding-starter-kit",
 ];
-const TAR_EXCLUDES: [&str; 12] = [
-    "target", "*/target", ".git", "*/.git", "*.tgz", "*.tar", "*.db", "*.db-*", ".env", ".env.*",
-    "*/.env", "*/.env.*",
+const TAR_EXCLUDES: [&str; 16] = [
+    "target",
+    "*/target",
+    ".git",
+    "*/.git",
+    ".agents",
+    "*/.agents",
+    ".claude",
+    "*/.claude",
+    "*.tgz",
+    "*.tar",
+    "*.db",
+    "*.db-*",
+    ".env",
+    ".env.*",
+    "*/.env",
+    "*/.env.*",
 ];
 
 #[derive(Debug, Parser)]
@@ -280,6 +294,8 @@ mod tests {
     fn packaging_keeps_a_root_dockerfile_and_sibling_source_crates() {
         assert_eq!(SOURCE_CRATES[0], "dittobench-unified-starter-kit");
         assert!(TAR_EXCLUDES.contains(&"*/target"));
+        assert!(TAR_EXCLUDES.contains(&"*/.agents"));
+        assert!(TAR_EXCLUDES.contains(&"*/.claude"));
         assert!(TAR_EXCLUDES.contains(&".env.*"));
         let dockerfile = include_str!("../Dockerfile");
         for source in SOURCE_CRATES {
