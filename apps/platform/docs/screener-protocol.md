@@ -51,10 +51,19 @@ Workers carrying v13 still serve policy v10-v12 during a scheduled transition;
 their exact-version tool schemas require seven decisions for old policies and
 eight for v13. Shipping the built-in version does not activate it. The separate
 `SCREENING_ACTIVATION_CEILING_POLICY_VERSION` remains at v12, so the scheduling
-API cannot mistake fleet adoption for v13 activation readiness. Raise that
+API cannot mistake fleet adoption for v13 or v14 activation readiness. Raise that
 ceiling only after the readiness, retry/deadline, transition, opaque-component
 verification, and exact-artifact emission rules in
 `workers/screener/docs/policy-v13.md` are satisfied.
+
+Policy 14 is the v13 text plus the additive addendum in
+`workers/screener/docs/policy-v14.md` (relay ledger fields as leads, the
+semantic-preloading safe harbor, `/seed` scope, planner prose, compute-then-launder
+as I5, W10 mutation, fixtures as leads, swallowed model calls). It adds no
+invariant, so v13 and v14 share assessment schema version 2 and the same tool
+schemas. The ceiling moves from v12 directly to v14, scheduled together with
+Bench v13 and `rescreen_scored=true`, only after the co-activation gate in that
+document is satisfied; v13 is never activated standalone.
 
 ## Provider-routed screening jobs
 

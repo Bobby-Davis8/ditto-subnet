@@ -985,6 +985,38 @@ material availability effect and do not require a model/scorer effect.
 """
 _L2_POLICY_TAILS[13] = _L2_POLICY_TAILS[12] + _L2_POLICY_V13_ADDENDUM
 
+_L2_POLICY_V14_ADDENDUM = """\
+POLICY V14: apply the complete policy in docs/policy-v14.md, which is the v13
+checklist plus nine additive clauses; no invariant or proof standard changes.
+Relay ledger rows (tools_offered, catalog_present, tool_choice,
+model_emitted_tool_calls, harness_system_span_hash,
+completions_after_last_tool_result, slot_provenance, answer_in_prompt) are
+leads that open the preloading safe-harbor check before any I7, I5, or I3
+resolution; they corroborate a path:line citation and never replace it, and
+missing fields are not evidence. Narrowed catalogs pass I7 only when the
+applicable capability class is retained on the deciding request AND an
+unadvertised valid model-emitted call still executes; a request-keyed phrase
+table, word set, or one-edit typo ladder yielding an empty, singleton, or
+tool_choice-none catalog is I7.catalog_withheld_by_request_classifier, and a
+low-confidence outer router removing every plausible capability is
+I7.outer_router_suppression. Apply the four-question test to the no-tool
+branch itself. Code reached from /seed, store construction, and typed factual
+indexes is served: evidence compacted at ingest is I2 and benchmark-shaped
+kinds, signs, or recipes assigned at ingest are I5. Planner prose that fixes a
+family's interpretation, tool policy, answer content, or output structure is
+I5 even when the catalog is retained; a judge model that replaces a parseable
+draft on a content predicate rather than shape is I3. A host derivation
+laundered through a reply-exactly or single-choice completion is
+I5.compute_then_launder (also I1 when it is the only model call); fine-tuning
+on public datagen output is permitted with a W13 training-data declaration.
+Tool-definition mutation keyed on a tool name breaches W10 and is I5 for
+generator pools or I4.tool_argument_rewritten for a gating pseudo-enum. Test
+fixtures are leads only, never citations. A valid model-emitted call the host
+swallowed and replaced is I7.model_emitted_call_swallowed and, when it obtains
+a preferred answer, I3.semantic_retry_or_selection.
+"""
+_L2_POLICY_TAILS[14] = _L2_POLICY_TAILS[13] + _L2_POLICY_V14_ADDENDUM
+
 
 def _l2_review_system_prompt(policy_version: int) -> str:
     """Return the L2/L3 system prompt for one implemented policy version."""
@@ -1012,6 +1044,8 @@ def _assert_l2_policy_tails_differ() -> None:
     assert _L2_POLICY_TAILS[12].startswith(_L2_POLICY_TAILS[11])
     assert _L2_POLICY_TAILS[12] != _L2_POLICY_TAILS[13]
     assert _L2_POLICY_TAILS[13].startswith(_L2_POLICY_TAILS[12])
+    assert _L2_POLICY_TAILS[13] != _L2_POLICY_TAILS[14]
+    assert _L2_POLICY_TAILS[14].startswith(_L2_POLICY_TAILS[13])
 
 
 _VIOLATION_CAUSE_TASK = """\

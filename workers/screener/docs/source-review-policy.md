@@ -11,6 +11,23 @@ operator may reject a submission. Historical v9 findings retain their original
 wire identity and are not silently reinterpreted; v10 applies to new or
 explicitly rescreened attempts.
 
+## Policy v14 (published, co-activation with Bench v13 pending)
+
+Policy v14 is the complete policy v13 text plus the additive addendum in
+[policy-v14.md](policy-v14.md): relay ledger fields as leads that trigger the
+semantic-preloading safe-harbor check before any I7 finding, the operational
+safe harbor itself with `I7.catalog_withheld_by_request_classifier` distinct
+from `I7.outer_router_suppression`, `/seed` and store construction in scope of
+I2/I5, planner prose under I5 and judge-model draft selection under I3,
+compute-then-launder as I5 with a W13 training-data declaration permitting
+fine-tuning on public datagen output, a W10 tool-definition-mutation clause,
+test fixtures as leads never citations, swallowed model-emitted calls as I7/I3
+evidence, and the intent-routing calibration below retained unchanged. It adds
+no invariant, pass clause, or category. It is scheduled only together with
+DittoBench v13 via `rescreen_scored=true` after the co-activation gate in that
+document (top-25 dry-run rescreen with fail-open below 5%, finalizer outcomes
+reviewed) is satisfied; policy v13 is never activated standalone.
+
 ## Policy v13 (published, activation pending)
 
 Policy v13 replaces identifier-oriented review guidance with the mechanism-based

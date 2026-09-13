@@ -16,11 +16,14 @@ from pydantic import (
     model_validator,
 )
 
-SCREENING_POLICY_VERSION = 13
+SCREENING_POLICY_VERSION = 14
 STRICT_TWO_OUTCOME_POLICY_VERSION = 13
-# V13 review/evidence code is distributed for compatibility and pre-activation tests,
-# but the global activation remains capped at v12 until the published V1/V2/V3
-# retry/deadline finalizer and every mandatory verification route are released.
+# V13/V14 review/evidence code is distributed for compatibility and
+# pre-activation tests, but the global activation remains capped at v12 until
+# the published V1/V2/V3 retry/deadline finalizer, every mandatory verification
+# route, and the policy-v14 co-activation gate
+# (workers/screener/docs/policy-v14.md) are released. The ceiling moves from
+# v12 directly to v14 together with Bench v13; v13 is never activated standalone.
 SCREENING_ACTIVATION_CEILING_POLICY_VERSION = 12
 # The oldest policy version a mixed-fleet platform may require during a
 # scheduled activation window. v10 stays the floor while v13 is distributed

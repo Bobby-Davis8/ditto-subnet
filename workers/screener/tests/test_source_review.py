@@ -5362,3 +5362,208 @@ def test_thin_clean_ledger_still_holds() -> None:
     assert ledger_disposition([], concern_hold_count=3, clear_min_notes=3) == (
         "inconclusive"
     )
+
+
+def test_policy_v14_prompt_appends_ledger_leads_preloading_harbor_and_ingest() -> None:
+    from ditto_screener.source_review import (
+        _POLICY_TAILS,
+        _source_review_tools_for_policy,
+    )
+    from ditto_screener.source_review import (
+        _source_review_system_prompt as _prompt,
+    )
+
+    v13 = _prompt(13)
+    v14 = _prompt(14)
+
+    assert _POLICY_TAILS[14].startswith(_POLICY_TAILS[13])
+    assert "POLICY V14 ADDITIONS" in v14
+    assert "POLICY V14 ADDITIONS" not in v13
+    assert "docs/policy-v14.md" in v14
+    assert "RELAY LEDGER ROWS ARE LEADS" in v14
+    assert "BEFORE any I7, I5, or I3 note" in v14
+    assert "I7.catalog_withheld_by_request_classifier" in v14
+    assert "I7.outer_router_suppression" in v14
+    assert "I7.model_emitted_call_swallowed" in v14
+    assert "I5.compute_then_launder" in v14
+    assert "INGEST IS SERVED" in v14
+    assert "FIXTURES ARE LEADS" in v14
+    assert "W13 training-data declaration" in v14
+    assert "intent-routing calibration is unchanged" in v14
+    for field in (
+        "tools_offered",
+        "catalog_present",
+        "tool_choice",
+        "model_emitted_tool_calls",
+        "harness_system_span_hash",
+        "completions_after_last_tool_result",
+        "slot_provenance",
+        "answer_in_prompt",
+    ):
+        assert field in v14
+    # v13 keeps the eight-decision replacement and v14 inherits it.
+    assert "one decision for each I1 through I8." in v14
+    assert "one decision for each I1 through I7." not in v14
+
+    # v14 adds no invariant, pass clause, or category: the final-turn tool
+    # schema is identical to v13.
+    assert _source_review_tools_for_policy(
+        13, final_turn=True
+    ) == _source_review_tools_for_policy(14, final_turn=True)
+
+
+def test_written_policy_v14_is_the_v13_text_plus_the_addendum() -> None:
+    """policy-v14.md carries every v13 section, code, and outcome rule."""
+
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    v13 = (docs / "policy-v13.md").read_text()
+    v14 = (docs / "policy-v14.md").read_text()
+
+    v13_headings = [
+        line for line in v13.splitlines() if line.startswith(("## ", "### ", "#### "))
+    ]
+    missing_headings = [heading for heading in v13_headings if heading not in v14]
+    assert not missing_headings, f"policy v14 dropped v13 sections: {missing_headings}"
+
+    v13_reason_codes = {
+        line.strip()
+        for line in v13.splitlines()
+        if line[:3] in {"I1.", "I2.", "I3.", "I4.", "I5.", "I6.", "I7.", "I8."}
+        or line[:3] in {"S1.", "S2.", "S3.", "Q1.", "V1.", "V2.", "V3."}
+    }
+    assert len(v13_reason_codes) >= 30
+    assert all(code in v14 for code in v13_reason_codes)
+
+    assert "Policy v14 has exactly two final outcomes" in v14
+    assert "There is no `REVIEW_INCOMPLETE`, `INCONCLUSIVE`, implied clearance" in v14
+    assert "must never be described as cheating" in v14
+    assert "policy-v13-opaque-verification.md" in v14
+    assert "Policy v13 is never activated standalone." in v14
+    assert "## Policy v14 addendum" in v14
+    assert v14.index("## Activation prerequisites") < v14.index(
+        "## Policy v14 addendum"
+    )
+
+
+def test_written_policy_v14_publishes_the_nine_clauses_and_reason_codes() -> None:
+    from ditto_screener.source_review import _POLICY_V14_ADDENDUM
+
+    policy = (
+        Path(__file__).resolve().parents[1] / "docs" / "policy-v14.md"
+    ).read_text()
+    clauses = {
+        "### A1: relay ledger fields are leads that trigger the safe-harbor check",
+        "### A2: operational semantic-preloading safe harbor (W4/W10)",
+        "### A3: `/seed` and store construction are in scope (I2/I5)",
+        "### A4: planner prose under I5; judge-model draft selection under I3",
+        "### A5: GIH and compute-then-launder are I5; W13 training-data declaration",
+        "### A6: W10 tool-definition mutation",
+        "### A7: test fixtures are admissible leads, never citations",
+        "### A8: swallowed model-emitted tool calls",
+        "### A9: the intent-routing ruling is retained",
+    }
+    missing = sorted(clause for clause in clauses if clause not in policy)
+    assert not missing, f"policy v14 is missing clauses: {missing}"
+
+    ledger_fields = (
+        "tools_offered",
+        "catalog_present",
+        "tool_choice",
+        "model_emitted_tool_calls",
+        "harness_system_span_hash",
+        "completions_after_last_tool_result",
+        "slot_provenance",
+        "answer_in_prompt",
+    )
+    for field in ledger_fields:
+        assert field in policy
+        assert field in _POLICY_V14_ADDENDUM
+    # Clause 1: a ledger row is a lead that opens the clause-2 check first.
+    assert "A ledger row is a **lead**, never a verdict." in policy
+    assert (
+        "opens\n  the A2 safe-harbor check **before** any I7, I5, or I3 finding"
+        in policy
+    )
+    # Clause 2: the two reason codes are distinct and both published.
+    for code in (
+        "I7.catalog_withheld_by_request_classifier",
+        "I7.outer_router_suppression",
+        "I7.model_emitted_call_swallowed",
+        "I5.compute_then_launder",
+    ):
+        assert code in policy
+        assert code in _POLICY_V14_ADDENDUM
+    assert "Threshold preloaders" in policy
+    # Clause 5: public datagen fine-tuning is permitted with a W13 declaration.
+    assert "Fine-tuning on public datagen output is permitted" in policy
+    assert "public_datagen_output" in policy
+    assert "Only a family-to-recipe head is the I5 compiler" in policy
+    assert "Regeneration canary" in policy
+    # Clause 7: fixtures are leads, never citations.
+    assert "never under `evidence_references`" in policy
+    # Clause 9: the intent-routing ruling text survives unchanged.
+    assert "retained\nunchanged" in policy
+    assert "vacuous for the turns the host emptied" in policy
+
+
+def test_written_policy_v14_maps_every_rejected_artifact_to_a_clause() -> None:
+    policy = (
+        Path(__file__).resolve().parents[1] / "docs" / "policy-v14.md"
+    ).read_text()
+    table_start = policy.index(
+        "### 2026-09-13 rejected artifacts mapped to v14 clauses"
+    )
+    table = policy[table_start : policy.index("### `review_timed_out`")]
+    artifacts = {
+        "lets_623 v1": "c25489aa-faf0-46fc-8b06-8e2240a5ac01",
+        "comeτ-2 v1": "db0d4d25-dce7-4c7c-a49a-425beacb6c05",
+        "Pentagon v1": "5064eb97-b179-4a37-8b5f-9fb38f55f7db",
+        "Clear v14": "db9b919d-241b-4131-a2cc-f426b4356950",
+        "unione v27": "dd0783d1-b592-4de1-a788-ca7646b27f51",
+    }
+    rows = [
+        line for line in table.splitlines() if line.startswith("| ") and "`" in line
+    ]
+    assert len(rows) == len(artifacts)
+    for name, agent_id in artifacts.items():
+        row = next(line for line in rows if line.startswith(f"| {name} |"))
+        assert agent_id in row
+        # Every row names at least one v14 clause and one ledger evidence field.
+        assert any(f"A{index}" in row for index in range(1, 10)), name
+        assert any(
+            field in row
+            for field in (
+                "tools_offered",
+                "catalog_present",
+                "tool_choice",
+                "harness_system_span_hash",
+                "completions_after_last_tool_result",
+                "slot_provenance",
+                "answer_in_prompt",
+            )
+        ), name
+
+
+def test_written_policy_v14_publishes_the_co_activation_gate() -> None:
+    policy = (
+        Path(__file__).resolve().parents[1] / "docs" / "policy-v14.md"
+    ).read_text()
+    gate = policy[policy.index("### Co-activation gate") :]
+    required = {
+        "scheduled only together with DittoBench v13",
+        "`rescreen_scored=true`",
+        "Dry-run rescreen of the current top-25 scored artifacts",
+        "fail-open rate below 5%",
+        "Every finalizer outcome from the dry run reviewed by an operator",
+        "`review_timed_out`",
+        "`SCREENING_ACTIVATION_CEILING_POLICY_VERSION` raised from 12 directly\n"
+        "      to 14",
+        "v13 is never\n      scheduled standalone",
+        "`start_benchmark_rollout` for Bench v13",
+        "`schedule_screener_policy_activation` for policy v14",
+    }
+    missing = sorted(fragment for fragment in required if fragment not in gate)
+    assert not missing, f"co-activation gate is missing: {missing}"
+    # The gate is a live checklist: items open until the evidence is recorded.
+    assert gate.count("- [ ]") >= 8
+    assert "Each unchecked item blocks the ceiling raise." in gate

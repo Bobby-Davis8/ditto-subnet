@@ -152,6 +152,7 @@ async def test_default_v7_runs_luna_review_and_behavioral_oracle_and_passes() ->
     [
         (12, ScreeningOutcome.PASS),
         (13, ScreeningOutcome.INCONCLUSIVE),
+        (14, ScreeningOutcome.INCONCLUSIVE),
     ],
 )
 async def test_skipped_mandatory_challenge_is_fail_closed_for_v13(
@@ -194,7 +195,7 @@ async def test_skipped_mandatory_challenge_is_fail_closed_for_v13(
     assert decision.outcome == expected
     assert decision.policy_version == policy_version
     assert decision.review_notes == notes
-    if policy_version == 13:
+    if policy_version >= 13:
         assert decision.evidence[-1].code == "challenge-inconclusive"
 
 
@@ -945,7 +946,7 @@ def test_manifest_rotation_changes_digest_not_policy_or_signature_contract(
         )
     )
     engine = load_policy_engine(str(manifest))
-    assert engine.manifest.policy_version == SCREENING_POLICY_VERSION == 13
+    assert engine.manifest.policy_version == SCREENING_POLICY_VERSION == 14
     assert engine.manifest.digest != CORE_ONLY_MANIFEST.digest
 
 
@@ -996,7 +997,7 @@ def test_live_v6_snapshot_is_an_acceptance_fixture() -> None:
     fixture = Path(__file__).parent / "fixtures" / "production-v6-snapshot.json"
     snapshot = json.loads(fixture.read_text())
     assert snapshot["screening_policy_version"] == 6
-    assert SCREENING_POLICY_VERSION == 13
+    assert SCREENING_POLICY_VERSION == 14
     assert snapshot["queue"]["waiting_validator"] == 9
     assert snapshot["queue"]["evaluating"] == 1
     assert len(snapshot["rust_contract_rejections"]) == 6

@@ -1902,6 +1902,85 @@ retry and review states remain processing evidence, not those final outcomes.
 """
 _POLICY_TAILS[13] = _POLICY_TAILS[12] + _POLICY_V13_ADDENDUM
 
+# Policy v14 appends to the v13 text so every v13 clause keeps its exact
+# wording; the v13 prompt must stay byte-identical for agents screened under it.
+_POLICY_V14_ADDENDUM = """\
+POLICY V14 ADDITIONS — LEDGER LEADS, PRELOADING SAFE HARBOR, INGEST SCOPE.
+
+Policy v14 is the complete v13 checklist in docs/policy-v14.md plus nine
+additive clauses. No invariant, pass clause, outcome, or proof standard
+changes; a v13 finding remains a v14 finding.
+
+RELAY LEDGER ROWS ARE LEADS. Validators record per-completion ledger fields
+(tools_offered, catalog_present, tool_choice, model_emitted_tool_calls,
+harness_system_span_hash, completions_after_last_tool_result,
+slot_provenance, answer_in_prompt). When the observation carries them, an
+empty or absent catalog while the request held tools, tool_choice none, more
+emitted than executed calls, a request-varying system span, a host-stage
+slot_provenance, or answer_in_prompt true is a lead that opens the preloading
+safe-harbor check BEFORE any I7, I5, or I3 note. Cite a ledger row only beside
+a path:line source citation; missing ledger fields are not evidence either way
+and never justify an inconclusive result on their own.
+
+PRELOADING SAFE HARBOR. Narrowing the offered catalog passes I7 when on the
+deciding request (a) the applicable capability class is retained — semantic
+top-k (k >= 3) keeping every plausibly applicable tool, or a non-empty catalog
+on declarative and chit-chat turns — AND (b) an unadvertised valid
+model-emitted call still executes. Threshold and LLM-router preloaders that
+satisfy (b) pass. Record a request-keyed grammar, phrase table, word set, or
+one-edit typo ladder that yields an empty, singleton, or tool_choice-none
+catalog as I7.catalog_withheld_by_request_classifier; record a low-confidence
+outer router that removes every plausible capability as
+I7.outer_router_suppression. Apply the four-question test (choose another
+tool, skip, add a valid call, execute a valid unadvertised call) to the
+no-tool branch itself, never only to the first tool-bearing turn. The
+intent-routing calibration is unchanged; it never covered a no-tool branch.
+
+INGEST IS SERVED. Code reached from /seed, store construction, indexing, fact
+extraction, kind or sign assignment, and typed factual indexes is on the
+served path. Evidence discarded or compacted at ingest is I2; benchmark-shaped
+kinds, operand signs, or recipes assigned at ingest and consumed by a deciding
+prompt are I5. A mechanism split between /seed and /run is one mechanism.
+
+PLANNER PROSE AND JUDGE MODELS. Enumerate every prompt constant reachable on
+/run (*_PROMPT, *_GUIDANCE, *_ADVISORY, formatted system messages) and decide
+I5 per constant. Prose that fixes interpretation, tool policy, answer content,
+or output structure for one family is I5 even when the catalog is retained;
+retention answers I7, not I5. A second model asked to replace or choose over a
+parseable first draft on a content predicate (wording lists, fence markers,
+decline-signal lists) rather than on shape is I3.
+
+COMPUTE-THEN-LAUNDER IS I5. A host derivation of the scored answer, operands,
+or slot passed through a reply-exactly, confirm, or single-choice completion
+so the model formally authors it is I5.compute_then_launder, and also I1 when
+that completion is the only model call. answer_in_prompt true corroborates the
+launder site; cite the derivation head and the launder site in source. Only a
+family-to-recipe head is the compiler. Fine-tuning on public datagen output is
+permitted with a W13 training-data declaration (public_datagen_output,
+generator versions and seeds, provenance, no private evaluation data); an
+undeclared learned authority is V1, not I5.
+
+TOOL-DEFINITION MUTATION (W10). description += or format! writes, enum or
+const insertion, injected option vocabularies, or normalization instructions
+keyed on a tool name breach W10. Generator pools plus a one-keystroke
+correction recipe are I5; a host pseudo-enum that gates or rewrites the
+argument is I4.tool_argument_rewritten. Read every tool-definition constructor
+on the served path; the regex leads are dodged in one commit.
+
+FIXTURES ARE LEADS. Test files and cfg(test) code stay inadmissible as
+citations, but an assertion that pins a generator template string or its
+one-edit variant identifies the served classifier: follow it and cite the
+runtime line. List fixture leads under limitations, never as evidence.
+
+SWALLOWED CALLS. A valid model-emitted call the host neither executed nor
+surfaced, replaced by text or a host-preferred answer, is
+I7.model_emitted_call_swallowed and, when it obtains a preferred answer or
+no-call state, also I3.semantic_retry_or_selection. W4 authorization, safety,
+and availability grounds, W11 exact duplicate suppression, revocation, and an
+honestly reported malformed call are the only exceptions.
+"""
+_POLICY_TAILS[14] = _POLICY_TAILS[13] + _POLICY_V14_ADDENDUM
+
 
 # Version-independent L1 throughput guidance (added by the L1 bounding work).
 # Appended to every policy tail so the batching rules apply under each
@@ -1942,6 +2021,8 @@ def _assert_policy_tails_differ() -> None:
     assert _POLICY_TAILS[12].startswith(_POLICY_TAILS[11])
     assert _POLICY_TAILS[12] != _POLICY_TAILS[13]
     assert _POLICY_TAILS[13].startswith(_POLICY_TAILS[12])
+    assert _POLICY_TAILS[13] != _POLICY_TAILS[14]
+    assert _POLICY_TAILS[14].startswith(_POLICY_TAILS[13])
 
 
 def _l1_prompt_cache_key(messages: list[dict[str, object]]) -> str:

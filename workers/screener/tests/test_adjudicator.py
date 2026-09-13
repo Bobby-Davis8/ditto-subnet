@@ -22,6 +22,7 @@ from ditto_screener.adjudicator import (
     adjudicator_prompt_revision,
     build_adjudicator,
 )
+from ditto_screening_protocol import SCREENING_POLICY_VERSION
 
 _SOURCE = "\n".join(
     [
@@ -319,7 +320,8 @@ def test_adjudicator_prompt_treats_forced_choice_as_i7() -> None:
     assert adjudicator_prompt_revision(11) == "adjudicator-v3-policy-v11"
     assert adjudicator_prompt_revision(12) == "adjudicator-v3-policy-v12"
     assert adjudicator_prompt_revision(13) == "adjudicator-v3-policy-v13"
-    assert ADJUDICATOR_PROMPT_REVISION == "adjudicator-v3-policy-v13"
+    assert adjudicator_prompt_revision(14) == "adjudicator-v3-policy-v14"
+    assert ADJUDICATOR_PROMPT_REVISION == "adjudicator-v3-policy-v14"
 
 
 def test_adjudicator_policy_v12_narrows_plain_normalization() -> None:
@@ -332,7 +334,7 @@ def test_adjudicator_policy_v12_narrows_plain_normalization() -> None:
     assert "NARROWED" not in policy_v11
     assert "NARROWED" not in _system_prompt(10)
     with pytest.raises(ValueError, match="not implemented by this build"):
-        adjudicator_prompt_revision(14)
+        adjudicator_prompt_revision(SCREENING_POLICY_VERSION + 1)
 
 
 def test_adjudicator_policy_v13_adds_i8_and_incomplete_review_boundary() -> None:
@@ -829,3 +831,40 @@ def test_the_court_uses_the_audited_deep_review_completion_budget(make_config) -
 
     assert built is not None
     assert built._max_completion_tokens == 16_384
+
+
+def test_adjudicator_policy_v14_appends_ledger_leads_and_preloading_harbor() -> None:
+    policy_v13 = _system_prompt(13)
+    policy_v14 = _system_prompt(14)
+
+    assert policy_v14.startswith(policy_v13)
+    assert "## Policy v14 additions" in policy_v14
+    assert "## Policy v14 additions" not in policy_v13
+    assert "docs/policy-v14.md" in policy_v14
+    assert "I7.catalog_withheld_by_request_classifier" in policy_v14
+    assert "I7.outer_router_suppression" in policy_v14
+    assert "I7.model_emitted_call_swallowed" in policy_v14
+    assert "I5.compute_then_launder" in policy_v14
+    assert "W13 training-data declaration" in policy_v14
+    assert "leads that open the preloading safe-harbor check" in policy_v14
+    assert "never cite the fixture" in policy_v14
+    assert "answer_in_prompt" in policy_v14
+    # v14 adds no invariant: the submit schema keeps the v13 eight decisions.
+    legacy_submit = _adjudicator_tools_for_policy(13, decision_only=True)[0]
+    current_submit = _adjudicator_tools_for_policy(14, decision_only=True)[0]
+    assert legacy_submit == current_submit
+    assert adjudicator_prompt_revision(14) == "adjudicator-v3-policy-v14"
+
+
+def test_adjudicator_prompts_below_v14_are_byte_identical_to_the_v13_build() -> None:
+    """The floor-based tail composition must not move any older doctrine."""
+
+    base = adjudicator_module._SYSTEM_PROMPT
+    v11 = adjudicator_module._POLICY_V11_PROMPT_TAIL
+    v12 = adjudicator_module._POLICY_V12_PROMPT_TAIL
+    v13 = adjudicator_module._POLICY_V13_PROMPT_TAIL
+
+    assert _system_prompt(10) == base
+    assert _system_prompt(11) == f"{base}\n\n{v11}"
+    assert _system_prompt(12) == f"{base}\n\n{v11}\n\n{v12}"
+    assert _system_prompt(13) == f"{base}\n\n{v11}\n\n{v12}\n\n{v13}"

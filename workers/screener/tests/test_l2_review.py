@@ -4804,3 +4804,26 @@ async def test_a_low_risk_pass_is_not_adjudicated() -> None:
 
     assert court.calls == 0
     assert result.adjudication is None
+
+
+def test_l2_policy_v14_prompt_appends_ledger_leads_and_ingest_scope() -> None:
+    from ditto_screener.l2_review import _L2_POLICY_TAILS, _l2_tools_for_policy
+
+    v13 = _l2_review_system_prompt(13)
+    v14 = _l2_review_system_prompt(14)
+
+    assert _L2_POLICY_TAILS[14].startswith(_L2_POLICY_TAILS[13])
+    assert _L2_POLICY_TAILS[13] in v14
+    assert "POLICY V14" in v14
+    assert "POLICY V14" not in v13
+    assert "docs/policy-v14.md" in v14
+    assert "I7.catalog_withheld_by_request_classifier" in v14
+    assert "I7.model_emitted_call_swallowed" in v14
+    assert "I5.compute_then_launder" in v14
+    assert "Code reached from /seed" in v14
+    assert "Test\nfixtures are leads only" in v14
+    assert l2_prompt_revision(14) == "l2-terra-source-review-v37-policy-v14"
+
+    # v14 adds no invariant, category, basis, or transition: the v13 and v14
+    # tool schemas are identical.
+    assert _l2_tools_for_policy(13) == _l2_tools_for_policy(14)

@@ -7,9 +7,12 @@ validation) and the effective-version read that the queue, claim, heartbeat,
 and verdict paths depend on.
 """
 
+import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -299,7 +302,7 @@ class TestWriteGuards:
         assert response.status_code == 422
         assert "implements" in response.json()["message"]
 
-    async def test_distributed_v13_is_not_activation_ready(
+    async def test_distributed_builtin_policy_is_not_activation_ready(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
@@ -992,3 +995,111 @@ class TestFleetReadiness:
         )
         assert fleet["lagging_instances"] == []
         assert fleet["instances_without_release"] == []
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[6]
+_POLICY_V14_DOC = _REPO_ROOT / "workers" / "screener" / "docs" / "policy-v14.md"
+_POLICY_V14_DRY_RUN_EVIDENCE = (
+    _REPO_ROOT
+    / "workers"
+    / "screener"
+    / "docs"
+    / "evidence"
+    / "policy-v14-top25-dry-run.json"
+)
+_GATE_ITEM = re.compile(r"^- \[( |x|X)\]", re.MULTILINE)
+
+
+def _co_activation_gate() -> str:
+    policy = _POLICY_V14_DOC.read_text()
+    return policy[policy.index("### Co-activation gate") :]
+
+
+class TestPolicyV14CoActivationGate:
+    """Policy v14 activates only with Bench v13, after the published gate.
+
+    ``workers/screener/docs/policy-v14.md`` carries the co-activation checklist.
+    The activation ceiling is the Platform-side switch that lets an operator
+    schedule v14 at all, so it may rise to 14 only once every checklist item is
+    recorded as done, and it never stops at 13 (v13 is never activated
+    standalone). These tests are the checklist's executable form: the two
+    evidence-bearing items (dry-run fail-open rate, finalizer review) read the
+    operator-written evidence record and skip until it exists.
+    """
+
+    async def test_ceiling_stays_below_v14_while_any_gate_item_is_unchecked(
+        self,
+    ) -> None:
+        gate = _co_activation_gate()
+        items = _GATE_ITEM.findall(gate)
+        assert len(items) >= 8, "co-activation gate lost its checklist"
+        unchecked = [item for item in items if item == " "]
+        assert SCREENING_POLICY_VERSION >= 14
+        assert SCREENING_ACTIVATION_CEILING_POLICY_VERSION != 13, (
+            "policy v13 is never activated standalone"
+        )
+        if unchecked:
+            assert SCREENING_ACTIVATION_CEILING_POLICY_VERSION < 14, (
+                f"{len(unchecked)} co-activation gate item(s) are unchecked in "
+                f"{_POLICY_V14_DOC}; the activation ceiling cannot reach 14"
+            )
+        else:
+            assert SCREENING_ACTIVATION_CEILING_POLICY_VERSION >= 14, (
+                "every co-activation gate item is checked but the ceiling still "
+                "blocks v14"
+            )
+
+    async def test_gate_names_the_bench_v13_co_activation_and_rescreen_scored(
+        self,
+    ) -> None:
+        gate = _co_activation_gate()
+        assert "scheduled only together with DittoBench v13" in gate
+        assert "`rescreen_scored=true`" in gate
+        assert "`start_benchmark_rollout` for Bench v13" in gate
+        assert "`schedule_screener_policy_activation` for policy v14" in gate
+        assert "fail-open rate below 5%" in gate
+        assert "`review_timed_out`" in gate
+
+    async def test_scheduling_v14_today_is_refused_by_the_ceiling(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        activation_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install(app, activation_maker)
+        response = await client.post(
+            _URL,
+            json=_payload(target_policy_version=14, rescreen_scored=True),
+            headers=_HEADERS,
+        )
+
+        assert response.status_code == 422, response.text
+        assert "not activation-ready" in response.json()["message"]
+        assert str(SCREENING_ACTIVATION_CEILING_POLICY_VERSION) in response.text
+
+    async def test_top25_dry_run_rescreen_fail_open_is_below_five_percent(
+        self,
+    ) -> None:
+        if not _POLICY_V14_DRY_RUN_EVIDENCE.exists():
+            pytest.skip(
+                "co-activation gate evidence not recorded: run the top-25 dry-run "
+                "rescreen under policy v14 and write "
+                f"{_POLICY_V14_DRY_RUN_EVIDENCE.relative_to(_REPO_ROOT)}"
+            )
+        evidence = json.loads(_POLICY_V14_DRY_RUN_EVIDENCE.read_text())
+
+        assert evidence["policy_version"] == 14
+        assert evidence["cohort_size"] >= 25
+        outcomes = evidence["outcomes"]
+        assert len(outcomes) == evidence["cohort_size"]
+        fail_open_rate = evidence["fail_open_count"] / evidence["cohort_size"]
+        assert fail_open_rate < 0.05, f"fail-open rate {fail_open_rate:.3f} >= 0.05"
+        assert evidence["finalizer_outcomes_reviewed_by"]
+        assert evidence["finalizer_outcomes_reviewed_at"]
+        for row in outcomes:
+            assert row["outcome"] in {"CLEAR", "REJECT", "review_timed_out"}
+            if row["outcome"] == "REJECT" and row["violation_proven"]:
+                assert row["evidence_references"], row["agent_id"]
+            if row["outcome"] == "review_timed_out":
+                assert row["violation_proven"] is False
+                assert row["failure_domain"] in {"platform", "provider"}

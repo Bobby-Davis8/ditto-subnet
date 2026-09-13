@@ -332,27 +332,76 @@ retains an escalate processing state for the operator's eventual CLEAR/REJECT
 decision.
 """.strip()
 
+_POLICY_V14_PROMPT_TAIL = """
+
+## Policy v14 additions
+
+Apply docs/policy-v14.md: the complete v13 checklist plus nine additive
+clauses. No invariant, clear clause, outcome, or proof standard changes.
+
+Relay ledger rows (tools_offered, catalog_present, tool_choice,
+model_emitted_tool_calls, harness_system_span_hash,
+completions_after_last_tool_result, slot_provenance, answer_in_prompt) are
+leads that open the preloading safe-harbor check before any I7, I5, or I3
+verdict. A ledger row corroborates a path:line citation and never replaces
+it; a missing field is not evidence and cannot ground an escalate on its own.
+
+Under I7, a narrowed catalog passes only when the applicable capability class
+stays on the deciding request AND an unadvertised valid model-emitted call
+still executes; threshold and LLM-router preloaders satisfying that pass. A
+request-keyed grammar, phrase table, word set, or one-edit typo ladder that
+yields an empty, singleton, or tool_choice-none catalog is
+I7.catalog_withheld_by_request_classifier; a low-confidence outer router
+removing every plausible capability is I7.outer_router_suppression. Apply
+the four-question test to the no-tool branch itself; the intent-routing
+calibration is retained and never covered a no-tool branch. A valid
+model-emitted call the host swallowed and replaced is
+I7.model_emitted_call_swallowed and, when it obtains a preferred answer,
+I3.semantic_retry_or_selection.
+
+Under I2 and I5, code reached from /seed, store construction, and typed
+factual indexes is served: evidence compacted at ingest is I2 and
+benchmark-shaped kinds, operand signs, or recipes assigned at ingest are I5.
+Under I5, planner prose that fixes a family's interpretation, tool policy,
+answer content, or output structure is a compiler even when the catalog is
+retained, and a host derivation laundered through a reply-exactly or
+single-choice completion is I5.compute_then_launder (also I1 when it is the
+only model call); answer_in_prompt true corroborates the launder site. Only a
+family-to-recipe head is the compiler; fine-tuning on public datagen output
+with a W13 training-data declaration is permitted, and an undeclared learned
+authority is V1, not I5. Under I3, a judge model that replaces a parseable
+draft on a content predicate rather than shape is dissent suppression. Under
+W10, tool-definition mutation keyed on a tool name is I5 for injected
+generator pools or I4.tool_argument_rewritten for a gating pseudo-enum.
+
+Test fixtures and cfg(test) code are leads only: follow them to the runtime
+line and cite that line; never cite the fixture. Refuse a clear whose only
+support is a ledger row, a fixture, or a first tool-bearing turn that never
+reached the no-tool branch.
+""".strip()
+
+# Policy prompt tails by the FLOOR version that introduces them. The court
+# doctrine for version N is the base prompt followed by every tail whose floor
+# is <= N, so a new version appends one entry here and every older prompt stays
+# byte-identical.
+_POLICY_PROMPT_TAILS: tuple[tuple[int, str], ...] = (
+    (11, _POLICY_V11_PROMPT_TAIL),
+    (12, _POLICY_V12_PROMPT_TAIL),
+    (13, _POLICY_V13_PROMPT_TAIL),
+    (14, _POLICY_V14_PROMPT_TAIL),
+)
+
 
 def _system_prompt(policy_version: int) -> str:
     """Render the court doctrine bound to the submission's policy version."""
     # Validate through the same canonical revision helper so a new Platform
     # policy cannot silently reuse an older court doctrine.
     adjudicator_prompt_revision(policy_version)
-    if policy_version == 10:
-        return _SYSTEM_PROMPT
-    if policy_version == 11:
-        return f"{_SYSTEM_PROMPT}\n\n{_POLICY_V11_PROMPT_TAIL}"
-    if policy_version == 12:
-        return (
-            f"{_SYSTEM_PROMPT}\n\n{_POLICY_V11_PROMPT_TAIL}\n\n"
-            f"{_POLICY_V12_PROMPT_TAIL}"
-        )
-    if policy_version == 13:
-        return (
-            f"{_SYSTEM_PROMPT}\n\n{_POLICY_V11_PROMPT_TAIL}\n\n"
-            f"{_POLICY_V12_PROMPT_TAIL}\n\n{_POLICY_V13_PROMPT_TAIL}"
-        )
-    raise AssertionError("validated policy was not rendered")
+    parts = [_SYSTEM_PROMPT]
+    parts.extend(
+        tail for floor, tail in _POLICY_PROMPT_TAILS if policy_version >= floor
+    )
+    return "\n\n".join(parts)
 
 
 _TOOLS: list[dict[str, object]] = [
