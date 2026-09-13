@@ -1,6 +1,17 @@
 {
   "schema_version": 1,
   "status": "preparation_complete_reader_results_pending",
+  "off_resume_bootstrap_erratum": {
+    "artifact": "qa-final-off-resume-1b575560.log",
+    "sha256": "8d64f9dad6da719682a09c6a420406c8bf9374d6050c3860ce7e87c4aa875c47",
+    "error": "lookup postgres: no such host",
+    "cause": "Invocation typo used database hostname postgres instead of the required loopback address 127.0.0.1.",
+    "phase": "bootstrap before reader preflight or inference",
+    "exit_code": 1,
+    "original_judged_checkpoint_rows_unchanged": 497,
+    "corrected_attempt_log": "qa-final-off-resume-corrected-1b575560.log",
+    "source_or_fixture_mutation": false
+  },
   "source_sha": "1b5755609b3ea95660fdba289e6a747adb8c5dae",
   "binary_sha256": "695b6c3a0338b902949deb55456a87b17e1ba97e2b92dca63054e187ef75fa21",
   "configuration_sha256": {

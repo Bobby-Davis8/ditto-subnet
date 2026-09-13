@@ -463,6 +463,14 @@ report. The slow last case completed without intervention; earlier concern
 about a stalled stream did not require a timeout or signal. No completed
 500-case accuracy, graph gain, or monetary spend is claimed by this handoff.
 
+The first resume invocation then failed during bootstrap because its database
+hostname was mistyped as `postgres`, producing `lookup postgres: no such host`.
+It exited before reader preflight/inference and did not change the original
+497-row checkpoint. The corrected resume restored the required `127.0.0.1`
+loopback target and used a separate log. Both attempt logs are preserved; this
+operator error is not an answer failure or evidence of a changed scored
+condition. The immutable handoff records the failed log's hash.
+
 Record requested and observed answer model/provider for every successful
 provider turn, reasoning effort, prompt clock/time, graph preparation flag,
 graph retrieval flag, tool names, fixture user, hypothesis, and explicit judge
