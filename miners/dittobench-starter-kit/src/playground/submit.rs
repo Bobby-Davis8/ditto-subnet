@@ -153,21 +153,6 @@ pub(super) async fn submit_start_handler(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::supports_git_subdir;
-    use serde_json::json;
-
-    #[test]
-    fn git_subdir_requires_an_explicit_live_capability() {
-        assert!(supports_git_subdir(&json!({"features": ["git_subdir"]})));
-        assert!(!supports_git_subdir(&json!({"features": []})));
-        assert!(!supports_git_subdir(&json!({
-            "supported_bench_versions": [8, 9]
-        })));
-    }
-}
-
 /// `GET /api/submit/:id`: proxy `GET <DITTOBENCH_API_URL>/v1/runs/:id` and
 /// return the run's JSON (status, stage, progress, partial cases, report).
 pub(super) async fn submit_poll_handler(
@@ -201,5 +186,20 @@ async fn relay_json(resp: reqwest::Response) -> axum::response::Response {
             Json(json!({"error": "non-JSON upstream", "body": text})),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supports_git_subdir;
+    use serde_json::json;
+
+    #[test]
+    fn git_subdir_requires_an_explicit_live_capability() {
+        assert!(supports_git_subdir(&json!({"features": ["git_subdir"]})));
+        assert!(!supports_git_subdir(&json!({"features": []})));
+        assert!(!supports_git_subdir(&json!({
+            "supported_bench_versions": [8, 9]
+        })));
     }
 }
