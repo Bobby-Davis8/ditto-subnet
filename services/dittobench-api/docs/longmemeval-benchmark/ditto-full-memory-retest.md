@@ -493,7 +493,8 @@ discovery failure/fallback rate, candidate **occurrences** (not globally unique
 memories), cases with graph-discovered seed IDs, and explicit
 `explore_subject_neighbors` trace calls/cases/truncations separately. Frozen
 `pkg/services/retrieval/subject_graph.go` records those discovery counters around
-the best-effort candidate stage with a two-second maximum budget; failures fall
+the best-effort candidate stage with a two-second maximum SQL statement budget
+inside its 2.5-second discovery context, plus cleanup; failures fall
 back to stock candidates. Explicit neighbor-tool calls are outside these
 counters. Graph seed IDs may also have been discovered by stock retrieval, so
 they are not evidence of graph-only additions. A graph-enabled result is not

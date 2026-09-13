@@ -76,8 +76,9 @@ retrieval behavior, rendered prompts, or graph effects. Do not assign the
 26-answer difference to four newly observed seed IDs, and do not describe this
 run as a high-coverage test of the graph's potential.
 
-Frozen `pkg/services/retrieval/subject_graph.go` caps candidate discovery at two
-seconds and falls back on errors. A bounded in-run log observation identified
+Frozen `pkg/services/retrieval/subject_graph.go` uses a maximum two-second SQL
+statement budget within a 2.5-second discovery context, plus cleanup, and falls
+back on errors. A bounded in-run log observation identified
 graph SQL statement timeouts. The preserved representative, **nonexecuting**
 EXPLAIN at `2026-09-13T06:09:53.804728Z` estimated one scoped row each for
 subjects/pairs/links versus observed counts 319/242/556, with nested-loop join
@@ -120,8 +121,9 @@ First start to final finish spans 1,866.010751 s including the gap. The resumed
 Standard/Speed aggregate is not used as a 500-case latency summary.
 
 ON ran `05:55:26.872729–07:23:50.602083Z` (5,303.729354 s), without retries or
-intervention. Original incomplete reports, all logs and checkpoints remain
-immutable. Successful reports followed the inherited full-report Hippius upload;
+intervention. Original incomplete reports and all logs are preserved;
+append-only checkpoints are retained at their final hashes. Successful reports
+followed the inherited full-report Hippius upload;
 no bucket ACL/readability claim is made. The incomplete OFF report did not upload.
 
 ## Integrity and claim boundaries
