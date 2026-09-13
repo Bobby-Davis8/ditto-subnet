@@ -1094,6 +1094,20 @@ class CaseScore(BaseModel):
             ),
         ),
     ] = False
+    # bench_version >= 13 report-only field. Go emits it ``omitempty`` for v13
+    # runs and never below (``v9_harness_projection.go``); it must be declared
+    # here or ``extra="ignore"`` drops it before any Platform-side grouping.
+    relation: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "bench_version>=13: generator metamorphic/counterfactual "
+                "relation for the case (``V10CaseProvenance.Relation``); "
+                "empty below v13."
+            ),
+        ),
+    ] = ""
 
     # Bench v10+ / v13 report-only fields. Declared for the same reason as the
     # v3 audit fields above: ``extra="ignore"`` would strip them from the
