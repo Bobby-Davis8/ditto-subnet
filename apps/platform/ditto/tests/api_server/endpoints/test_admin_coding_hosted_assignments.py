@@ -36,7 +36,10 @@ _IMAGE = "b" * 64
 
 
 async def _seed(
-    maker: async_sessionmaker[AsyncSession], *, certified: bool = True
+    maker: async_sessionmaker[AsyncSession],
+    *,
+    certified: bool = True,
+    certification_contract_version: int = 1,
 ) -> tuple[UUID, UUID, str]:
     receipt = _publication_receipt(Ed25519PrivateKey.generate())
     registration = _registration(receipt)
@@ -79,7 +82,7 @@ async def _seed(
                     settlement_inference_grant_sha256="5a" * 32,
                     settlement_provider_receipt_set_sha256="5b" * 32,
                     ticket_deadline=now + timedelta(hours=1),
-                    coding_contract_version=2,
+                    coding_contract_version=certification_contract_version,
                     certification_id="operator-path-cert-001",
                     status="certified",
                     failure_stage=None,
@@ -176,6 +179,26 @@ async def test_preview_refuses_subject_without_active_certification(
 ) -> None:
     _install(app, session_maker)
     agent_id, release_row_id, _ = await _seed(session_maker, certified=False)
+
+    refused = await client.post(
+        f"{_URL}/preview", headers=_HEADERS, json=_subject(agent_id, release_row_id)
+    )
+    assert refused.status_code == 409
+    assert "certification" in refused.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_preview_consumes_only_the_supported_v1_certification_contract(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The supported lease/receipt path only ever writes contract-v1 rows."""
+
+    _install(app, session_maker)
+    agent_id, release_row_id, _ = await _seed(
+        session_maker, certification_contract_version=2
+    )
 
     refused = await client.post(
         f"{_URL}/preview", headers=_HEADERS, json=_subject(agent_id, release_row_id)
