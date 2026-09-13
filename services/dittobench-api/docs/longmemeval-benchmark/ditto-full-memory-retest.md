@@ -401,6 +401,68 @@ not tune on failures, change weights, and then label a rerun the same condition.
 
 ## Answering, judging, and interruption policy
 
+### September 13: preparation closed and matched readers started
+
+The [immutable preparation and first-attempt handoff](results/2026-09-13-ditto-prepared-opaque-reader-handoff.json)
+records completed native preparation plus bounded settle, forced graph rebuild
+500/500, and synchronous label processing 500/500 (closed
+`2026-09-13T05:05:35.657463Z`, zero captured native warnings). Ten settle waves
+closed 113 unique users. The resumed native phase itself retained 96 complete
+and 73 incomplete barrier attempts and exit 1; those 73 users subsequently
+settled. This is not a claim that the original native pipeline was flawless.
+All pending generation/storage/refinement/key-flag counts are zero. The actual
+refinement proof set remains empty: raw pending and accepted receipts are both
+zero, so no receipt exception was used. Of 10,731 clusters, 8,822 have LLM
+labels; 1,909 empty labels remain explicitly `intentional-or-unresolved`.
+
+After all writers drained, opaque-ID rewriting preserved non-public-ID memory
+columns and derived subject/link/edge/cluster state. The independent full
+fixture audit passed at `2026-09-13T05:15:55.623468Z`: all 500 cases, 124,366
+pairs, 246,738 original turns and 23,867 session occurrences, with zero missing,
+extra, scope, sequence or timestamp errors and every public memory ID opaque.
+Final manifest SHA-256 is
+`a232c2b7ee77f06597535416682c00187f9c44bb2a324de7ccd5dce3fa13ccef`.
+The independent read-only snapshot completed at `05:21:05Z`, with digest
+`01c6a7070cba4e1455894c6da07132dcbba1b5cbc37c2c58c9f26db4adb3d055`.
+The linked evidence pins all ten table counts/hashes and source artifacts.
+
+Both readers use source `1b5755609b3ea95660fdba289e6a747adb8c5dae`, the
+previously attested binary SHA `695b6c3a0338b902949deb55456a87b17e1ba97e2b92dca63054e187ef75fa21`,
+and the same pinned runtime configuration. With `LME_BASE` and `LME_GRAPH` set
+to the absolute preserved backend/backend-graph clone paths, and the exact
+local-then-common set-if-absent configuration boundary above already loaded,
+the reader commands are:
+
+```sh
+"$LME_GRAPH/.tmp/lme/dittobench-campaign-vcs-1b575560" -env local longmemeval \
+  -data "$LME_BASE/.tmp/lme/data" -models openai/gpt-5.6-luna \
+  -reasoning-effort medium -judge-model google/gemini-3.1-flash-lite \
+  -prompt-clock question-date -manifest "$LME_BASE/.tmp/lme/seed_manifest_opaque.json" \
+  -require-graph -concurrency 8 -out "$LME_BASE/.tmp/lme/runs-final-off" \
+  -checkpoint "$LME_BASE/.tmp/lme/evidence/qa-final-off-1b575560.jsonl"
+
+# Run ON only after OFF completes and the independent snapshot comparison passes.
+"$LME_GRAPH/.tmp/lme/dittobench-campaign-vcs-1b575560" -env local longmemeval \
+  -data "$LME_BASE/.tmp/lme/data" -models openai/gpt-5.6-luna \
+  -reasoning-effort medium -judge-model google/gemini-3.1-flash-lite \
+  -prompt-clock question-date -manifest "$LME_BASE/.tmp/lme/seed_manifest_opaque.json" \
+  -require-graph -subject-graph -concurrency 8 -out "$LME_BASE/.tmp/lme/runs-final-on" \
+  -checkpoint "$LME_BASE/.tmp/lme/evidence/qa-final-on-1b575560.jsonl"
+```
+
+OFF attempt 1 closed normally without an operator interruption at
+`2026-09-13T05:46:42.086389Z`, exiting 1 because only 497 of 500 attempted cases
+were judged. The immutable report identifies exactly `gpt4_15e38248`,
+`46a3abf7`, and `88432d0a` as unjudged, each with
+`agent loop: remote error: tls: bad record MAC`. Its before/after snapshot hashes
+both equal the independent reference. The strict incomplete-run guard prevented
+report upload. Resume the identical command/checkpoint for only those three
+unjudged failures; never rerun the 497 judged answers or treat transport failures
+as incorrect answers. Preserve this incomplete attempt alongside the resumed
+report. The slow last case completed without intervention; earlier concern
+about a stalled stream did not require a timeout or signal. No completed
+500-case accuracy, graph gain, or monetary spend is claimed by this handoff.
+
 Record requested and observed answer model/provider for every successful
 provider turn, reasoning effort, prompt clock/time, graph preparation flag,
 graph retrieval flag, tool names, fixture user, hypothesis, and explicit judge
