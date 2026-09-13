@@ -313,7 +313,7 @@ func GenerateMemorySuiteForVersion(r *rand.Rand, seed int64, n int, nWaves int, 
 	var world universe.World
 	if benchVersion >= protocol.BenchVersionV8 {
 		scale, count := v8WorldProfile(n)
-		world = universe.Generate(seed, scale)
+		world = universe.GenerateForVersion(seed, scale, benchVersion)
 		worldPlans, err = world.QuestionPlans(count)
 		if err != nil {
 			return MemorySuite{}, fmt.Errorf("v8 world questions: %w", err)
@@ -663,7 +663,7 @@ func generateV8WorldMemorySuite(seed int64, n, nWaves, benchVersion int) (Memory
 		budget = n
 	}
 	scale, _ := v8WorldProfile(n)
-	world := universe.Generate(seed, scale)
+	world := universe.GenerateForVersion(seed, scale, benchVersion)
 	v10Count := 0
 	if benchVersion >= protocol.BenchVersionV10 {
 		v10Count = v10ProgramCaseCount(n)

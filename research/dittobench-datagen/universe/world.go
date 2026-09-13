@@ -117,6 +117,10 @@ type World struct {
 	Accent         string
 	Preferences    []Preference
 	Integrity      IntegrityFacts
+	// BenchVersion is the immutable generation contract this world was built
+	// under. The v8 people/projects/trips substrate is shared by every version;
+	// version-gated story generation (v13 story v2) branches on it.
+	BenchVersion int
 }
 
 // ProtectedTerms returns semantic identity and join-key surfaces that writing
@@ -150,7 +154,17 @@ var countryPool = []string{"France", "Spain", "Portugal", "Belgium", "the Nether
 
 // Generate returns one deterministic world. scale is a run-size hint (small =
 // 1, medium = 2, full = 3); it changes population, never the generation rules.
+// It is the frozen v8 contract; versioned callers use GenerateForVersion.
 func Generate(seed int64, scale int) World {
+	return GenerateForVersion(seed, scale, protocol.BenchVersionV8)
+}
+
+// GenerateForVersion returns the deterministic world for an explicit benchmark
+// contract. Every version shares the v8 people/projects/trips substrate and its
+// RNG stream byte-for-byte; bench_version >= 13 replaces the fixed story script
+// with the story v2 typed event DAG (story_events.go), which owns an independent
+// seed stream so the ordinary world is unchanged.
+func GenerateForVersion(seed int64, scale, benchVersion int) World {
 	if scale < 1 {
 		scale = 1
 	}
@@ -158,7 +172,7 @@ func Generate(seed int64, scale int) World {
 		scale = 3
 	}
 	r := rand.New(rand.NewSource(worldSeed(seed)))
-	w := World{Seed: seed, UserName: UserName(seed), UserCompany: coinedCompany(r), Accent: colors[r.Intn(len(colors))]}
+	w := World{Seed: seed, BenchVersion: benchVersion, UserName: UserName(seed), UserCompany: coinedCompany(r), Accent: colors[r.Intn(len(colors))]}
 	w.Preferences = worldPreferences(seed, w.Accent)
 	w.Integrity = IntegrityFacts{
 		CanaryNonce:      persona.CanaryNonce(seed),
@@ -259,7 +273,11 @@ func Generate(seed int64, scale int) World {
 	// Story generation owns an independent seed stream: adding surface variety
 	// cannot perturb the people/projects/trips already established above. Each
 	// arc contributes three long memories and story-only join/state facts.
-	w.StoryArcs, w.Stories = buildStories(seed, scale, w)
+	if benchVersion >= protocol.BenchVersionV13 {
+		w.StoryArcs, w.Stories = buildStoriesV2(seed, scale, w)
+	} else {
+		w.StoryArcs, w.Stories = buildStories(seed, scale, w)
+	}
 	w.Pairs = w.renderPairs(r)
 	return w
 }
@@ -269,6 +287,12 @@ func (w World) renderPairs(r *rand.Rand) []protocol.MemoryPair {
 	base := time.Date(2024, 1, 8, 9, 0, 0, 0, time.UTC)
 	add := func(id, session, prompt, response string) {
 		pairs = append(pairs, protocol.MemoryPair{PairID: id, SessionID: session, Timestamp: base.Add(time.Duration(len(pairs)*137) * time.Hour).Format(time.RFC3339), Prompt: prompt, Response: response})
+	}
+	// addAt is the story v2 path: the memory carries its own arc-chronological,
+	// jittered timestamp instead of the positional 137-hour grid, so neither the
+	// session id nor the timestamp predicts the arc or the slot (#1827).
+	addAt := func(id, session, timestamp, prompt, response string) {
+		pairs = append(pairs, protocol.MemoryPair{PairID: id, SessionID: session, Timestamp: timestamp, Prompt: prompt, Response: response})
 	}
 	for i, p := range w.People {
 		add(p.IdentityPairID, fmt.Sprintf("people-%02d-a", i), shortLead(r)+p.Name+" is my "+p.Relation+". Everyone there calls them “"+p.Nickname+".”", warmResponse(w.Seed, p.IdentityPairID,
@@ -359,6 +383,10 @@ func (w World) renderPairs(r *rand.Rand) []protocol.MemoryPair {
 	}
 	for _, story := range w.Stories {
 		prompt, response := story.render(w.Seed)
+		if story.Timestamp != "" {
+			addAt(story.PairID, story.SessionID, story.Timestamp, prompt, response)
+			continue
+		}
 		add(story.PairID, story.SessionID, prompt, response)
 	}
 	for i, preference := range w.Preferences {
