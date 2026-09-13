@@ -457,6 +457,43 @@ do not infer public or private access from the URL alone. This review made no
 new upload, inference call, or backend change. Full matched-reader scoring
 remains gated on preparation completion, opaque IDs, and the frozen snapshot.
 
+## Independent prepared-state capture
+
+After **all** preparation, graph, labeling and opaque-ID rewrite processes exit
+and the final opaque fixture audit passes, independently capture the frozen
+state with the read-only utility below. Do not capture an in-progress state as
+the final reference. Replace the manifest/output paths with the preserved task
+artifacts; the output must not already exist.
+
+```sh
+python3 services/dittobench-api/integrations/longmemeval/capture_backend_snapshot.py \
+  --manifest /path/to/backend/.tmp/lme/seed_manifest_opaque.json \
+  --container ditto-postgres-lme-luna-20260912 \
+  --database ditto_lme_s_final \
+  --output /path/to/evidence/independent-prepared-snapshot.json
+```
+
+The utility independently reproduces frozen backend source
+`1b5755609b3ea95660fdba289e6a747adb8c5dae`'s
+`pkg/dittobench/longmemeval_snapshot.go`: one PostgreSQL repeatable-read,
+read-only transaction with UTC timezone; the same ordered ten-table allowlist;
+SHA-256 of every scoped `to_jsonb(row)::text`, then SHA-256 of the sorted
+concatenation of those row hashes. It uses sorted, unique, exact
+`lme_s_<question_id>` owners from all 500 manifest cases. The final digest hashes
+compact JSON in the Go struct's exact field order, including its initially
+empty `sha256` field. Output contains only scoped users, table names/counts,
+and digests, and a new output file is created with mode `0600`.
+
+Repeat after each reader into a **new** output file with
+`--compare /path/to/evidence/independent-prepared-snapshot.json` to fail on any
+state difference. `--compare` also accepts a completed backend report and
+compares its `meta.lme_prepared_snapshot` object to the independent capture.
+The backend separately compares its own before/after snapshots. Neither
+mechanism prevents concurrent writers; the drained-writer barrier remains
+mandatory. Pure unit tests verify transaction construction, fixture-scope and
+table validation, Go-compatible serialization, comparison, and non-overwriting
+private output; no Go rebuild, inference, or database mutation is required.
+
 ## Reproduce the offline audit
 
 ### Fresh-checkout input prerequisites
