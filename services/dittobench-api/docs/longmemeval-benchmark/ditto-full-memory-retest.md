@@ -423,6 +423,40 @@ hypotheses using LongMemEval source revision
 built-in judge score as official. No evaluator inference is launched by the
 audit script.
 
+### Existing full-report storage publication
+
+The frozen `1b5755609b3ea95660fdba289e6a747adb8c5dae` reader retains the
+standard harness upload after saving a successful local report. Despite the
+legacy `UploadToB2` function/log name, FileStorage selects the configured
+provider: the earlier graph smoke logged a successful Hippius destination at
+`https://s3.hippius.com/ditto/dittobench/dittobench/<run-filename>`. This is the
+**complete report, not a sanitized aggregate**. It includes public LongMemEval
+questions and gold answers, generated hypotheses and judge rationale, memory
+and subject tool arguments/results, fixture and retrieved-memory IDs, provider
+response IDs/model/provider, source and condition hashes, and CLI data-directory
+and manifest paths (which may be absolute local paths). Tool text is capped at
+16 KiB per argument record and 64 KiB per result, with full-text hashes and
+explicit truncation flags; this is a size bound, not a privacy filter.
+
+Source review found no serialization of API/storage credentials, ADC contents,
+environment values, or the reader's hidden reasoning stream. Explicit
+tool-argument reasoning and judge explanations can appear. Executable tools
+are restricted to fixture-scoped memory operations; the prepared snapshot
+contains benchmark user IDs and table counts/digests, not raw database rows or
+embeddings. A credential-pattern scan of the earlier one-case smoke found no
+matches, but that artifact had no tool traces: the expanded trace assessment
+is source-based, not a completed 500-case output audit. No material private-data
+leak was identified for this isolated public-data fixture; that conclusion
+depends on the fixture/isolation gates and is not a general report sanitizer.
+
+Strict incomplete runs return before upload; complete runs upload before the
+independent offline audit. Upload failure is a nonfatal warning and the local
+report remains. The frozen CLI has no upload opt-out. The returned object URL
+is unsigned, but bucket ACLs and unauthenticated readability were not tested;
+do not infer public or private access from the URL alone. This review made no
+new upload, inference call, or backend change. Full matched-reader scoring
+remains gated on preparation completion, opaque IDs, and the frozen snapshot.
+
 ## Reproduce the offline audit
 
 ### Fresh-checkout input prerequisites
