@@ -3,9 +3,16 @@
 This is an offline research protocol for the private Ditto backend harness, not
 a miner submission, production confirmation score, payout input, or a new Mem0
 leaderboard comparison. The public repository carries the audit code and
-methodology; raw answers, internal tool transcripts, fixture dumps, credentials,
-and provider generation IDs stay in the private evidence workspace. No result
-is implied by this protocol. Publish a completed audit before quoting a score.
+methodology; raw answers, tool transcripts, fixture dumps, credentials,
+and provider generation IDs are not copied into this public repository. Raw
+reports retain the separately disclosed configured-storage upload behavior;
+credentials and fixture dumps are not report payloads.
+
+**Completed September 13:** [independently audited paired results](ditto-full-memory-results-2026-09-13.md)
+are OFF 67.2% and ON 72.4%, but graph discovery failed/fell back on 98.93% of
+calls. This is an observed flag-condition difference, not demonstrated causal
+graph benefit or an unqualified held-out score. Earlier preparation/pending
+statements below are retained as the chronological methodology record.
 
 The backend preparation and baseline implementation is tracked in
 [backend PR #2679](https://github.com/ditto-assistant/backend/pull/2679).

@@ -179,7 +179,7 @@ def operational_diagnostics(report, rows):
             metrics[field].update(sum=sum(values), mean=statistics.mean(values), median=statistics.median(values),
                                   p95_nearest_rank=sorted(values)[math.ceil(0.95 * len(values)) - 1])
     return {"graph_utilization": graph, "successful_per_case_metrics": metrics,
-            "metric_scope": "Recomputed from all recorded selected per-case observations, never resumed Standard/Speed aggregates. Excludes failed attempts, separate judge/preparation calls and seed-context re-preparation; sums are not campaign wall time or monetary spend."}
+            "metric_scope": "Recomputed from all recorded selected per-case observations, never resumed Standard/Speed aggregates. QueryCase latency starts after seed-context preparation, so it excludes serial graph seed discovery. Also excludes failed attempts, separate judge/preparation calls and seed-context re-preparation; sums are not campaign wall time or monetary spend. Compare whole invocation intervals separately."}
 
 
 def audit_rows(report, rows, dataset, condition):
@@ -297,6 +297,48 @@ def compare(left, right):
             "interpretation": "paired descriptive evidence; no repeated-run variance or causal guarantee"}
 
 
+def compare_graph_seeds(left, right):
+    require(set(left) == set(right), "paired graph seeds require identical question IDs")
+    result = {"compared_cases": 0, "unavailable_cases": 0,
+              "cases_with_graph_marked_seeds": 0, "graph_marked_seed_occurrences": 0,
+              "cases_with_graph_marked_seeds_absent_from_off_seed": 0,
+              "graph_marked_seed_occurrences_absent_from_off_seed": 0,
+              "graph_marked_seed_occurrences_also_in_off_seed": 0,
+              "all_seed_sets_compared_cases": 0, "cases_with_different_seed_id_sets": 0,
+              "graph_marked_seed_cases_with_verdict_change": 0,
+              "graph_marked_seed_cases_both_correct": 0, "graph_marked_seed_cases_both_incorrect": 0,
+              "interpretation": "Per-case ON graph-marked IDs minus corresponding OFF seed IDs, plus full seed-set comparison ignoring order. This is observed seed-set novelty, not causal attribution or proof that stock retrieval could never find the same memory. A frozen database does not establish identical rendered seed prompts or identify why seed sets differ."}
+    for qid in left:
+        first, second = left[qid]["data"], right[qid]["data"]
+        require(type(first.get("graph_retrieval")) is bool and type(second.get("graph_retrieval")) is bool
+                and first["graph_retrieval"] != second["graph_retrieval"], "paired seed comparison requires opposite graph flags")
+        on, off = (first, second) if first["graph_retrieval"] else (second, first)
+        if "graph_seed_pair_ids" not in on or "seed_pair_ids" not in off:
+            result["unavailable_cases"] += 1
+            continue
+        marked, stock = on["graph_seed_pair_ids"] or [], off["seed_pair_ids"] or []
+        require(all(isinstance(ids, list) and all(isinstance(i, str) and i for i in ids) for ids in (marked, stock)), "invalid paired seed ID lists")
+        marked, stock = set(marked), set(stock)
+        novel = marked - stock
+        result["compared_cases"] += 1
+        result["cases_with_graph_marked_seeds"] += bool(marked)
+        result["graph_marked_seed_occurrences"] += len(marked)
+        result["cases_with_graph_marked_seeds_absent_from_off_seed"] += bool(novel)
+        result["graph_marked_seed_occurrences_absent_from_off_seed"] += len(novel)
+        result["graph_marked_seed_occurrences_also_in_off_seed"] += len(marked & stock)
+        if "seed_pair_ids" in on:
+            on_seeds = on["seed_pair_ids"] or []
+            require(isinstance(on_seeds, list) and all(isinstance(i, str) and i for i in on_seeds), "invalid ON seed IDs")
+            result["all_seed_sets_compared_cases"] += 1
+            result["cases_with_different_seed_id_sets"] += set(on_seeds) != stock
+        if marked:
+            first_correct, second_correct = left[qid]["lme_correct"], right[qid]["lme_correct"]
+            result["graph_marked_seed_cases_with_verdict_change"] += first_correct != second_correct
+            result["graph_marked_seed_cases_both_correct"] += first_correct and second_correct
+            result["graph_marked_seed_cases_both_incorrect"] += not first_correct and not second_correct
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path)
@@ -349,6 +391,7 @@ def main(argv=None):
         summary["paired_comparison"]["right_evidence_sha256"] = digest(args.paired_run)
         summary["paired_comparison"]["right_condition"] = other_summary["condition"]
         summary["paired_comparison"]["right_operational_diagnostics"] = other_summary["operational_diagnostics"]
+        summary["paired_comparison"]["graph_seed_comparison"] = compare_graph_seeds(indexed, other_indexed)
     # No output is written until every requested evidence set passes.
     with args.output.open("x") as out:
         out.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")

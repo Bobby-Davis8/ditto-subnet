@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, load_run, operational_diagnostics, validate_paired_provenance, validate_provenance, validate_refinement_completion, wilson
+from audit_backend_run import DATASET_SHA256, AuditError, aggregate, audit_rows, compare, compare_graph_seeds, load_run, operational_diagnostics, validate_paired_provenance, validate_provenance, validate_refinement_completion, wilson
 
 
 def fixture():
@@ -31,6 +31,25 @@ def fixture():
 
 
 class BackendAuditTests(unittest.TestCase):
+    def test_graph_marked_seeds_not_necessarily_novel_against_off(self):
+        _, rows, _, _ = fixture()
+        off = {r["case_id"]: r for r in rows}
+        on = copy.deepcopy(off)
+        for qid in off:
+            off[qid]["data"]["seed_pair_ids"] = ["stock"]
+            on[qid]["data"].update(graph_retrieval=True, graph_seed_pair_ids=["stock"], seed_pair_ids=["stock"])
+        on["q1"]["data"]["graph_seed_pair_ids"].append("novel")
+        on["q1"]["data"]["seed_pair_ids"].append("novel")
+        result = compare_graph_seeds(on, off)
+        self.assertEqual(result["cases_with_graph_marked_seeds"], 2)
+        self.assertEqual(result["cases_with_graph_marked_seeds_absent_from_off_seed"], 1)
+        self.assertEqual(result["graph_marked_seed_occurrences_also_in_off_seed"], 2)
+        self.assertEqual(result["cases_with_different_seed_id_sets"], 1)
+        self.assertEqual(result["graph_marked_seed_cases_with_verdict_change"], 0)
+        self.assertEqual(result, compare_graph_seeds(off, on))
+        del off["q0"]["data"]["seed_pair_ids"]
+        self.assertEqual(compare_graph_seeds(on, off)["unavailable_cases"], 1)
+
     def test_graph_fallback_candidates_and_neighbor_traces_are_separate(self):
         report, rows, _, _ = fixture()
         report["meta"].update(lme_subject_graph_calls="10", lme_subject_graph_failures="8",
