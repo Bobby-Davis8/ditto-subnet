@@ -12,6 +12,7 @@
 //!                 via the playground Submit tab / the ditto CLI — see `submit()`)
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -498,6 +499,12 @@ const MAX_TARBALL_BYTES: u64 = 20 * 1024 * 1024;
 
 fn submit() -> anyhow::Result<()> {
     let out = "dittobench-submission.tgz";
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    let parent_dir = current_dir
+        .parent()
+        .context("submission directory has no parent")?;
+    let temporary_out =
+        parent_dir.join(format!(".dittobench-submission-{}.tgz", std::process::id()));
     // Never package secrets or local state: `.env` / `.env.*` hold your
     // OPENROUTER_API_KEY, `*.db` is your local Turso DB and `*.db-*` its
     // WAL/SHM sidecars. The tarball is uploaded to the platform — keep them out.
@@ -508,19 +515,31 @@ fn submit() -> anyhow::Result<()> {
     for pat in excludes {
         cmd.arg(format!("--exclude={pat}"));
     }
-    let status = cmd.args(["-czf", out, "."]).status().context("run tar")?;
-    anyhow::ensure!(status.success(), "tar failed");
+    let status = cmd
+        .arg("-czf")
+        .arg(&temporary_out)
+        .arg(".")
+        .status()
+        .context("run tar")?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&temporary_out);
+        anyhow::bail!("tar failed");
+    }
 
     // Enforce the platform's 20 MiB cap locally so a miner fails fast here
     // instead of being rejected server-side after upload.
-    let size = std::fs::metadata(out)
-        .with_context(|| format!("stat {out}"))?
+    let size = std::fs::metadata(&temporary_out)
+        .with_context(|| format!("stat {}", temporary_out.display()))?
         .len();
-    anyhow::ensure!(
-        size <= MAX_TARBALL_BYTES,
-        "submission tarball {out} is {size} bytes, over the {MAX_TARBALL_BYTES}-byte (20 MiB) limit; \
-         trim large files (models, fixtures, checkouts) before submitting"
-    );
+    if size > MAX_TARBALL_BYTES {
+        let _ = std::fs::remove_file(&temporary_out);
+        anyhow::bail!(
+            "submission tarball {out} is {size} bytes, over the {MAX_TARBALL_BYTES}-byte (20 MiB) limit; \
+             trim large files (models, fixtures, checkouts) before submitting"
+        );
+    }
+    std::fs::rename(&temporary_out, Path::new(out))
+        .with_context(|| format!("install completed submission tarball at {out}"))?;
 
     println!("packaged repository -> {out}");
     println!("excluded (secrets + local state): {}", excludes.join(", "));
