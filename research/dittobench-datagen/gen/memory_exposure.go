@@ -33,12 +33,21 @@ func (r MemoryExposureResult) TransformedShare() float64 {
 	return float64(r.Transformed) / float64(r.Eligible)
 }
 
-// AuditV10MemoryExposure evaluates only cases with explicit evidence bindings.
-// Missing evidence is an error: silently treating an unresolvable answer as a
-// transformation would make the difficulty gate pass for the wrong reason.
+// AuditV10MemoryExposure is the v10-named entry point retained for existing
+// callers; it audits any contract that carries evidence bindings (v10+).
 func AuditV10MemoryExposure(artifact DatasetArtifact) (MemoryExposureResult, error) {
-	if artifact.BenchVersion != protocol.BenchVersionV10 {
-		return MemoryExposureResult{}, fmt.Errorf("memory exposure audit requires bench version 10, got %d", artifact.BenchVersion)
+	return AuditMemoryExposure(artifact)
+}
+
+// AuditMemoryExposure evaluates only cases with explicit evidence bindings.
+// Missing evidence is an error: silently treating an unresolvable answer as a
+// transformation would make the difficulty gate pass for the wrong reason. It
+// applies to every contract from v10 upward (the first to carry
+// v10_evidence_pair_ids); a floor, never an enumeration, so a new version is
+// audited the day it is generated.
+func AuditMemoryExposure(artifact DatasetArtifact) (MemoryExposureResult, error) {
+	if artifact.BenchVersion < protocol.BenchVersionV10 {
+		return MemoryExposureResult{}, fmt.Errorf("memory exposure audit requires bench version %d or later, got %d", protocol.BenchVersionV10, artifact.BenchVersion)
 	}
 	pairs := make(map[string]string)
 	for _, tc := range artifact.ToolCases {

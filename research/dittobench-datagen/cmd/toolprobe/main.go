@@ -6,15 +6,23 @@ import (
 	"os"
 
 	"github.com/ditto-assistant/dittobench-datagen/internal/toolprobe"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func main() {
-	version := flag.Int("bench-version", 8, "benchmark contract version")
+	// Defaults to the newest supported contract so a new version is probed the
+	// day it exists; pass -bench-version explicitly to probe an older one.
+	version := flag.Int("bench-version", protocol.NewestBenchVersion(), "benchmark contract version")
 	runSize := flag.String("run-size", "full", "small, medium, or full")
 	train := flag.Int("train-seeds", 30, "number of training seeds")
 	heldOut := flag.Int("held-out-seeds", 10, "number of held-out seeds")
 	start := flag.Int64("seed-start", 1, "first training seed")
 	flag.Parse()
+
+	if !protocol.SupportedBenchVersion(*version) {
+		fmt.Fprintf(os.Stderr, "unsupported bench version %d\n", *version)
+		os.Exit(1)
+	}
 
 	result, err := toolprobe.Run(*version, *runSize, *start, *train, *heldOut)
 	if err != nil {
