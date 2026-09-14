@@ -1,0 +1,90 @@
+---
+# Stat-only guard for the pre-placed hosted-v2 control signer seed. Reached only
+# through coding_hosted_signer.yml, which first pins the fixed production paths;
+# infra/ansible/tests/coding-hosted-control-signer.yml exercises it directly
+# against synthetic temporary trees.
+#
+# Every stat uses follow: false and get_checksum: false. No task in this file
+# may read file contents.
+
+- name: Inspect hosted-v2 control signer seed ancestors without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop: "{{ platform_coding_hosted_signer_seed_ancestors }}"
+  register: platform_coding_hosted_signer_ancestor_stats
+
+- name: Require safe hosted-v2 control signer seed ancestors
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isdir
+      - not item.stat.islnk
+      - item.stat.pw_name | default('') in ['root', platform_owner]
+      - not item.stat.wgrp
+      - not item.stat.woth
+    fail_msg: >-
+      {{ item.item }} must be an existing real directory owned by root or
+      {{ platform_owner }} with no group or world write permission. Fix it through
+      the protected ceremony in infra/docs/coding-hosted-control-signer-v2.md, or
+      set platform_coding_hosted_control_enabled back to false.
+    quiet: true
+  loop: "{{ platform_coding_hosted_signer_ancestor_stats.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Inspect the hosted-v2 control signer seed directory without following links
+  ansible.builtin.stat:
+    path: "{{ platform_coding_hosted_signer_seed_directory }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: platform_coding_hosted_signer_directory_stat
+
+- name: Require the Platform-owned 0700 seed directory
+  ansible.builtin.assert:
+    that:
+      - platform_coding_hosted_signer_directory_stat.stat.exists
+      - platform_coding_hosted_signer_directory_stat.stat.isdir
+      - not platform_coding_hosted_signer_directory_stat.stat.islnk
+      - platform_coding_hosted_signer_directory_stat.stat.pw_name | default('') == platform_owner
+      - platform_coding_hosted_signer_directory_stat.stat.mode == '0700'
+    fail_msg: >-
+      {{ platform_coding_hosted_signer_seed_directory }} must be a real directory
+      owned by {{ platform_owner }} with mode 0700. Ansible never creates it: the
+      protected ceremony in infra/docs/coding-hosted-control-signer-v2.md places
+      the directory and seed. Otherwise set platform_coding_hosted_control_enabled
+      back to false.
+    quiet: true
+
+- name: Inspect the hosted-v2 control signer seed metadata without reading it
+  ansible.builtin.stat:
+    path: "{{ platform_coding_hosted_signer_seed_file }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: platform_coding_hosted_signer_seed_stat
+
+- name: Require the pre-placed single-link 0600 32-byte seed owned by the Platform user
+  ansible.builtin.assert:
+    that:
+      - platform_coding_hosted_signer_seed_stat.stat.exists
+      - platform_coding_hosted_signer_seed_stat.stat.isreg
+      - not platform_coding_hosted_signer_seed_stat.stat.islnk
+      - platform_coding_hosted_signer_seed_stat.stat.pw_name | default('') == platform_owner
+      - platform_coding_hosted_signer_seed_stat.stat.mode == '0600'
+      - platform_coding_hosted_signer_seed_stat.stat.nlink == 1
+      - platform_coding_hosted_signer_seed_stat.stat.size == 32
+    fail_msg: >-
+      The hosted-v2 control signer seed at {{ platform_coding_hosted_signer_seed_file }}
+      is missing or unsafe: it must be a single-link regular 32-byte file owned by
+      {{ platform_owner }} with mode 0600. Ansible never creates, copies or reads
+      it. Place it through the protected ceremony in
+      infra/docs/coding-hosted-control-signer-v2.md, or set
+      platform_coding_hosted_control_enabled back to false, then re-run.
+    quiet: true

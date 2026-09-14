@@ -33,6 +33,17 @@ through their independent validator trust configuration. No key is generated,
 uploaded or enabled by this change. Key rotation needs coordinated trust-config
 updates and process restart; there is no hotkey fallback.
 
+### Host wiring
+
+The `platform_app` Ansible role renders these settings, default off. When
+enabled it renders the fixed seed path
+`/etc/ditto-platform/coding-hosted-signer/seed` and the reviewed public hotkey.
+Before touching the host it stat-verifies, without reading, that the seed and
+its `0700` directory are owned by `deploy`, the pm2 user that runs `ditto-api`.
+Seed creation, backup, placement and production activation are a separate
+protected ceremony. The fixed placement, enabling order, rotation and
+revocation live in `infra/docs/coding-hosted-control-signer-v2.md`.
+
 ## Signing and lifecycle boundary
 
 The loader checks the actual derived key and a sign/verify startup challenge

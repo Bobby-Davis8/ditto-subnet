@@ -12,6 +12,14 @@
 - name: Validate env-sourced configuration before rendering anything
   ansible.builtin.import_tasks: preflight.yml
 
+# --- Hosted-v2 control signer: metadata-only verification of the seed placed by
+# the protected ceremony, before anything on the host is touched. Disabled
+# converges include nothing, so the fixed seed path is not even stat()ed
+# (mirrors the Python loader's disabled no-read behaviour).
+- name: Verify the pre-placed hosted-v2 control signer without reading it
+  ansible.builtin.include_tasks: coding_hosted_signer.yml
+  when: platform_coding_hosted_control_enabled | bool
+
 # --- gcloud (used to read secrets via the VM's attached runtime SA / ADC) ---
 - name: Ensure gcloud is available (GCE Debian images normally ship it)
   ansible.builtin.command: gcloud --version

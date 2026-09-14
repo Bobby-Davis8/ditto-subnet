@@ -194,6 +194,29 @@ platform_coding_hippius_evidence_spool_root: /var/lib/ditto-platform/coding-evid
 secret_coding_hippius_evidence_access_key: platform-coding-hippius-evidence-access-key
 secret_coding_hippius_evidence_secret_key: platform-coding-hippius-evidence-secret-key
 
+# Hosted-v2 native control signer: a dedicated ONLINE SR25519 operational key
+# that signs only canonical native-v2 status/result envelopes in the Python API
+# process. It is distinct from the offline curator Ed25519 key, every validator
+# hotkey and the screener hotkey. This role never generates, copies, templates,
+# fetches, reads or checksums the seed: a separate protected ceremony places it
+# (infra/docs/coding-hosted-control-signer-v2.md). Enabled converges only
+# assert the public hotkey and stat-verify the pre-placed file; disabled
+# converges do not inspect the path at all.
+platform_coding_hosted_control_enabled: false
+# Public SS58 address derived from the ceremony seed; reviewed in Git when set.
+platform_coding_hosted_signer_hotkey: ""
+# FIXED, not tunable: asserted literally when enabled, and platform.env.j2
+# renders the literal path. Directory owned by platform_owner (the pm2 user that
+# runs ditto-api) with mode 0700; seed a single-link 0600 32-byte regular file
+# with the same owner; each ancestor root- or platform_owner-owned with no
+# group/world write.
+platform_coding_hosted_signer_seed_directory: /etc/ditto-platform/coding-hosted-signer
+platform_coding_hosted_signer_seed_file: /etc/ditto-platform/coding-hosted-signer/seed
+platform_coding_hosted_signer_seed_ancestors:
+  - /etc/ditto-platform
+  - /etc
+  - /
+
 # Subnet / pricing config (mirrors .env.example defaults).
 platform_netuid: 118
 platform_subtensor_network: finney
