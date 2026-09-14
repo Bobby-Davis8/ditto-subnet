@@ -111,8 +111,10 @@ The persisted receipt also carries the verified terminal grant generation,
 inference-grant digest, and settlement-set digest; legacy unbound receipts are
 evidence history, never private-task authority.
 The host constructs the adapter only when `DITTOBENCH_CODING_CANARY_ENABLED` is
-set and the certification pack root is present. Flags stay false until a
-separately reviewed activation.
+set and the certification pack root is present. The sandbox scorer image
+carries a build-verified copy of that pack at
+`/opt/ditto/coding/certification-root`, and Compose pins the root there. Flags
+stay false until a separately reviewed activation.
 
 Coding contract v1 remains permanently shadow-only. A separately reviewed
 contract v2, calibration result, and owner-approved emissions policy are
