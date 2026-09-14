@@ -184,10 +184,10 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 	if !ok || owner.Uid != uint32(os.Geteuid()) || info.Mode().Perm() != 0600 || !privateDirectory(filepath.Dir(wire.DockerSocket)) {
 		return nil, ErrConfig
 	}
-	ipText, port, err := net.SplitHostPort(wire.RouterListen)
-	ip := net.ParseIP(ipText)
-	portNumber, portErr := strconv.Atoi(port)
-	if err != nil || ip == nil || ip.To4() == nil || !ip.IsPrivate() || ip.IsLoopback() || portErr != nil || portNumber < 1024 || portNumber > 65535 || strconv.Itoa(portNumber) != port {
+	// One parse and one address policy for both namespaces: the exact canonical
+	// text of a private, non-loopback IPv4 address with an unprivileged port.
+	routerAddress, err := netip.ParseAddrPort(wire.RouterListen)
+	if err != nil || routerAddress.String() != wire.RouterListen || !rootlessnetns.ValidAddress(routerAddress) {
 		return nil, ErrConfig
 	}
 	var router *rootlessRouter
@@ -196,14 +196,12 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 	case routerNamespaceRootless:
 		// The helper is bound to the installed worker's own bundle directory; no
 		// configured path can select another executable.
-		address, addressErr := netip.ParseAddrPort(wire.RouterListen)
 		worker, workerErr := os.Executable()
 		helper := filepath.Join(filepath.Dir(worker), rootlessnetns.HelperExecutableName)
-		if addressErr != nil || address.String() != wire.RouterListen || !rootlessnetns.ValidAddress(address) || workerErr != nil ||
-			!filepath.IsAbs(worker) || !executable(helper) || !executable(rootlessnetns.NsenterExecutable) {
+		if workerErr != nil || !filepath.IsAbs(worker) || !executable(helper) || !executable(rootlessnetns.NsenterExecutable) {
 			return nil, ErrConfig
 		}
-		router = &rootlessRouter{address: address, helper: helper}
+		router = &rootlessRouter{address: routerAddress, helper: helper}
 	default:
 		return nil, ErrConfig
 	}
@@ -228,9 +226,9 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 	p := profile.ResourcePolicy
 	docker := &sandbox.LocalDocker{HarnessPort: "8080", MemoryLimit: strconv.FormatUint(p.MemoryLimitBytes, 10), TmpfsLimit: strconv.FormatUint(p.ScratchLimitBytes, 10),
 		CPULimit: fmt.Sprintf("%d.%03d", p.CPUQuotaMillis/1000, p.CPUQuotaMillis%1000), PidsLimit: int(p.PidsLimit), StartTimeout: 2 * time.Minute,
-		Harden: true, RequireRootless: true, RequireIsolatedDaemon: true, HostGatewayIP: ip.String(), EgressNetwork: wire.EgressNetwork, EgressProxy: wire.EgressProxy,
+		Harden: true, RequireRootless: true, RequireIsolatedDaemon: true, HostGatewayIP: routerAddress.Addr().String(), EgressNetwork: wire.EgressNetwork, EgressProxy: wire.EgressProxy,
 		SeccompProfile: wire.SeccompProfile, AppArmorProfile: wire.AppArmorProfile}
-	return &runtimeConfig{wire: wire, control: control, starts: starts, executors: executors, docker: docker, publicBase: "http://host.docker.internal:" + port, router: router}, nil
+	return &runtimeConfig{wire: wire, control: control, starts: starts, executors: executors, docker: docker, publicBase: "http://host.docker.internal:" + strconv.Itoa(int(routerAddress.Port())), router: router}, nil
 }
 
 func identifier(s string) bool {

@@ -72,7 +72,7 @@ func sameUIDs(uids [4]uint32, euid uint32) bool {
 // root can modify are also accepted. The file itself must always be the UID's
 // read-only single-link file RootlessKit writes.
 func readChildPID(runRoot string, euid int) (int, error) {
-	if euid < 0 || !filepath.IsAbs(runRoot) || filepath.Clean(runRoot) != runRoot {
+	if euid < 0 || !cleanAbsolute(runRoot) {
 		return 0, ErrListener
 	}
 	root, err := unix.Open(runRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -304,7 +304,7 @@ func parseStatusUIDs(body []byte) ([4]uint32, error) {
 // daemonPeer returns the credentials of the process that listens on the
 // configured Docker socket. The kernel records them at listen time.
 func daemonPeer(ctx context.Context, socket string) (int, uint32, error) {
-	if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
+	if !cleanAbsolute(socket) {
 		return 0, 0, ErrListener
 	}
 	dialer := net.Dialer{Timeout: 5 * time.Second}

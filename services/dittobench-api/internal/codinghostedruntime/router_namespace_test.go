@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -113,6 +114,52 @@ func TestRootlessRouterNamespaceRejectsDriftBeforeConsumingAttempt(t *testing.T)
 				t.Fatal("invalid config consumed attempt")
 			}
 		})
+	}
+}
+
+// router_listen is parsed once with the shared rootless address policy in both
+// namespaces. Host mode formerly also accepted two non-canonical spellings of an
+// IPv4 address (a bracketed IPv4 literal and an IPv4-mapped IPv6 literal); both
+// are now refused in either mode. Canonical private IPv4 input is unchanged.
+func TestRouterListenUsesOneAddressPolicyInBothNamespaces(t *testing.T) {
+	helper := rootlessHelper(t)
+	for _, mode := range []string{routerNamespaceHost, routerNamespaceRootless} {
+		for listen, accepted := range map[string]bool{
+			"172.21.0.1:19010":          true,
+			"10.33.0.2:18080":           true,
+			"192.168.1.20:65535":        true,
+			"172.21.0.1:1024":           true,
+			"172.21.0.1:1023":           false,
+			"172.21.0.1:019010":         false,
+			"172.21.0.1:+19010":         false,
+			"172.021.0.1:19010":         false,
+			"[172.21.0.1]:19010":        false,
+			"[::ffff:172.21.0.1]:19010": false,
+			"[fd00::1]:19010":           false,
+			"0.0.0.0:19010":             false,
+			"127.0.0.1:19010":           false,
+			"8.8.8.8:19010":             false,
+			"169.254.1.1:19010":         false,
+			"172.21.0.1":                false,
+			" 172.21.0.1:19010":         false,
+			"localhost:19010":           false,
+		} {
+			wire, path := fixture(t)
+			wire.RouterNamespace, wire.RouterListen = mode, listen
+			writeConfig(t, path, wire)
+			config, err := loadConfigChecked(path, rootlessExecutable(helper))
+			if (err == nil) != accepted {
+				t.Fatalf("mode %s listen %q: accepted=%v err=%v", mode, listen, err == nil, err)
+			}
+			if err != nil {
+				continue
+			}
+			address := netip.MustParseAddrPort(listen)
+			if config.docker.HostGatewayIP != address.Addr().String() ||
+				config.publicBase != "http://host.docker.internal:"+strconv.Itoa(int(address.Port())) {
+				t.Fatalf("mode %s listen %q: derived gateway or public URL drift", mode, listen)
+			}
+		}
 	}
 }
 

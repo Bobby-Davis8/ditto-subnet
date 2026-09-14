@@ -65,8 +65,33 @@ func ValidAddress(address netip.AddrPort) bool {
 }
 
 func listen(ctx context.Context, config Config, sys system) (net.Listener, error) {
-	if ctx == nil || ctx.Err() != nil || !ValidAddress(config.Address) || !cleanAbsolute(config.HelperExecutable) ||
-		!cleanAbsolute(config.DockerSocket) || !cleanAbsolute(sys.nsenter) {
+	child, err := pinTopology(ctx, config, sys)
+	if err != nil {
+		return nil, ErrListener
+	}
+	defer child.Close()
+	argv := []string{
+		sys.nsenter,
+		// The descriptors below are the inspected namespaces, inherited at
+		// fixed numbers. Credentials are preserved: no setuid/setgid/setgroups.
+		"--user=/proc/self/fd/" + strconv.Itoa(helperUserFD), "--net=/proc/self/fd/" + strconv.Itoa(helperNetFD),
+		"--preserve-credentials",
+		"--", config.HelperExecutable, "--listen", config.Address.String(),
+	}
+	// ExtraFiles start at helperSocketFD, then helperUserFD and helperNetFD.
+	fd, err := spawnHelper(ctx, argv, child.user, child.net)
+	if err != nil {
+		return nil, ErrListener
+	}
+	return adoptListener(fd, config.Address, socketNetns, child.facts.net)
+}
+
+// pinTopology checks the configuration, reads RootlessKit's child pid, and
+// returns the child's pinned namespaces only when the daemon behind the
+// configured socket shares them in the accepted topology. The socket path is
+// checked by daemonPeer and the nsenter path by spawnHelper, where each is used.
+func pinTopology(ctx context.Context, config Config, sys system) (*pinnedProcess, error) {
+	if ctx == nil || ctx.Err() != nil || !ValidAddress(config.Address) || !cleanAbsolute(config.HelperExecutable) {
 		return nil, ErrListener
 	}
 	euid := os.Geteuid()
@@ -82,33 +107,22 @@ func listen(ctx context.Context, config Config, sys system) (net.Listener, error
 	if err != nil {
 		return nil, ErrListener
 	}
-	defer child.Close()
 	peerPID, peerUID, err := daemonPeer(ctx, config.DockerSocket)
 	if err != nil {
+		child.Close()
 		return nil, ErrListener
 	}
 	daemon, err := inspectProcess(sys.procRoot, peerPID)
 	if err != nil {
+		child.Close()
 		return nil, ErrListener
 	}
 	daemon.Close()
 	if !validTopology(uint32(euid), self, child.facts, daemon.facts, peerUID) {
+		child.Close()
 		return nil, ErrListener
 	}
-	argv := []string{
-		sys.nsenter,
-		// The descriptors below are the inspected namespaces, inherited at
-		// fixed numbers. Credentials are preserved: no setuid/setgid/setgroups.
-		"--user=/proc/self/fd/" + strconv.Itoa(helperUserFD), "--net=/proc/self/fd/" + strconv.Itoa(helperNetFD),
-		"--preserve-credentials",
-		"--", config.HelperExecutable, "--listen", config.Address.String(),
-	}
-	// ExtraFiles start at helperSocketFD, then helperUserFD and helperNetFD.
-	fd, err := spawnHelper(ctx, argv, child.user, child.net)
-	if err != nil {
-		return nil, ErrListener
-	}
-	return adoptListener(fd, config.Address, socketNetns, child.facts.net)
+	return child, nil
 }
 
 func cleanAbsolute(path string) bool {
@@ -218,15 +232,12 @@ func adoptListener(fd int, expected netip.AddrPort, netnsOf func(int) (nsID, err
 		_ = unix.Close(fd)
 		return nil, ErrListener
 	}
+	// verifyListener already bound the exact address, type and namespace of
+	// this socket; FileListener only duplicates the same descriptor.
 	file := os.NewFile(uintptr(fd), "rootless-router-listener")
 	listener, err := net.FileListener(file)
 	_ = file.Close()
 	if err != nil {
-		return nil, ErrListener
-	}
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || netip.AddrPortFrom(address.AddrPort().Addr().Unmap(), address.AddrPort().Port()) != expected {
-		_ = listener.Close()
 		return nil, ErrListener
 	}
 	return listener, nil
