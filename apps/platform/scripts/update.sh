@@ -2,8 +2,9 @@
 #
 # Scripted update for the Ditto Platform API:
 #   fetch -> reset -> preflight -> uv sync -> build dashboard -> set deploy
-#   config -> ensure Pylon -> migrate -> pm2 start/reload/recreate -> verify
-#   the app is serving the commit that was checked out.
+#   config -> hosted signer metadata check (only when enabled) -> ensure
+#   Pylon -> migrate -> pm2 start/reload/recreate -> verify the app is serving
+#   the commit that was checked out.
 # NOT zero-downtime: ditto-api is a single fork-mode pm2 process, so the reload
 # below is a stop/start with ~6s of refused connections (measured), not a
 # rolling handover. See scripts/ecosystem.config.js.
@@ -423,6 +424,29 @@ set -a
 . ./.env
 . ./.env.deploy
 set +a
+
+deploy_stage="signer-preflight"
+# Hosted-v2 control signer (default off; infra/docs/coding-hosted-control-signer-v2.md).
+# ditto-api reads the seed at startup and refuses to start when it is missing,
+# unsafe or does not match DITTO_CODING_HOSTED_SIGNER_HOTKEY. pm2 then keeps
+# restarting it into `errored`. Unless the environment just sourced -- the one
+# pm2 receives below through --update-env -- disables the signer, check the
+# placement's metadata first, while the old process is still serving. The
+# check lstat()s and never opens the seed, so it cannot catch a hotkey mismatch.
+case "${DITTO_CODING_HOSTED_CONTROL_ENABLED-false}" in
+  false|0) ;;
+  *)
+    echo "==> checking hosted-v2 control signer settings and seed metadata (seed not read)"
+    if ! uv run python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata; then
+      echo "ERROR: refusing to deploy $deploy_target: DITTO_CODING_HOSTED_CONTROL_ENABLED does not" >&2
+      echo "       disable the hosted-v2 control signer, but its settings or seed placement failed the" >&2
+      echo "       metadata check, so ditto-api would not start. pm2 was not touched; the checkout is" >&2
+      echo "       restored below. Fix the placement through the protected ceremony, or set" >&2
+      echo "       platform_coding_hosted_control_enabled: false and converge, then redeploy." >&2
+      exit 1
+    fi
+    ;;
+esac
 
 deploy_stage="infra"
 # Ensure the Docker infra this host needs is up (Pylon on a deployed host; the

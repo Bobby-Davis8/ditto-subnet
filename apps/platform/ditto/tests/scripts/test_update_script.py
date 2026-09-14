@@ -10,6 +10,8 @@ from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[3]
 
 # The revision the fake checkout resolves to, and the (older) revision the
@@ -228,6 +230,9 @@ def _run_update(
         for key, value in os.environ.items()
         if key
         not in {
+            "DITTO_CODING_HOSTED_CONTROL_ENABLED",
+            "DITTO_CODING_HOSTED_SIGNER_HOTKEY",
+            "DITTO_CODING_HOSTED_SIGNER_SEED_FILE",
             "DITTO_COMPOSE_SERVICES",
             "DITTO_DASHBOARD_WANDB_URL",
             "DITTO_DEPLOY_BRANCH",
@@ -766,3 +771,98 @@ def test_update_records_and_announces_the_deployed_commit(tmp_path: Path) -> Non
     deployed_source = tmp_path / "repo" / "logs" / "deployed-source.sha"
     assert deployed_source.read_text() == f"{TARGET_SHA}\n"
     assert deployed_source.stat().st_mode & 0o777 == 0o600
+
+
+# ---------------------------------------------------------------------------
+# Hosted-v2 control signer: ditto-api refuses to start on a missing or unsafe
+# seed, so an enabled environment is metadata-checked before pm2 is touched.
+
+SIGNER_CHECK = (
+    "run python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata"
+)
+
+
+def _recording_uv(tmp_path: Path, *, signer_check_exit: int = 0) -> str:
+    log = tmp_path / "repo" / "uv-actions.log"
+    return (
+        'printf "%s|%s\\n" "$*" "${DITTO_CODING_HOSTED_CONTROL_ENABLED-unset}"'
+        f' >> "{log}"\n'
+        'case "$*" in\n'
+        f"  *coding_hosted_signer_preflight*) exit {signer_check_exit} ;;\n"
+        "esac\n"
+    )
+
+
+def _uv_actions(tmp_path: Path) -> list[str]:
+    return (tmp_path / "repo" / "uv-actions.log").read_text().splitlines()
+
+
+@pytest.mark.parametrize(
+    "initial_env",
+    [
+        "BASE_SETTING=kept\n",
+        "BASE_SETTING=kept\nDITTO_CODING_HOSTED_CONTROL_ENABLED=false\n",
+        "DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n"
+        "DITTO_CODING_HOSTED_CONTROL_ENABLED=0\n",
+    ],
+)
+def test_update_skips_the_signer_check_while_the_env_disables_it(
+    tmp_path: Path, initial_env: str
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=initial_env,
+        uv_source=_recording_uv(tmp_path, signer_check_exit=1),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not any(SIGNER_CHECK in action for action in _uv_actions(tmp_path))
+    assert "hosted-v2 control signer" not in result.stdout
+
+
+@pytest.mark.parametrize("value", ["true", "1", "TRUE", ""])
+def test_update_checks_signer_metadata_before_infra_migrations_and_pm2(
+    tmp_path: Path, value: str
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=(
+            "DITTO_CODING_HOSTED_CONTROL_ENABLED=false\n"
+            f"DITTO_CODING_HOSTED_CONTROL_ENABLED={value}\n"
+        ),
+        uv_source=_recording_uv(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    actions = _uv_actions(tmp_path)
+    check = actions.index(f"{SIGNER_CHECK}|{value}")
+    assert actions[check - 1].startswith("sync ")
+    assert actions[check + 1].startswith("run alembic upgrade head|")
+    assert "seed not read" in result.stdout
+    assert "pm2 reload scripts/ecosystem.config.js" in _actions(tmp_path)
+
+
+def test_update_refuses_an_enabled_signer_that_fails_its_metadata_check(
+    tmp_path: Path,
+) -> None:
+    """ditto-api would crash-loop, so the old process must keep serving."""
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env="DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n",
+        uv_source=_recording_uv(tmp_path, signer_check_exit=1),
+        health_commit=RUNNING_SHA,
+    )
+
+    assert result.returncode != 0
+    assert "failed the" in result.stderr
+    assert "metadata check, so ditto-api would not start" in result.stderr
+    assert not any(action.startswith("run alembic") for action in _uv_actions(tmp_path))
+    assert not (tmp_path / "repo" / "pm2-actions.log").exists()
+    assert f"git reset --hard {RUNNING_SHA}" in _git_actions(tmp_path)
+    record = _deploy_record(tmp_path)
+    assert record["result"] == "failed"
+    assert record["stage"] == "signer-preflight"
+    assert record["rolled_back"] == "yes"
