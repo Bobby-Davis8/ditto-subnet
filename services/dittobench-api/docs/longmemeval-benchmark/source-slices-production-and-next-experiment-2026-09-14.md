@@ -21,8 +21,11 @@ or graph activation.** MCP/search-tool payloads and the legacy userPrompt-only
 API path are unchanged. This is read-time prompt construction.
 `PROMPT_MEMORY_SOURCE_SLICES=off` restores legacy packing; unset/on enables it.
 The flag was absent from both production runtime environment files when checked.
-No production user data was edited. A bounded initial production log sample
-contained no excerpt events, so real-user activation has not been observed yet.
+No production user data was edited. The first bounded production log sample
+contained no excerpt events. A subsequent 20-minute, 20,000-line sample of the
+active green backend observed one request with excerpts and 5,040 added bytes.
+Only aggregate counts were retained: this proves the live path executes, not
+real-user answer quality or the benchmark gain.
 
 Authenticated preview QA at final head
 `f2e7db7170b7409a80bd4056c1d13c25da675ddc` used only the synthetic be-2741
@@ -33,6 +36,10 @@ The persisted answer was independently fetched with authentication. Legacy
 userPrompt probes did not exercise the new path and are not counted as passes.
 Reproducible helper, synthetic SQL, and evidence:
 [backend evidence](https://github.com/ditto-assistant/backend/blob/b44cf52cedb049f45d9be9d435b3a3998bcccb6c/docs/reports/2026-09-14-source-slices-preview-evidence.md).
+The normal preview destroy workflow
+[34875789869](https://github.com/ditto-assistant/ditto-app/actions/runs/34875789869)
+completed successfully; the lane state file was confirmed absent. Local benchmark
+fixtures and volumes were preserved.
 
 ## Measured efficiency, not an invoice
 
