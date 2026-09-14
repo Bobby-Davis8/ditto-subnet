@@ -47,6 +47,13 @@ worker, and it is off unless the validator environment sets both:
 | `VALIDATOR_CODING_HOSTED_CONTROL_ENABLED` | `true` to allow the command |
 | `VALIDATOR_CODING_HOSTED_PLATFORM_HOTKEY` | The trusted Platform control signer address. It is a separate online key, never the offline curator key, and never taken from a command argument. |
 
+`docker-compose.yml` passes both into the `ditto-subnet` container, defaulting
+to `false` and empty. The `validator_stack` Ansible role renders them from
+`validator_stack_coding_hosted_control_enabled` and
+`validator_stack_coding_hosted_platform_hotkey`, and refuses an address that is
+malformed or equal to the validator's own hotkey. Enabling order, rotation and
+revocation are in `infra/docs/coding-hosted-control-signer-v2.md`.
+
 Run it inside the validator container, so the configured hotkey wallet is used
 in place through `load_validator_keypair`. The command touches only the key's
 public address and `sign`. It never reads, prints or exports seed material.
