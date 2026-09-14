@@ -24,6 +24,7 @@ applied to an existing version. It ships as a new one.
 | 10 (pre-activation) | `2027-02-01` | A generator-as-spec contract: seed-scoped ontologies, recursive query programs, independent renderers, and linked metamorphic/counterfactual cases. Runtime execution is available; Platform activation remains separate. |
 | 11 (pre-activation) | `2027-03-01` | Anti-template-fitting: sampled program shapes, compositional surface grammar, descriptive entity binding, a multi-edit surface-noise projector, and per-seed composed injection markers. Runtime execution is available; Platform activation remains separate. |
 | 12 (pre-activation) | `2027-04-01` | Anti-KV-substrate: prose-only amounts with per-seed shuffled record order, no `%+d`/`->` format tells, universal relational subject binding, larger-minus-settled rebalanced, and compositional injection markers and routing cues. Runtime execution is available; Platform activation remains separate. |
+| 13 (grader-only, pre-generation) | — | The typed-claim grader (see [Bench v13 grader](#bench-v13-grader-typed-claims-requested-unit-quantities-multilingual-safe)): asserted-vs-cited claim engine, requested-unit money, three-valued direction, date/absence/clarify kinds, Unicode fold, and reply-language lexicons. Reachable only through `gradingPolicyForVersion(v >= 13)`; `SupportedBenchVersion` does not yet admit 13, so no dataset epoch exists until the v13 generation contract lands. |
 
 ## V10 generator-as-spec contract
 
@@ -516,6 +517,14 @@ claims.
   "maybe X") asserts everything it lists; a lone value is asserted; a
   multi-value sentence with neither cue nor enumeration is exposition and
   asserts nothing. Temporal qualification counts once, as the current value.
+  Two refinements keep natural concise answers out of the exposition rule: a
+  calendar-year token (1900..2100) beside a count or amount is a qualifier, not
+  a candidate, unless the case's own expected or distractor value is year-like
+  ("You took 3 trips in 2026" asserts 3; "In 2026 you saved $3,800" asserts
+  one amount), and an uncued bare integer beside an explicitly marked amount is
+  exposition ("$3,800 across 4 trips"). A colon that closes a clause cues the
+  value after it ("$5,000 minus $1,200: $3,800"), and verb-object counts
+  ("took 3", "booked 3") are weak claim cues.
 - **Quantities in the requested unit.** `AnswerMoney` reads a bare integer in
   the unit the question asked for (`MemoryCase.AnswerUnit`, inferred from
   "minor unit(s)" / "cents" in the public question when unset): expected
@@ -576,10 +585,13 @@ owns no bank. Until the v13 generation contract lands, the generated-corpus
 gate regrades the newest generatable corpus under the v13 policy and reports
 `corpus_bench_version`; it adds a **per-claim-kind** gate (public-question-only
 passable share strictly below 5% for every non-interaction kind). On the pinned
-40-seed full run the v9 corpus regraded at v13 has 0 passable value, list, money,
+40-seed full run the v12 corpus (the newest generatable version, reported as
+`corpus_bench_version: 12`) regraded at v13 has 0 passable value, list, money,
 and number cases (v9's 120 passable declarative acknowledgements are gone), the
-v13-1 bank's 59 hard negatives all score 0, and its 47 reviewed positives all
-score. The GIH transcript negative (answer present, derivation absent from
+v13-1 bank's 59 hard negatives all score 0, and its 54 reviewed positives all
+score. `datagen-ci.yml` runs `-release-gate` on every datagen pull request;
+`TestReleaseGateCoversEverySupportedVersionAndPolicyFloor` runs the same check
+under `go test ./...` in the release workflow's datagen gate. The GIH transcript negative (answer present, derivation absent from
 completions) needs completion spans and lands with the provenance gate.
 
 ## Auditing an old score
