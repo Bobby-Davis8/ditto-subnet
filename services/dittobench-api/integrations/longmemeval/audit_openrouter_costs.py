@@ -79,7 +79,7 @@ def journal_evidence(path):
     Input contract: passive backend checkpoint+'.provider-usage.jsonl'. It does
     not prove coverage of calls that failed before a provider ID was received.
     """
-    latest, owners, unpriced = {}, {}, []
+    latest, owners, models, unpriced = {}, {}, {}, []
     with Path(path).open() as stream:
         for line in stream:
             row = json.loads(line)
@@ -88,22 +88,30 @@ def journal_evidence(path):
                 raise ValueError("invalid journal attribution")
             request = {"case_id": case, "stage": stage, "generation_id": generation,
                        "model": row.get("model")}
-            if not isinstance(request["model"], str) or not request["model"]:
-                raise ValueError("journal model missing")
+            if request["model"] is not None and not isinstance(request["model"], str):
+                raise ValueError("invalid journal model")
             if not generation:
                 unpriced.append(request)
                 continue
             if not isinstance(generation, str) or not GENERATION.fullmatch(generation):
                 raise ValueError("invalid journal generation ID")
-            owner = (case, stage, request["model"], row.get("attempt_id"))
+            owner = (case, stage, row.get("attempt_id"))
             if generation in owners and owners[generation] != owner:
                 raise ValueError("journal generation ownership changed")
             owners[generation] = owner
+            if request["model"]:
+                if models.get(generation) and models[generation] != request["model"]:
+                    raise ValueError("journal model identity changed")
+                models[generation] = request["model"]
+            request["model"] = models.get(generation)
             receipt = {"generation_id": generation, "status": "cost_missing", "model": request["model"]}
             if row.get("cost_status") == "reported_usage_cost":
-                receipt.update(status="ok", total_cost_usd=str(money(row.get("cost_credits"))),
+                receipt.update(status="provisional", observed_cost_usd=str(money(row.get("cost_credits"))),
                                basis="openrouter_response.usage.cost", unit_conversion="USD-denominated OpenRouter credits")
             latest[generation] = (request, receipt)
+    for request, receipt in latest.values():
+        if not request["model"]:
+            raise ValueError("journal model unresolved after aggregation")
     return [v[0] for v in latest.values()] + unpriced, [v[1] for v in latest.values()]
 
 
@@ -167,19 +175,53 @@ def fetch_receipt(generation, key, opener=None):
         return {"generation_id": generation, "status": "invalid_receipt"}
 
 
-def reconcile_receipts(requests, receipts, key, fetch=fetch_receipt):
+def final_receipt(receipt):
+    return receipt.get("status") == "ok" and receipt.get("basis") == "openrouter_generation.total_cost"
+
+
+def receipt_index(receipts):
     indexed = {}
     for receipt in receipts:
         generation = receipt.get("generation_id")
         if generation in indexed:
             raise ValueError("duplicate generation receipt")
         indexed[generation] = receipt
+    return indexed
+
+
+def observed_cost(receipt):
+    value = receipt.get("observed_cost_usd")
+    if value is None and receipt.get("basis") == "openrouter_response.usage.cost":
+        value = receipt.get("total_cost_usd")  # Earlier audit format, still provisional.
+    return None if value is None else str(money(value))
+
+
+def merge_receipts(saved, journal):
+    indexed = receipt_index(saved)
+    for generation, row in receipt_index(journal).items():
+        prior = indexed.get(generation)
+        if prior and final_receipt(prior):
+            # Final GET cost can legitimately differ from an earlier stream
+            # snapshot. Retain both without summing or requiring equality.
+            prior = dict(prior)
+            if observed_cost(row) is not None:
+                prior["observed_cost_usd"] = observed_cost(row)
+            indexed[generation] = prior
+        else:
+            indexed[generation] = row
+    return list(indexed.values())
+
+
+def reconcile_receipts(requests, receipts, key, fetch=fetch_receipt):
+    indexed = receipt_index(receipts)
     for generation in sorted({row["generation_id"] for row in requests if row["generation_id"]}):
         prior = indexed.get(generation)
-        if prior and prior.get("status") == "ok":
+        if prior and final_receipt(prior):
             money(prior.get("total_cost_usd"))
             continue
         receipt = fetch(generation, key)
+        if prior and observed_cost(prior) is not None:
+            receipt["observed_cost_usd"] = observed_cost(prior)
         indexed[generation] = receipt
         if receipt.get("http_status") in (401, 402, 403, 429):
             break
@@ -187,13 +229,9 @@ def reconcile_receipts(requests, receipts, key, fetch=fetch_receipt):
 
 
 def summarize(requests, receipts):
-    indexed = {}
-    for receipt in receipts:
-        generation = receipt.get("generation_id")
-        if generation in indexed:
-            raise ValueError("duplicate generation receipt")
-        indexed[generation] = receipt
+    indexed = receipt_index(receipts)
     totals, counts, missing = defaultdict(Decimal), defaultdict(int), defaultdict(int)
+    provisional, observed_counts = defaultdict(Decimal), defaultdict(int)
     stages, seen = set(), set()
     for request in requests:
         key = (request["case_id"], request["stage"])
@@ -204,15 +242,20 @@ def summarize(requests, receipts):
                 raise ValueError("duplicate request attribution")
             seen.add(generation)
         receipt = indexed.get(generation, {})
-        if receipt.get("status") != "ok":
-            missing[key] += 1
-            continue
         if receipt.get("model") and receipt["model"] != request["model"]:
             raise ValueError("receipt model does not match attributed request")
+        if observed_cost(receipt) is not None:
+            provisional[key] += money(observed_cost(receipt))
+            observed_counts[key] += 1
+        if not final_receipt(receipt):
+            missing[key] += 1
+            continue
         totals[key] += money(receipt.get("total_cost_usd"))
         counts[key] += 1
     rows = [{"case_id": case, "stage": stage,
              "recorded_cost_usd": str(totals[(case, stage)]),
+             "provisional_observed_cost_usd": str(provisional[(case, stage)]),
+             "generations_with_observed_cost": observed_counts[(case, stage)],
              "priced_generations": counts[(case, stage)],
              "missing_generations": missing[(case, stage)],
              "saved_generation_coverage_complete": missing[(case, stage)] == 0}
@@ -231,6 +274,9 @@ def summarize(requests, receipts):
         captured_stats = {"mean": str(sum(ordered, Decimal(0)) / count), "median": str(median),
                           "p95_nearest_rank": str(ordered[math.ceil(0.95 * count) - 1])}
     return {"per_case": rows, "recorded_cost_usd": str(sum(totals.values(), Decimal(0))),
+            "recorded_cost_basis": "GET-generation-reconciled charges only",
+            "provisional_observed_cost_usd": str(sum(provisional.values(), Decimal(0))),
+            "provisional_cost_note": "Observed stream/response snapshots without finality proof. Not additive to reconciled charges; may differ from final charges.",
             "recorded_cost_by_stage_usd": stage_totals,
             "question_denominator": len(case_totals),
             "captured_generation_cost_per_question_usd": [{"case_id": case, "recorded_cost_usd": str(value)}
@@ -270,15 +316,7 @@ def main():
     if args.journal:
         journal_requests, journal_receipts = journal_evidence(args.journal)
         requests = combine_requests(requests, journal_requests)
-        provider_receipts = {row["generation_id"]: row for row in receipts}
-        for row in journal_receipts:
-            prior = provider_receipts.get(row["generation_id"])
-            if prior and prior.get("status") == "ok" and row.get("status") == "ok":
-                if money(prior["total_cost_usd"]) != money(row["total_cost_usd"]):
-                    raise ValueError("response cost and generation metadata disagree")
-            if not prior or prior.get("status") != "ok":
-                provider_receipts[row["generation_id"]] = row
-        receipts = list(provider_receipts.values())
+        receipts = merge_receipts(receipts, journal_receipts)
     if args.fetch:
         key = os.environ.get("LOCAL_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
         if not key:

@@ -78,8 +78,11 @@ class CostAuditTests(unittest.TestCase):
             path.write_text(json.dumps(row) + "\n" + json.dumps(dict(row, cost_credits="0.2")) + "\n")
             requests, receipts = audit.journal_evidence(path)
             summary = audit.summarize(requests, receipts)
-            self.assertEqual(summary["recorded_cost_by_stage_usd"], {"judge": "0.2"})
-            self.assertEqual(summary["priced_generations"], 1)
+            self.assertEqual(summary["recorded_cost_by_stage_usd"], {"judge": "0"})
+            self.assertEqual(summary["provisional_observed_cost_usd"], "0.2")
+            self.assertEqual(summary["priced_generations"], 0)
+            self.assertFalse(summary["saved_generation_coverage_complete"])
+            self.assertIsNone(summary["captured_generation_cost_per_question_stats_usd"])
             self.assertIsNone(summary["full_lifecycle_cost_usd"])
 
     def test_journal_unknown_id_is_not_removed_by_other_success(self):
@@ -92,11 +95,13 @@ class CostAuditTests(unittest.TestCase):
     def test_fetch_reconciles_missing_but_skips_priced(self):
         requests = [{"generation_id": "gen-a"}, {"generation_id": "gen-b"}]
         receipts = [{"generation_id": "gen-a", "status": "cost_missing"},
-                    {"generation_id": "gen-b", "status": "ok", "total_cost_usd": "0"}]
+                    {"generation_id": "gen-b", "status": "ok", "total_cost_usd": "0",
+                     "basis": "openrouter_generation.total_cost"}]
         called = []
         def fetch(generation, key):
             called.append(generation)
-            return {"generation_id": generation, "status": "ok", "total_cost_usd": "1"}
+            return {"generation_id": generation, "status": "ok", "total_cost_usd": "1",
+                    "basis": "openrouter_generation.total_cost"}
         result = audit.reconcile_receipts(requests, receipts, "unused", fetch)
         self.assertEqual(called, ["gen-a"])
         self.assertEqual(len(result), 2)
@@ -108,7 +113,8 @@ class CostAuditTests(unittest.TestCase):
                                     ("b", "reader", "2"), ("b", "judge", "0.1")]:
             generation = "gen-" + case + stage
             requests.append({"case_id": case, "stage": stage, "model": "m", "generation_id": generation})
-            receipts.append({"generation_id": generation, "status": "ok", "model": "m", "total_cost_usd": charge})
+            receipts.append({"generation_id": generation, "status": "ok", "model": "m", "total_cost_usd": charge,
+                             "basis": "openrouter_generation.total_cost"})
         summary = audit.summarize(requests, receipts)
         self.assertEqual(summary["question_denominator"], 2)
         self.assertEqual(summary["recorded_judge_cost_subtotal_usd"], "0.2")
@@ -117,6 +123,47 @@ class CostAuditTests(unittest.TestCase):
         self.assertIsNone(summary["full_judge_cost_usd"])
         self.assertIsNone(summary["full_lifecycle_cost_usd"])
         self.assertIsNone(audit.summarize(requests, receipts[:-1])["captured_generation_cost_per_question_stats_usd"])
+
+    def test_partial_stream_cost_get_reconciliation_can_increase(self):
+        request = {"case_id": "q", "stage": "reader", "model": "m", "generation_id": "gen-a"}
+        partial = {"generation_id": "gen-a", "model": "m", "status": "ok",
+                   "total_cost_usd": "0.1", "basis": "openrouter_response.usage.cost"}
+        before = audit.summarize([request], [partial])
+        self.assertFalse(before["saved_generation_coverage_complete"])
+        self.assertEqual(before["provisional_observed_cost_usd"], "0.1")
+        called = []
+        def fetch(generation, key):
+            called.append(generation)
+            return audit.sanitize_receipt(generation, {"data": {"id": generation, "model": "m", "total_cost": "0.3"}})
+        receipts = audit.reconcile_receipts([request], [partial], "unused", fetch)
+        after = audit.summarize([request], receipts)
+        self.assertEqual(called, ["gen-a"])
+        self.assertTrue(after["saved_generation_coverage_complete"])
+        self.assertEqual(after["recorded_cost_usd"], "0.3")
+        self.assertEqual(after["provisional_observed_cost_usd"], "0.1")
+        merged = audit.merge_receipts(receipts, [partial])
+        self.assertEqual(audit.summarize([request], merged)["recorded_cost_usd"], "0.3")
+
+    def test_journal_model_fills_after_initial_blank_and_conflicts_fail(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.jsonl"
+            row = {"case_id": "q", "stage": "reader", "model": "", "attempt_id": "a",
+                   "generation_id": "gen-a", "cost_status": "missing"}
+            path.write_text(json.dumps(row) + "\n" + json.dumps(dict(row, model="m")) + "\n")
+            requests, _ = audit.journal_evidence(path)
+            self.assertEqual(requests[0]["model"], "m")
+            with path.open("a") as stream:
+                stream.write(json.dumps(dict(row, model="different")) + "\n")
+            with self.assertRaisesRegex(ValueError, "model identity changed"):
+                audit.journal_evidence(path)
+            path.write_text(json.dumps(row) + "\n")
+            with self.assertRaisesRegex(ValueError, "unresolved"):
+                audit.journal_evidence(path)
+
+    def test_journal_merge_rejects_duplicate_saved_receipts(self):
+        row = {"generation_id": "gen-a", "status": "cost_missing"}
+        with self.assertRaisesRegex(ValueError, "duplicate generation receipt"):
+            audit.merge_receipts([row, row], [row])
 
     def test_preparation_inventory_scoped_no_raw_content(self):
         with TemporaryDirectory() as directory:

@@ -41,6 +41,12 @@ receipt. Deduplicate cumulative stream events by generation ID; do not add
 each update as another request. Retain retries and failed-case receipts, not
 only the successful final checkpoint. Never use an account-wide balance delta
 to attribute spend to this campaign on a shared key.
+The passive journal does not prove a response's finality: a canceled stream can
+leave a partial cumulative usage cost. Response-only amounts therefore remain
+**provisional observed subtotals**, not finalized charges. After calls drain,
+reconcile every response-only generation through GET metadata before certifying
+saved-generation charge coverage. A final charge may differ from the earlier
+observation; keep both without adding them or requiring equality.
 
 ## What historical evidence establishes
 
@@ -87,12 +93,16 @@ automatically covered by OpenRouter generation receipts.
 The offline [cost auditor](../../integrations/longmemeval/audit_openrouter_costs.py)
 reads the final report and optional journal, deduplicates cumulative events,
 rejects cross-case/model attribution conflicts and emits per-case/stage sums.
+Early blank-model events may acquire their model from later events for the same
+case/stage/attempt/generation; conflicting nonempty models and unresolved final
+identities fail validation. Duplicate saved receipts fail before journal merging.
 It separately reports captured judge subtotal and the question denominator.
 Mean, median and nearest-rank p95 of captured generation cost per question are
-emitted only when every referenced generation is priced; they still exclude
-uncaptured attempts and lifecycle costs. Unpriced journal generations remain
-eligible for metadata recovery; an existing missing-cost record is not treated
-as a successful lookup.
+emitted only when every referenced generation has a reconciled GET charge; they
+still exclude uncaptured attempts and lifecycle costs. Both missing-cost and
+response-cost-only journal generations remain eligible for metadata recovery.
+Only already reconciled generation receipts can skip GET lookup. Provisional
+amounts stay separate when a lookup fails and never unlock priced-complete stats.
 `--fetch` performs only GET requests to the fixed OpenRouter generation
 metadata endpoint using an environment key; redirects are rejected and
 authentication/rate-limit failures stop further lookup. It never sends prompts
