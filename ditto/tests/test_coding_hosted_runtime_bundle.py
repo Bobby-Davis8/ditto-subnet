@@ -46,7 +46,7 @@ def bundle(tmp_path, monkeypatch):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
-    for name in BUNDLE.EXECUTABLES:
+    for name in BUNDLE.EXECUTABLES[BUNDLE.SCHEMA]:
         (source / name).chmod(0o755)
     python = source / "apps/platform/.venv/bin/python"
     python.parent.mkdir(parents=True)
@@ -185,6 +185,77 @@ def test_router_listener_helper_is_a_required_executable_elf(bundle, tmp_path, c
     with pytest.raises(ValueError):
         BUNDLE.pack(source, archive, REVISION)
         inspect(archive)
+
+
+def install_and_verify(archive, destination):
+    value, records = inspect(archive)
+    checksum = BUNDLE.file_hash(archive)
+    with archive.open("rb") as source:
+        receipt = BUNDLE.materialize(source, value, records, destination, checksum)
+    BUNDLE.verify_tree(value, destination, checksum)
+    return value, receipt
+
+
+def test_new_bundles_pin_the_router_listener_in_the_receipt(bundle, tmp_path):
+    source, archive = bundle
+    value, receipt = install_and_verify(archive, tmp_path / "installed")
+    helper = hashlib.sha256(
+        (source / "bin/dittobench-coding-router-listener").read_bytes()
+    ).hexdigest()
+    assert value["schema"] == receipt["schema"] == BUNDLE.SCHEMA
+    assert BUNDLE.SCHEMA == "dittobench-coding-hosted-runtime-bundle-v3"
+    assert receipt["router_listener_sha256"] == helper
+    assert (tmp_path / "installed/bundle-receipt.json").read_bytes() == (
+        BUNDLE.canonical(receipt)
+    )
+    # Helper drift after installation fails verification like worker drift.
+    installed = tmp_path / "installed/bin/dittobench-coding-router-listener"
+    installed.parent.chmod(0o755)
+    installed.chmod(0o755)
+    installed.write_bytes(installed.read_bytes() + b"drift")
+    installed.chmod(0o555)
+    installed.parent.chmod(0o555)
+    with pytest.raises(ValueError):
+        BUNDLE.verify_tree(value, tmp_path / "installed", BUNDLE.file_hash(archive))
+
+
+def test_previously_approved_v2_bundles_still_install_and_verify(
+    bundle, tmp_path, monkeypatch
+):
+    source, _ = bundle
+    helper = source / "bin/dittobench-coding-router-listener"
+    body = helper.read_bytes()
+    helper.unlink()
+    legacy = tmp_path / "legacy.tar"
+    # A v2 bundle is exactly what the earlier packer wrote: no helper.
+    with monkeypatch.context() as patch:
+        patch.setattr(BUNDLE, "SCHEMA", BUNDLE.SCHEMA_V2)
+        BUNDLE.pack(source, legacy, REVISION)
+    value, receipt = install_and_verify(legacy, tmp_path / "installed")
+    assert value["schema"] == receipt["schema"] == BUNDLE.SCHEMA_V2
+    assert set(receipt) == {
+        "schema",
+        "source_revision",
+        "archive_sha256",
+        "manifest_sha256",
+        "worker_sha256",
+        "shadow_only",
+        "weight_eligible",
+        "worker_started",
+    }
+    # The current packer cannot produce a v3 bundle without the helper.
+    with pytest.raises(ValueError):
+        BUNDLE.pack(source, tmp_path / "missing.tar", REVISION)
+    # A v2 manifest cannot carry a helper its receipt would not pin.
+    helper.write_bytes(body)
+    helper.chmod(0o755)
+    with monkeypatch.context() as patch:
+        patch.setattr(BUNDLE, "SCHEMA", BUNDLE.SCHEMA_V2)
+        with pytest.raises(ValueError):
+            BUNDLE.pack(source, tmp_path / "unpinned.tar", REVISION)
+    unknown = dict(value, schema="dittobench-coding-hosted-runtime-bundle-v4")
+    with pytest.raises(ValueError):
+        BUNDLE.metadata(unknown, REVISION)
 
 
 def test_duplicate_manifest_keys_and_link_escape_refused(bundle):
