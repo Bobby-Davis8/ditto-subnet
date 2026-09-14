@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,6 +23,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/codingcertifier"
 	"github.com/ditto-assistant/dittobench-api/internal/codingsource"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
+	"golang.org/x/sys/unix"
 )
 
 // This test needs a real rootless Docker daemon started by the test user with
@@ -109,8 +111,16 @@ func TestRootlessRouterListenerPreservesContainerSource(t *testing.T) {
 	inAddress := netip.AddrPortFrom(gateway, 18080)
 	hostRouterAddress := netip.AddrPortFrom(hostAddress, 18081)
 
-	// A socket created in the host namespace must never pass the real
-	// namespace check, even when it listens on the expected address shape.
+	// The read-only checks the worker runs before consuming an attempt must
+	// pass on a real, correctly configured rootless daemon.
+	apiGateway, err := sandbox.DefaultBridgeGatewayFromSocket(ctx, socket)
+	if err != nil || apiGateway != gateway {
+		t.Fatalf("Engine API bridge gateway %s differs from the CLI's %s: %v", apiGateway, gateway, err)
+	}
+	if err := Precheck(ctx, Config{Address: inAddress, DockerSocket: socket, HelperExecutable: helper}); err != nil {
+		t.Fatalf("rootless router precheck: %v", err)
+	}
+
 	pid, err := readChildPID(runUserRoot, os.Geteuid())
 	if err != nil {
 		t.Fatalf("RootlessKit child pid: %v", err)
@@ -123,15 +133,56 @@ func TestRootlessRouterListenerPreservesContainerSource(t *testing.T) {
 	if err != nil || child.facts.net == self.net || child.facts.user == self.user {
 		t.Fatal("RootlessKit child is not in a separate user and network namespace")
 	}
+
+	// (c) A socket created in the host network namespace is refused. For the
+	// non-root daemon user the kernel refuses SIOCGSKNS on it with EPERM (no
+	// CAP_NET_ADMIN over the initial network namespace), before any namespace
+	// comparison. A root caller could inspect it and would get the host ID.
 	hostProbe := netip.AddrPortFrom(hostAddress, 18082)
 	hostFD, err := createListener(hostProbe)
 	if err != nil {
 		t.Fatalf("host namespace probe listener: %v", err)
 	}
+	hostNetns, hostErr := unix.IoctlRetInt(hostFD, unix.SIOCGSKNS)
+	if hostErr == nil {
+		_ = unix.Close(hostNetns)
+	}
+	if os.Geteuid() != 0 && !errors.Is(hostErr, unix.EPERM) {
+		t.Fatalf("host namespace socket inspection: want EPERM for the non-root daemon user, got %v", hostErr)
+	}
 	if listener, err := adoptListener(hostFD, hostProbe, socketNetns, child.facts.net); err == nil {
 		_ = listener.Close()
 		t.Fatal("host namespace listener accepted as RootlessKit listener")
 	}
+	t.Logf("host-namespace socket: SIOCGSKNS error=%v; refused", hostErr)
+
+	// (d) A socket from a different network namespace owned by RootlessKit's
+	// user namespace. The daemon user can inspect it, so the refusal must come
+	// from the namespace identity comparison itself. It is bound to the
+	// expected in-namespace address with IP_FREEBIND so only the identity differs.
+	foreignFD, err := spawnHelper(ctx, []string{
+		NsenterExecutable, "--user=/proc/self/fd/4", "--preserve-credentials", "--",
+		"/usr/bin/unshare", "--net", "--", os.Args[0], fakeHelperArg, "freebind", inAddress.String(),
+	}, child.user)
+	if err != nil {
+		t.Fatalf("foreign network namespace listener: %v", err)
+	}
+	foreign, err := socketNetns(foreignFD)
+	if err != nil || foreign == child.facts.net || foreign == self.net {
+		_ = unix.Close(foreignFD)
+		t.Fatalf("foreign namespace socket is not an inspectable, distinct namespace: %v", err)
+	}
+	// Everything but the namespace matches: against its own namespace ID the
+	// descriptor would pass, against RootlessKit's it must not.
+	if err := verifyListener(foreignFD, inAddress, socketNetns, foreign); err != nil {
+		_ = unix.Close(foreignFD)
+		t.Fatalf("foreign listener differs in more than its namespace: %v", err)
+	}
+	if listener, err := adoptListener(foreignFD, inAddress, socketNetns, child.facts.net); err == nil {
+		_ = listener.Close()
+		t.Fatal("listener from another network namespace of the RootlessKit user namespace accepted")
+	}
+	t.Logf("foreign-netns socket: inspectable, namespace %d:%d != RootlessKit %d:%d; refused", foreign.dev, foreign.ino, child.facts.net.dev, child.facts.net.ino)
 	child.Close()
 
 	rawIn, err := Listen(ctx, Config{Address: inAddress, DockerSocket: socket, HelperExecutable: helper})
@@ -274,5 +325,89 @@ func TestRootlessRouterListenerPreservesContainerSource(t *testing.T) {
 	}
 	if lease.Close() != nil || inRouter.Close(ctx) != nil || hostRouter.Close(ctx) != nil {
 		t.Fatal("router cleanup")
+	}
+
+	// (e) The worker-enforced authority window ends candidate access inside
+	// RootlessKit's namespace, where host nftables cannot.
+	expiryAddress := netip.AddrPortFrom(gateway, 18083)
+	rawExpiry, err := Listen(ctx, Config{Address: expiryAddress, DockerSocket: socket, HelperExecutable: helper})
+	if err != nil {
+		t.Fatalf("expiry in-namespace listener: %v", err)
+	}
+	expiryListener := &recordingListener{Listener: rawExpiry}
+	window := 25 * time.Second
+	expires := time.Now().Add(window)
+	bounded, err := WithAuthority(ctx, expiryListener, expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiryRouter, err := codingsource.NewRouter(codingsource.RouterConfig{Listener: bounded, PublicBaseURL: "http://host.docker.internal:18083", Registry: registry, NewToken: fixed, MaxRoutes: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiryBinding := binding
+	expiryBinding.HarnessInstanceID, expiryBinding.CaseID = "rootless-router-it-expiry", "rootless-router-it-expiry"
+	expiryCapability := capability
+	expiryCapability.HarnessInstanceID, expiryCapability.CaseID = expiryBinding.HarnessInstanceID, expiryBinding.CaseID
+	expiryContainer := container + "-expiry"
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
+		defer stop()
+		_ = exec.CommandContext(cleanup, "docker", "rm", "-f", expiryContainer).Run()
+	})
+	expiryURL := "http://host.docker.internal:18083/v1/coding/workspace/" + token + "/tool"
+	docker(t, ctx, nil, "run", "-d", "--name", expiryContainer, "--network", network,
+		"--user", "65532:65532", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--add-host", "host.docker.internal:"+gateway.String(), image, "--expiry", expiryURL)
+	var expiryIP netip.Addr
+	for stop := time.Now().Add(time.Minute); time.Now().Before(stop) && !expiryIP.IsValid(); time.Sleep(200 * time.Millisecond) {
+		out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", expiryContainer).Output()
+		if err == nil {
+			expiryIP, _ = netip.ParseAddr(strings.TrimSpace(string(out)))
+		}
+	}
+	if !expiryIP.IsValid() {
+		t.Fatal("expiry container address unavailable")
+	}
+	expiryLease, err := registry.Register(expiryBinding, expiryIP.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiryRoute, err := expiryRouter.WorkspacePublisher().Publish(ctx, expiryCapability, handler("expiry"))
+	if err != nil || expiryRoute.URL() != expiryURL {
+		t.Fatal("expiry route publication")
+	}
+	if code := docker(t, ctx, nil, "wait", expiryContainer); code != "0" {
+		t.Fatalf("expiry probe exited %s: %s", code, docker(t, ctx, nil, "logs", expiryContainer))
+	}
+	finished := time.Now()
+	var expiryResult struct {
+		BeforeExpiry      int    `json:"before_expiry"`
+		EstablishedClosed bool   `json:"established_closed"`
+		ClosedAfterMS     int64  `json:"closed_after_ms"`
+		AfterExpiryDial   string `json:"after_expiry_dial"`
+	}
+	if err := json.Unmarshal([]byte(docker(t, ctx, nil, "logs", expiryContainer)), &expiryResult); err != nil {
+		t.Fatalf("expiry probe result: %v", err)
+	}
+	t.Logf("authority window: container=%s window=%s result=%+v remotes=%v finished_after_expiry=%v", expiryIP, window, expiryResult, expiryListener.seen(), !finished.Before(expires))
+	// The keep-alive connection was admitted, then closed by the authority end
+	// well before the router's 30s idle timeout could close it, and new
+	// connections were refused by the kernel afterwards.
+	if expiryResult.BeforeExpiry != http.StatusOK || !expiryResult.EstablishedClosed ||
+		expiryResult.ClosedAfterMS < 0 || expiryResult.ClosedAfterMS >= int64(window)/int64(time.Millisecond) ||
+		expiryResult.AfterExpiryDial != "refused" || finished.Before(expires) {
+		t.Fatal("authority window did not end in-namespace candidate access")
+	}
+	for _, remote := range expiryListener.seen() {
+		if remote != expiryIP {
+			t.Fatalf("expiry listener saw %s, want only container %s", remote, expiryIP)
+		}
+	}
+	if expiryRoute.Revoke(ctx) != nil || expiryRoute.Close() != nil || expiryLease.Close() != nil {
+		t.Fatal("expiry route cleanup")
+	}
+	if err := expiryRouter.Close(ctx); err != nil {
+		t.Fatalf("router did not shut down cleanly after its authority ended: %v", err)
 	}
 }

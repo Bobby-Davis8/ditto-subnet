@@ -265,8 +265,13 @@ redaction. The rootless-netns listener has unit tests for descriptor passing and
 socket verification over real socketpairs, child-pid and namespace refusals,
 mode validation, the precheck refusing before consumption, and the authority
 window closing established and new connections at expiry or cancellation. The `coding-rootless-router.yml` workflow starts a real rootless
-Docker 29.1.3 daemon on a disposable runner and proves both the in-namespace
-admission and the host-address failure mode. Existing native worker/input/grader and Go/Python control tests remain
+Docker 29.1.3 daemon on a disposable runner and proves the in-namespace
+admission and the host-address failure mode. It also checks that the read-only
+precheck passes, and that a host-namespace socket is refused: SIOCGSKNS returns
+EPERM for the non-root daemon user. A socket from another network namespace
+owned by RootlessKit's user namespace is refused by the namespace identity
+comparison itself. Finally, the authority window closes an admitted keep-alive
+connection at its end, and the kernel refuses new connections after it. Existing native worker/input/grader and Go/Python control tests remain
 the composition tests; the new launcher tests do not claim real Docker/private
 provider execution or a live canary.
 

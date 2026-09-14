@@ -168,6 +168,20 @@ func fakeHelper(args []string) int {
 		send(Protocol, fd)
 	case "regular_file":
 		send(Protocol, must(unix.Open("/proc/self/status", unix.O_RDONLY, 0)))
+	case "freebind":
+		// A listener on an exact ipv4:port that need not be local in this
+		// process's network namespace. The integration test runs this inside a
+		// network namespace other than RootlessKit's.
+		address, err := netip.ParseAddrPort(args[1])
+		if err != nil || !address.Addr().Is4() {
+			return 94
+		}
+		fd := must(unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0))
+		if unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_FREEBIND, 1) != nil ||
+			unix.Bind(fd, &unix.SockaddrInet4{Port: int(address.Port()), Addr: address.Addr().As4()}) != nil || unix.Listen(fd, 1) != nil {
+			return 94
+		}
+		send(Protocol, fd)
 	default:
 		return 95
 	}
