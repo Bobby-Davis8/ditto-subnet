@@ -1,0 +1,60 @@
+---
+- name: Create a fresh owner-only synthetic tree for {{ seed_case.name }}
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: coding-hosted-signer-fixture-
+  register: seed_case_root
+
+- name: Arrange the synthetic tree for {{ seed_case.name }}
+  ansible.builtin.shell: |
+    set -eu
+    umask 077
+    mkdir signer
+    printf '%032d' 0 > signer/seed
+    chmod 0600 signer/seed
+    {{ seed_case.setup }}
+  args:
+    chdir: "{{ seed_case_root.path }}"
+    executable: /bin/sh
+  changed_when: false
+
+- name: Run the real stat-only seed guard for {{ seed_case.name }}
+  block:
+    - name: Exercise the seed guard
+      ansible.builtin.include_tasks: ../roles/platform_app/tasks/coding_hosted_signer_seed_stat.yml
+      vars:
+        platform_owner: "{{ seed_case.owner | default(fixture_user) }}"
+        platform_coding_hosted_signer_seed_ancestors: >-
+          {{ ['/'] if seed_case.root_ancestor_only | default(false) else [seed_case_root.path] }}
+        platform_coding_hosted_signer_seed_directory: "{{ seed_case_root.path }}/signer"
+        platform_coding_hosted_signer_seed_file: "{{ seed_case_root.path }}/signer/seed"
+
+    - name: Record acceptance
+      ansible.builtin.set_fact:
+        seed_case_accepted: true
+        seed_case_failed_task: ""
+  rescue:
+    - name: Record rejection
+      ansible.builtin.set_fact:
+        seed_case_accepted: false
+        seed_case_failed_task: "{{ ansible_failed_task.name }}"
+  always:
+    - name: Remove the synthetic tree
+      ansible.builtin.file:
+        path: "{{ seed_case_root.path }}"
+        state: absent
+
+- name: Verify the expected guard outcome for {{ seed_case.name }}
+  vars:
+    expected_guard:
+      ancestor: Require safe hosted-v2 control signer seed ancestors
+      directory: Require the Platform-owned 0700 seed directory
+      seed: Require the pre-placed single-link 0600 32-byte seed owned by the Platform user
+  ansible.builtin.assert:
+    that:
+      - seed_case_accepted == seed_case.accept
+      - seed_case.accept or seed_case_failed_task == expected_guard[seed_case.guard]
+    fail_msg: >-
+      {{ seed_case.name }}: accepted={{ seed_case_accepted }},
+      failed_task={{ seed_case_failed_task }}
+    quiet: true

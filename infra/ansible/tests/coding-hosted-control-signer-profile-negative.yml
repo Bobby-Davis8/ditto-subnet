@@ -1,0 +1,18 @@
+---
+- name: Require rejection by the fixed Platform signer profile before any stat
+  vars:
+    platform_coding_hosted_control_enabled: true
+    platform_coding_hosted_signer_hotkey: "{{ profile_case.platform_coding_hosted_signer_hotkey }}"
+    platform_coding_hosted_signer_seed_file: "{{ profile_case.platform_coding_hosted_signer_seed_file }}"
+  block:
+    - ansible.builtin.import_tasks: ../roles/platform_app/tasks/coding_hosted_signer.yml
+    - name: Fail if an invalid signer profile was accepted
+      ansible.builtin.fail:
+        msg: Invalid synthetic hosted-v2 signer profile passed the guard.
+  rescue:
+    - name: Verify the profile guard refused before inspecting any path
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.name == 'Require the fixed hosted-v2 control signer profile'
+          - platform_coding_hosted_signer_ancestor_stats is not defined
+        quiet: true
