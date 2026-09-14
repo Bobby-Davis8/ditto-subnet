@@ -24,7 +24,67 @@ func TestMain(m *testing.M) {
 	if len(os.Args) >= 2 && os.Args[1] == "rootlessnetns-real-helper" {
 		os.Exit(RunHelper(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == realHelperFDsArg {
+		os.Exit(realHelperKeepingOwnDescriptors(os.Args[2:]))
+	}
 	os.Exit(m.Run())
+}
+
+const realHelperFDsArg = "rootlessnetns-real-helper-fds"
+
+// realHelperKeepingOwnDescriptors runs the real helper after opening a
+// close-on-exec descriptor of its own, standing in for a Go runtime descriptor
+// such as the cgroup cpu.max file kept open for GOMAXPROCS updates. Every such
+// descriptor must survive RunHelper; the inherited namespace descriptors 4 and
+// 5 must not.
+func realHelperKeepingOwnDescriptors(args []string) int {
+	owned, err := unix.Open("/proc/self/status", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil || owned <= helperNetFD {
+		return 96
+	}
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return 96
+	}
+	var before []int
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry.Name())
+		// ReadDir's own directory descriptor is already closed here.
+		if _, fcntlErr := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil && fd > helperNetFD && fcntlErr == nil {
+			before = append(before, fd)
+		}
+	}
+	if code := RunHelper(args); code != helperOK {
+		return code
+	}
+	for _, fd := range before {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
+			return 97
+		}
+	}
+	for _, fd := range []int{helperUserFD, helperNetFD} {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			return 98
+		}
+	}
+	return helperOK
+}
+
+// selfNamespaces opens this process's user and network namespaces, in the
+// order the worker passes RootlessKit's pinned namespaces to nsenter.
+func selfNamespaces(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	user, err := os.Open("/proc/self/ns/user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = user.Close() })
+	netns, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = netns.Close() })
+	return user, netns
 }
 
 func must(fd int, err error) int {
@@ -356,7 +416,8 @@ func TestRealHelperSendsOnlyTheExactListener(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
 	expected := netip.AddrPortFrom(local, uint16(port))
-	fd, err := spawnHelper(t.Context(), []string{testBinary(t), "rootlessnetns-real-helper", "--listen", expected.String()})
+	user, netns := selfNamespaces(t)
+	fd, err := spawnHelper(t.Context(), []string{testBinary(t), "rootlessnetns-real-helper", "--listen", expected.String()}, user, netns)
 	if err != nil {
 		t.Fatalf("real helper refused: %v", err)
 	}
@@ -374,8 +435,57 @@ func TestRealHelperSendsOnlyTheExactListener(t *testing.T) {
 		t.Fatal("helper listener did not own its address")
 	}
 	// A non-local address cannot be bound without IP_FREEBIND.
-	if _, err := spawnHelper(t.Context(), []string{testBinary(t), "rootlessnetns-real-helper", "--listen", "10.255.255.254:18080"}); err == nil {
+	if _, err := spawnHelper(t.Context(), []string{testBinary(t), "rootlessnetns-real-helper", "--listen", "10.255.255.254:18080"}, user, netns); err == nil {
 		t.Fatal("helper bound a non-local address")
+	}
+}
+
+// The helper closes exactly the inherited namespace descriptors 4 and 5, after
+// proving their types, and never descriptors it or the Go runtime opened.
+func TestRealHelperClosesOnlyInheritedNamespaceDescriptors(t *testing.T) {
+	local := localPrivateIPv4(t)
+	user, netns := selfNamespaces(t)
+	regular, err := os.Open("/proc/self/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer regular.Close()
+	address := func() string {
+		probe, err := net.Listen("tcp4", netip.AddrPortFrom(local, 0).String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer probe.Close()
+		return probe.Addr().String()
+	}
+	listen := address()
+	fd, err := spawnHelper(t.Context(), []string{testBinary(t), realHelperFDsArg, "--listen", listen}, user, netns)
+	if err != nil {
+		t.Fatalf("helper closed a descriptor it did not inherit, or kept 4 and 5: %v", err)
+	}
+	if listener, err := adoptListener(fd, netip.MustParseAddrPort(listen), pinnedNetns, pinned); err != nil {
+		t.Fatalf("helper listener refused: %v", err)
+	} else {
+		_ = listener.Close()
+	}
+	for name, extra := range map[string][]*os.File{
+		"missing_namespaces": nil,
+		"missing_network":    {user},
+		"swapped":            {netns, user},
+		"user_twice":         {user, user},
+		"regular_files":      {regular, regular},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The address is local and free, so only the descriptor check can refuse.
+			before := openFDs(t)
+			if fd, err := spawnHelper(t.Context(), []string{testBinary(t), realHelperFDsArg, "--listen", address()}, extra...); err == nil {
+				_ = unix.Close(fd)
+				t.Fatal("helper accepted unexpected inherited descriptors")
+			}
+			if after := openFDs(t); after != before {
+				t.Fatalf("descriptor leak: before %d after %d", before, after)
+			}
+		})
 	}
 }
 
