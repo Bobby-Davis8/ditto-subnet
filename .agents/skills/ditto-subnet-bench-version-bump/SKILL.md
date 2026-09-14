@@ -117,6 +117,11 @@ Not an opt-in per-version feature: every new `bench_version` is expected to run 
 
 ### 6. Screener (`workers/screener`)
 - Policy/version gates and any anti-emulation fingerprints that name versions.
+- A signed screening policy is frozen. New leads, prompt text, or fail-closed
+  coercions ship as a new `SCREENING_POLICY_VERSION` behind a named protocol
+  constant (v14 = `CATALOG_WRITER_LEADS_POLICY_VERSION`), never by extending
+  an older `_POLICY_TAILS[n]` or a `>= n` gate in place; pin the older
+  version's bytes (see `tests/test_catalog_writer_leads.py`).
 - Hashed generator-template corpus: whenever
   `research/dittobench-datagen/{datagen,gen,universe}/*.go` change (a new bench
   surface, template pool, or grammar), rerun

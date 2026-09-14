@@ -14,6 +14,7 @@ these tests pin only that the five known artifacts fire.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -32,7 +33,9 @@ from ditto_screener.source_signals import (
     find_fixture_generator_ngram_leads,
 )
 from ditto_screening_protocol import (
+    CATALOG_WRITER_LEADS_POLICY_VERSION,
     SCREENING_FLOOR_POLICY_VERSION,
+    SCREENING_POLICY_VERSION,
     SourceReviewInvariant,
     SourceReviewInvariantDisposition,
 )
@@ -827,24 +830,65 @@ def test_committed_corpus_is_derivable_from_the_generator_tree() -> None:
 # ── the I7 prompt addendum ───────────────────────────────────────────────────
 
 
-def test_policy_v13_prompt_requires_the_catalog_writer_inventory() -> None:
+def test_policy_v14_is_the_built_in_version_carrying_the_leads() -> None:
+    assert CATALOG_WRITER_LEADS_POLICY_VERSION == 14
+    assert SCREENING_POLICY_VERSION == CATALOG_WRITER_LEADS_POLICY_VERSION
+
+
+def test_policy_v14_prompt_requires_the_catalog_writer_inventory() -> None:
     from ditto_screener.source_review import (
         _POLICY_TAILS,
         _source_review_system_prompt,
     )
 
-    prompt = _source_review_system_prompt(13)
+    prompt = _source_review_system_prompt(CATALOG_WRITER_LEADS_POLICY_VERSION)
     assert "I7 CATALOG-WRITER INVENTORY" in prompt
     for kind in sorted(_NEW_KINDS):
         assert f"- {kind}:" in prompt
     assert "fixture_generator_ngrams" in prompt
     assert "inconclusive" in prompt
-    # Older frozen policy texts are unchanged; v13 still extends v12.
-    assert "I7 CATALOG-WRITER INVENTORY" not in _source_review_system_prompt(12)
+    # Older frozen policy texts are unchanged; v14 extends v13 which extends v12.
+    for frozen in (12, 13):
+        assert "I7 CATALOG-WRITER INVENTORY" not in _source_review_system_prompt(frozen)
     assert _POLICY_TAILS[13].startswith(_POLICY_TAILS[12])
+    assert _POLICY_TAILS[14].startswith(_POLICY_TAILS[13])
 
 
-# ── policy floor: the v14 leads never reach a frozen v10–v12 inventory ───────
+# Policy v13 was activated and signed in production on 2026-09-14. Its prompt
+# bytes and lead set must never change again; these digests were taken from
+# origin/main at 4ae5f1cb7 (v0.265.0), the last commit before v14 landed.
+# `git show 4ae5f1cb7:workers/screener/ditto_screener/source_review.py` and
+# `.../l2_review.py` reproduce them. A diff here means a v13 byte moved.
+_V13_L1_TAIL_SHA256 = "ef62995493ce056ba7568685d1cd5a4b85716b80324fbf3d5c2b560bdfff408d"
+_V13_L1_PROMPT_SHA256 = (
+    "87045e01ed9187d82e335b3bbbd28090acd4e9add833afb169a8f59c1df247cd"
+)
+_V13_L2_TAIL_SHA256 = "fd865ad806cc575fe80269195fc5ebf96e0817f4fc0ef62b8f6454beb990a1eb"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_policy_v13_prompt_bytes_are_pinned_to_the_signed_main_text() -> None:
+    from ditto_screener.l2_review import _L2_POLICY_TAILS, _l2_review_system_prompt
+    from ditto_screener.source_review import (
+        _POLICY_TAILS,
+        _source_review_system_prompt,
+    )
+
+    assert _sha256(_POLICY_TAILS[13]) == _V13_L1_TAIL_SHA256
+    assert _sha256(_source_review_system_prompt(13)) == _V13_L1_PROMPT_SHA256
+    assert _sha256(_L2_POLICY_TAILS[13]) == _V13_L2_TAIL_SHA256
+    # v14 is purely additive on top of the pinned v13 text at both layers.
+    assert _POLICY_TAILS[14].startswith(_POLICY_TAILS[13])
+    assert _L2_POLICY_TAILS[14].startswith(_L2_POLICY_TAILS[13])
+    assert _POLICY_TAILS[14] != _POLICY_TAILS[13]
+    assert "POLICY V14" in _l2_review_system_prompt(14)
+    assert "POLICY V14" not in _l2_review_system_prompt(13)
+
+
+# ── policy floor: the v14 leads never reach a frozen v10–v13 inventory ───────
 
 _POSITIVE_FILES: list[tuple[str, str]] = [
     ("baseline.py", LETS_623_BASELINE_PY),
@@ -879,60 +923,72 @@ def _kinds(findings: list[dict[str, object]]) -> list[str]:
     return sorted(str(finding["kind"]) for finding in findings)
 
 
-def test_v14_fingerprints_carry_a_policy_13_floor_and_older_ones_do_not() -> None:
+def test_v14_fingerprints_carry_a_policy_14_floor_and_older_ones_do_not() -> None:
     by_kind = {fingerprint.kind: fingerprint for fingerprint in _EMULATION_FINGERPRINTS}
     assert set(by_kind) >= _NEW_KINDS
     for kind, fingerprint in by_kind.items():
-        expected = 13 if kind in _NEW_KINDS else SCREENING_FLOOR_POLICY_VERSION
+        expected = (
+            CATALOG_WRITER_LEADS_POLICY_VERSION
+            if kind in _NEW_KINDS
+            else SCREENING_FLOOR_POLICY_VERSION
+        )
         assert fingerprint.min_policy_version == expected, kind
 
 
-@pytest.mark.parametrize("policy_version", [10, 11, 12])
+@pytest.mark.parametrize("policy_version", [10, 11, 12, 13])
 def test_frozen_policy_fingerprints_exclude_every_v14_kind(policy_version: int) -> None:
     frozen = find_benchmark_emulation_fingerprints(
         _POSITIVE_FILES, policy_version=policy_version
     )
     assert not set(_kinds(frozen)) & _NEW_KINDS
-    current = find_benchmark_emulation_fingerprints(_POSITIVE_FILES, policy_version=13)
+    current = find_benchmark_emulation_fingerprints(_POSITIVE_FILES, policy_version=14)
     assert set(_kinds(current)) >= _NEW_KINDS
-    # Everything a frozen policy already carried is byte-identical at v13: the
+    # Everything a frozen policy already carried is byte-identical at v14: the
     # new kinds are purely additive.
-    older_at_13 = [item for item in current if item["kind"] not in _NEW_KINDS]
-    assert older_at_13 == frozen
+    older_at_14 = [item for item in current if item["kind"] not in _NEW_KINDS]
+    assert older_at_14 == frozen
     # The default remains the built-in policy version.
     assert find_benchmark_emulation_fingerprints(_POSITIVE_FILES) == current
 
 
-def test_frozen_policy_generator_ngram_leads_are_empty() -> None:
+@pytest.mark.parametrize("policy_version", [12, 13])
+def test_frozen_policy_generator_ngram_leads_are_empty(policy_version: int) -> None:
     files = [("src/task_spec.rs", COMET_TASK_SPEC_RS)]
-    assert find_fixture_generator_ngram_leads(files, policy_version=12) == []
-    assert find_fixture_generator_ngram_leads(files, policy_version=13)
+    assert (
+        find_fixture_generator_ngram_leads(files, policy_version=policy_version) == []
+    )
+    assert find_fixture_generator_ngram_leads(files, policy_version=14)
     assert find_fixture_generator_ngram_leads(
         files
-    ) == find_fixture_generator_ngram_leads(files, policy_version=13)
+    ) == find_fixture_generator_ngram_leads(files, policy_version=14)
 
 
-def test_review_leads_at_policy_12_match_the_frozen_inventory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("policy_version", [12, 13])
+def test_review_leads_at_a_frozen_policy_match_the_frozen_inventory(
+    tmp_path: Path, policy_version: int
+) -> None:
     archive = _archive(tmp_path, _POSITIVE_FILES)
-    frozen = TarSourceRepository(archive, policy_version=12).review_leads()
-    current = TarSourceRepository(archive, policy_version=13).review_leads()
+    frozen = TarSourceRepository(archive, policy_version=policy_version).review_leads()
+    current = TarSourceRepository(archive, policy_version=14).review_leads()
     frozen_fingerprints = frozen["emulation_fingerprints"]
     current_fingerprints = current["emulation_fingerprints"]
     assert isinstance(frozen_fingerprints, list)
     assert isinstance(current_fingerprints, list)
     assert not set(_kinds(frozen_fingerprints)) & _NEW_KINDS
     assert set(_kinds(current_fingerprints)) & _NEW_KINDS
-    # Key shape is stable; content is frozen for policy <= 12.
+    # Key shape is stable; content is frozen for policy <= 13.
     assert frozen["fixture_generator_ngrams"] == []
     assert current["fixture_generator_ngrams"]
     assert set(frozen) == set(current)
-    inventory = json.loads(TarSourceRepository(archive, policy_version=12).inventory())
+    inventory = json.loads(
+        TarSourceRepository(archive, policy_version=policy_version).inventory()
+    )
     assert inventory["review_leads"]["fixture_generator_ngrams"] == []
     assert not set(_kinds(inventory["review_leads"]["emulation_fingerprints"])) & (
         _NEW_KINDS
     )
     # The repository default tracks the built-in policy version.
-    assert TarSourceRepository(archive).policy_version == 13
+    assert TarSourceRepository(archive).policy_version == SCREENING_POLICY_VERSION == 14
 
 
 # ── I7 catalog-writer inventory: fail-closed in code, not only in prose ──────
@@ -949,7 +1005,7 @@ _V13_PASS_CLAUSES = {
 }
 
 
-def _all_pass_decisions(policy_version: int = 13) -> list[dict[str, object]]:
+def _all_pass_decisions(policy_version: int = 14) -> list[dict[str, object]]:
     clauses = dict(_V13_PASS_CLAUSES)
     if policy_version < 13:
         clauses.pop("i8_evaluation_independence")
@@ -981,7 +1037,7 @@ def test_i7_pass_without_a_tool_dispatch_note_is_coerced_to_inconclusive() -> No
         submitted_evidence=[],
         finding_evidence=[],
         demoted_to_low=False,
-        policy_version=13,
+        policy_version=14,
         notes=[
             # A note on the right area but the wrong file does not finish
             # the inventory; a note on the right file but another area does
@@ -1012,7 +1068,7 @@ def test_i7_pass_with_a_tool_dispatch_note_on_a_lead_file_is_kept() -> None:
         submitted_evidence=[],
         finding_evidence=[],
         demoted_to_low=False,
-        policy_version=13,
+        policy_version=14,
         notes=[
             {
                 "kind": "observation",
@@ -1044,7 +1100,7 @@ def test_i7_breach_and_inconclusive_are_never_rewritten_by_the_inventory() -> No
         submitted_evidence=[],
         finding_evidence=[],
         demoted_to_low=False,
-        policy_version=13,
+        policy_version=14,
         notes=[],
         catalog_writer_lead_paths=frozenset({"src/baseline.rs"}),
     )
@@ -1060,7 +1116,7 @@ def test_i7_without_any_catalog_writer_lead_is_untouched() -> None:
         submitted_evidence=[],
         finding_evidence=[],
         demoted_to_low=False,
-        policy_version=13,
+        policy_version=14,
         notes=[],
         catalog_writer_lead_paths=frozenset(),
         coercions=coercions,
@@ -1069,19 +1125,22 @@ def test_i7_without_any_catalog_writer_lead_is_untouched() -> None:
     assert coercions == []
 
 
-def test_policy_12_i7_pass_is_untouched_even_with_lead_paths() -> None:
+@pytest.mark.parametrize(("policy_version", "schema_version"), [(12, 1), (13, 2)])
+def test_frozen_policy_i7_pass_is_untouched_even_with_lead_paths(
+    policy_version: int, schema_version: int
+) -> None:
     coercions: list[str] = []
     assessment = source_review_module._validated_invariant_assessment(
-        _all_pass_decisions(12),
+        _all_pass_decisions(policy_version),
         submitted_evidence=[],
         finding_evidence=[],
         demoted_to_low=False,
-        policy_version=12,
+        policy_version=policy_version,
         notes=[],
         catalog_writer_lead_paths=frozenset({"src/baseline.rs"}),
         coercions=coercions,
     )
-    assert assessment.schema_version == 1
+    assert assessment.schema_version == schema_version
     assert _i7(assessment).disposition is SourceReviewInvariantDisposition.PASS
     assert coercions == []
 
@@ -1104,14 +1163,14 @@ def test_parse_review_coerces_i7_from_the_live_inventory_and_records_it(
         ("src/baseline.rs", COMET_BASELINE_RS),
         ("src/single_tool_model.rs", COMET_SINGLE_TOOL_MODEL_RS),
     ]
-    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=13)
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=14)
     assert repository.catalog_writer_lead_paths() >= {"src/baseline.rs"}
     notes: list[dict[str, object]] = []
     observation = source_review_module._parse_review(
-        _benign_review(13),
+        _benign_review(14),
         artifact_sha256="a" * 64,
         repository=repository,
-        policy_version=13,
+        policy_version=14,
         notes=notes,
     )
     # A low-risk finding cannot carry an inconclusive invariant, so the
@@ -1134,7 +1193,7 @@ def test_parse_review_coerces_i7_inside_an_elevated_signed_finding(
     tmp_path: Path,
 ) -> None:
     files = [("src/baseline.rs", COMET_BASELINE_RS)]
-    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=13)
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=14)
     decisions = _all_pass_decisions()
     decisions[4] = {
         "invariant": "i5_production_engine",
@@ -1167,7 +1226,7 @@ def test_parse_review_coerces_i7_inside_an_elevated_signed_finding(
         review,
         artifact_sha256="a" * 64,
         repository=repository,
-        policy_version=13,
+        policy_version=14,
         notes=notes,
     )
     assert observation.ok and observation.finding is not None
@@ -1183,7 +1242,7 @@ def test_parse_review_keeps_i7_pass_when_the_ledger_inventoried_the_writer(
     tmp_path: Path,
 ) -> None:
     files = [("src/baseline.rs", COMET_BASELINE_RS)]
-    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=13)
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=14)
     notes: list[dict[str, object]] = [
         {
             "kind": "observation",
@@ -1196,10 +1255,10 @@ def test_parse_review_keeps_i7_pass_when_the_ledger_inventoried_the_writer(
         }
     ]
     observation = source_review_module._parse_review(
-        _benign_review(13),
+        _benign_review(14),
         artifact_sha256="a" * 64,
         repository=repository,
-        policy_version=13,
+        policy_version=14,
         notes=notes,
     )
     assert observation.finding is not None
@@ -1211,21 +1270,26 @@ def test_parse_review_keeps_i7_pass_when_the_ledger_inventoried_the_writer(
     assert len(notes) == 1
 
 
-def test_parse_review_at_policy_12_never_coerces(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("policy_version", "decision_count"), [(12, 7), (13, 8)])
+def test_parse_review_at_a_frozen_policy_never_coerces(
+    tmp_path: Path, policy_version: int, decision_count: int
+) -> None:
     files = [("src/baseline.rs", COMET_BASELINE_RS)]
-    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=12)
+    repository = TarSourceRepository(
+        _archive(tmp_path, files), policy_version=policy_version
+    )
     assert repository.catalog_writer_lead_paths() == frozenset()
     notes: list[dict[str, object]] = []
     observation = source_review_module._parse_review(
-        _benign_review(12),
+        _benign_review(policy_version),
         artifact_sha256="a" * 64,
         repository=repository,
-        policy_version=12,
+        policy_version=policy_version,
         notes=notes,
     )
     assert observation.finding is not None
     decisions = observation.finding["invariant_assessment"]["decisions"]
-    assert len(decisions) == 7
+    assert len(decisions) == decision_count
     assert all(item["disposition"] == "pass" for item in decisions)
     assert notes == []
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from ditto_screener import generator_ngrams
 from ditto_screening_protocol import (
+    CATALOG_WRITER_LEADS_POLICY_VERSION,
     SCREENING_FLOOR_POLICY_VERSION,
     SCREENING_POLICY_VERSION,
 )
@@ -815,9 +816,10 @@ _STATIC_MALICIOUS_RULES = (
 _ANSWER_LANGUAGES = frozenset({"rust", "python", "ts"})
 
 # Screener policy version that introduced the 2026-09-13 catalog-writer,
-# schema-mutation, draft-replacement, and generator-n-gram leads. Policy <= 12
-# inventories are frozen: the leads exist only for review runs at or above it.
-_V14_LEAD_MIN_POLICY_VERSION = 13
+# schema-mutation, draft-replacement, and generator-n-gram leads (v14). Policy
+# <= 13 inventories are frozen: the leads exist only for review runs at or above
+# it, and the number lives in the protocol package, never as a literal here.
+_V14_LEAD_MIN_POLICY_VERSION = CATALOG_WRITER_LEADS_POLICY_VERSION
 
 _EMULATION_FINGERPRINTS = (
     _Fingerprint(
@@ -2273,7 +2275,8 @@ def find_fixture_generator_ngram_leads(
     hashed index of the public generator surface, not a secrecy boundary; it is
     hashed so matched text stays out of findings.
 
-    The lead exists only for ``policy_version >= 13``; a frozen older policy
+    The lead exists only for ``policy_version >= 14``
+    (``CATALOG_WRITER_LEADS_POLICY_VERSION``); a frozen older policy
     receives an empty list so the inventory key shape stays stable while its
     content stays byte-identical to what that policy was signed against.
     """

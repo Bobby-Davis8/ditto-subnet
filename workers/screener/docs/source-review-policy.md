@@ -11,22 +11,16 @@ operator may reject a submission. Historical v9 findings retain their original
 wire identity and are not silently reinterpreted; v10 applies to new or
 explicitly rescreened attempts.
 
-## Policy v13 (published, activation pending)
+## Policy v14 (published, activation pending)
 
-Policy v13 replaces identifier-oriented review guidance with the mechanism-based
-white and black checklist in [policy-v13.md](policy-v13.md). It adds I8
-evaluation independence, explicit final-field and capability-removal rules,
-lifecycle security coverage, role-based opaque-component verification, and two
-final operator outcomes: `CLEAR` and `REJECT`. Screening outcomes such as pass,
-quarantine, retry, and inconclusive remain processing evidence rather than final
-operator dispositions.
-
-The built-in version does not activate itself. Activation requires a separately
-recorded schedule plus the readiness, transition, and emission-gate conditions
-listed in the v13 document. Historical policy-v10-v12 invariant assessments keep
-their seven-decision schema; policy v13 signs the eight-decision I1-I8 schema.
-
-### Policy v14 leads (2026-09-13 top-5 board review; shipped under v13)
+Policy v14 is a real version bump: built-in `SCREENING_POLICY_VERSION` is 14 and
+`CATALOG_WRITER_LEADS_POLICY_VERSION` (the version that carries the leads below)
+is 14. Policy v13 was activated and signed in production on 2026-09-14, so its
+prompt bytes and lead set are frozen: v14's L1 and L2 tails are v13's tails plus
+an addendum, and `tests/test_catalog_writer_leads.py` pins the v13 L1 tail, the
+full v13 L1 prompt, and the v13 L2 tail to their `origin/main` SHA-256 digests.
+`SCREENING_ACTIVATION_CEILING_POLICY_VERSION` stays below 14 until v14 has its
+own activation review; distributing the build does not activate it.
 
 The 2026-09-13 review rejected the whole top five (lets_623, comeτ-2 v1,
 Pentagon v1, Clear v14, unione v27). Four of the five shared one construct no
@@ -36,7 +30,7 @@ withhold_host_tools(...) { Vec::new() }`, `tools = [] if disable_tools`,
 `Route { mode: ReadOnly, ops: Vec::new() }`), narrowed it to one host-selected
 capability (`host_tools.retain(...)` under a cue table), or forced
 `"tool_choice": "none"` — so the graded zero-call / single-call outcome was
-decided by the host. The v13 prompt therefore requires an **I7 catalog-writer
+decided by the host. The v14 prompt therefore requires an **I7 catalog-writer
 inventory**: every site on the served path that assigns, clears, filters, or
 omits the `tools` / `defs` / `host_tools` handed to a deciding model call (or
 sets `tool_choice`), the classifier that selects the branch, and whether the
@@ -84,11 +78,12 @@ map to I7 except `draft-replacement-guard` → I3):
   search prompt into the served path only.
 
 Every lead above, and the `fixture_generator_ngrams` key's content, exists only
-for review runs at policy `>= 13` (`_Fingerprint.min_policy_version`, a floor).
-A rescreen at policy v10–v12 receives exactly the inventory that policy was
-signed against: no new kinds and an empty `fixture_generator_ngrams` list.
+for review runs at policy `>= 14` (`_Fingerprint.min_policy_version`, set from
+`CATALOG_WRITER_LEADS_POLICY_VERSION`, a floor). A rescreen at policy v10–v13
+receives exactly the inventory that policy was signed against: no new kinds and
+an empty `fixture_generator_ngrams` list.
 
-The I7 inventory is also enforced in code for policy `>= 13`, not only in the
+The I7 inventory is also enforced in code for policy `>= 14`, not only in the
 prompt: when the inventory carried a catalog-writer lead
 (`catalog-writer-empty-tools`, `catalog-narrowing-retain`,
 `tool-choice-none-literal`) and the reviewer passed I7 without at least one
@@ -111,6 +106,21 @@ Negative fixtures pinned in `tests/test_catalog_writer_leads.py`: the public
 starter kit, an embedding top-k semantic preloader, a threshold preloader, and
 a pass-through client with a conditional `tools` key all produce zero
 catalog-writer leads.
+
+## Policy v13 (published, activation pending)
+
+Policy v13 replaces identifier-oriented review guidance with the mechanism-based
+white and black checklist in [policy-v13.md](policy-v13.md). It adds I8
+evaluation independence, explicit final-field and capability-removal rules,
+lifecycle security coverage, role-based opaque-component verification, and two
+final operator outcomes: `CLEAR` and `REJECT`. Screening outcomes such as pass,
+quarantine, retry, and inconclusive remain processing evidence rather than final
+operator dispositions.
+
+The built-in version does not activate itself. Activation requires a separately
+recorded schedule plus the readiness, transition, and emission-gate conditions
+listed in the v13 document. Historical policy-v10-v12 invariant assessments keep
+their seven-decision schema; policy v13 signs the eight-decision I1-I8 schema.
 
 ## Policy v12 (activated 2026-09-06)
 

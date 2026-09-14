@@ -61,6 +61,7 @@ from ditto_screening_protocol import (
     SourceReviewPassClause,
 )
 from ditto_screening_protocol.models import (
+    CATALOG_WRITER_LEADS_POLICY_VERSION,
     source_review_invariants_for_policy,
     source_review_pass_clauses_for_policy,
 )
@@ -1909,7 +1910,12 @@ Missing predefined evidence or incomplete mandatory verification cannot CLEAR,
 but neither proves misconduct. Final operator eligibility outcomes are CLEAR or
 REJECT with a reason and violation_proven flag; screening pass, quarantine,
 retry and review states remain processing evidence, not those final outcomes.
+"""
+_POLICY_TAILS[13] = _POLICY_TAILS[12] + _POLICY_V13_ADDENDUM
 
+# Policy v14 keeps every v13 byte and appends the catalog-writer inventory
+# guidance. v13 is signed in production: never edit _POLICY_V13_ADDENDUM.
+_POLICY_V14_ADDENDUM = """\
 I7 CATALOG-WRITER INVENTORY (policy v14 leads, 2026-09-13 board review). Four
 of the five top-5 rejects shared one construct: a request-keyed classifier
 wrote the tool catalog offered to the deciding model (emptied it, narrowed it
@@ -1968,7 +1974,7 @@ search prompts into the served path only: a test, doc, fixture, or Rust
 fixture that asserts a generator sentence is an I5 tuning lead, never a
 finding by itself.
 """
-_POLICY_TAILS[13] = _POLICY_TAILS[12] + _POLICY_V13_ADDENDUM
+_POLICY_TAILS[14] = _POLICY_TAILS[13] + _POLICY_V14_ADDENDUM
 
 
 # Version-independent L1 throughput guidance (added by the L1 bounding work).
@@ -2010,6 +2016,8 @@ def _assert_policy_tails_differ() -> None:
     assert _POLICY_TAILS[12].startswith(_POLICY_TAILS[11])
     assert _POLICY_TAILS[12] != _POLICY_TAILS[13]
     assert _POLICY_TAILS[13].startswith(_POLICY_TAILS[12])
+    assert _POLICY_TAILS[13] != _POLICY_TAILS[14]
+    assert _POLICY_TAILS[14].startswith(_POLICY_TAILS[13])
 
 
 def _l1_prompt_cache_key(messages: list[dict[str, object]]) -> str:
@@ -4088,19 +4096,20 @@ def _validated_invariant_assessment(
 ) -> SourceReviewInvariantAssessment:
     """Filter invariant citations through the host evidence boundary.
 
-    For ``policy_version >= 13`` the I7 catalog-writer inventory is enforced
-    fail-closed in code, not only in the prompt: when the review inventory
+    For ``policy_version >= CATALOG_WRITER_LEADS_POLICY_VERSION`` (v14) the I7
+    catalog-writer inventory is enforced fail-closed in code, not only in the
+    prompt: when the review inventory
     surfaced a catalog-writer lead and the model passed I7 without one
     ``tool_dispatch`` note citing a lead file, the PASS is coerced to
     INCONCLUSIVE and the reason is appended to ``coercions`` for the audit
     (``_parse_review`` turns a coerced low-risk reply into an inconclusive
     review outcome because the protocol forbids a low finding from carrying
-    an INCONCLUSIVE invariant). Policies <= 12 never carry those leads, so
+    an INCONCLUSIVE invariant). Policies <= 13 never carry those leads, so
     their assessments are untouched.
     """
     inventory_gap = (
         _catalog_writer_inventory_gap(notes, catalog_writer_lead_paths)
-        if policy_version >= 13
+        if policy_version >= CATALOG_WRITER_LEADS_POLICY_VERSION
         else frozenset()
     )
 
@@ -4401,7 +4410,7 @@ def _parse_review(
         notes=notes,
         catalog_writer_lead_paths=(
             repository.catalog_writer_lead_paths()
-            if policy_version >= 13
+            if policy_version >= CATALOG_WRITER_LEADS_POLICY_VERSION
             else frozenset()
         ),
         coercions=coercions,
