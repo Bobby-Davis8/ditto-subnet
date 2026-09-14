@@ -3918,7 +3918,8 @@ func (b *inferenceBroker) proxy(
 	}
 	privateKey := append(ed25519.PrivateKey(nil), session.privateKey...)
 	currentChargeUpperBound := platformChatChargeUpperBound(body, maxOutputTokens)
-	traceCtx := traceContextLocked(session, caseGeneration, "", r.Header.Get(harnessCaseHeader))
+	claimedCaseID := boundedHarnessCaseClaim(r.Header.Get(harnessCaseHeader))
+	traceCtx := traceContextLocked(session, caseGeneration, "", claimedCaseID)
 	session.requests++
 	if caseGeneration != 0 {
 		snapshot := session.caseSnapshots[caseGeneration]
@@ -4158,6 +4159,13 @@ func (b *inferenceBroker) proxy(
 		Usage *struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
+			// Bench v13 cost ledger: OpenRouter folds reasoning tokens into
+			// completion_tokens on the agent-selected reasoning route and
+			// reports them here; the ledger books them separately from the
+			// answer output. Absent on providers/routes without reasoning.
+			CompletionTokensDetails *struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	usageOK := json.Unmarshal(responseBody, &decoded) == nil && decoded.Usage != nil && decoded.Usage.PromptTokens >= 0 && decoded.Usage.CompletionTokens >= 0
@@ -4191,18 +4199,26 @@ func (b *inferenceBroker) proxy(
 	// model INPUT; `responseBody` is the COMPLETION. No-op for bench_version<12.
 	recordAnswerIOLocked(session, caseGeneration, body, responseBody)
 	session.providerLatency += totalLatency
-	completionTokens := uint64(0)
+	completionTokens, reasoningTokens := uint64(0), uint64(0)
 	if usageOK {
 		session.usageAvailable++
 		session.promptTokens += uint64(decoded.Usage.PromptTokens)
 		session.completionTokens += uint64(decoded.Usage.CompletionTokens)
 		completionTokens = uint64(decoded.Usage.CompletionTokens)
+		if details := decoded.Usage.CompletionTokensDetails; details != nil && details.ReasoningTokens > 0 {
+			reasoningTokens = uint64(details.ReasoningTokens)
+			if reasoningTokens > completionTokens {
+				reasoningTokens = completionTokens
+			}
+		}
 	} else {
 		session.usageUnavailable++
 	}
 	// Bench v13 cost ledger: book this successful completion's choices and
-	// output tokens on the case it can be bound to. No-op for bench_version<13.
-	recordInferenceCostLocked(session, caseGeneration, responseBody, usageOK, completionTokens)
+	// answer output tokens (reasoning tokens recorded separately) on the case
+	// it can be bound to -- capability route, verified X-Ditto-Case-Id claim,
+	// or serial window. No-op for bench_version<13.
+	recordInferenceCostLocked(session, caseGeneration, claimedCaseID, responseBody, usageOK, completionTokens, reasoningTokens)
 	session.mu.Unlock()
 	if injectedDelay > 0 {
 		// Hold the completed upstream response for the scheduled fingerprint
