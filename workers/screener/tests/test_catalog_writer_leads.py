@@ -14,17 +14,27 @@ these tests pin only that the five known artifacts fire.
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from ditto_screener import generator_ngrams
+from ditto_screener import source_review as source_review_module
+from ditto_screener.source_review import TarSourceRepository
 from ditto_screener.source_signals import (
+    _EMULATION_FINGERPRINTS,
     CATALOG_WRITER_FINGERPRINT_KINDS,
     find_benchmark_emulation_fingerprints,
     find_fixture_generator_ngram_leads,
+)
+from ditto_screening_protocol import (
+    SCREENING_FLOOR_POLICY_VERSION,
+    SourceReviewInvariant,
+    SourceReviewInvariantDisposition,
 )
 
 _NEW_KINDS = CATALOG_WRITER_FINGERPRINT_KINDS | {
@@ -832,3 +842,487 @@ def test_policy_v13_prompt_requires_the_catalog_writer_inventory() -> None:
     # Older frozen policy texts are unchanged; v13 still extends v12.
     assert "I7 CATALOG-WRITER INVENTORY" not in _source_review_system_prompt(12)
     assert _POLICY_TAILS[13].startswith(_POLICY_TAILS[12])
+
+
+# ── policy floor: the v14 leads never reach a frozen v10–v12 inventory ───────
+
+_POSITIVE_FILES: list[tuple[str, str]] = [
+    ("baseline.py", LETS_623_BASELINE_PY),
+    ("chat.py", LETS_623_CHAT_PY),
+    ("src/baseline.rs", COMET_BASELINE_RS),
+    ("src/single_tool_model.rs", COMET_SINGLE_TOOL_MODEL_RS),
+    ("src/task_spec.rs", COMET_TASK_SPEC_RS),
+    ("src/agent/model/chat.rs", PENTAGON_CHAT_RS),
+    ("src/agent.rs", CLEAR_AGENT_RS),
+    ("src/unione/baseline.rs", UNIONE_BASELINE_RS),
+]
+_GENERATOR_SENTENCE = (
+    "Please keep my workspace on system mode as my normal appearance setting."
+)
+
+
+def _archive(tmp_path: Path, files: list[tuple[str, str]]) -> str:
+    path = tmp_path / "agent.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        for name, text in [
+            ("Cargo.toml", '[package]\nname="agent"\nversion="0.1.0"\n'),
+            *files,
+        ]:
+            raw = text.encode("utf-8")
+            member = tarfile.TarInfo(name)
+            member.size = len(raw)
+            archive.addfile(member, io.BytesIO(raw))
+    return str(path)
+
+
+def _kinds(findings: list[dict[str, object]]) -> list[str]:
+    return sorted(str(finding["kind"]) for finding in findings)
+
+
+def test_v14_fingerprints_carry_a_policy_13_floor_and_older_ones_do_not() -> None:
+    by_kind = {fingerprint.kind: fingerprint for fingerprint in _EMULATION_FINGERPRINTS}
+    assert set(by_kind) >= _NEW_KINDS
+    for kind, fingerprint in by_kind.items():
+        expected = 13 if kind in _NEW_KINDS else SCREENING_FLOOR_POLICY_VERSION
+        assert fingerprint.min_policy_version == expected, kind
+
+
+@pytest.mark.parametrize("policy_version", [10, 11, 12])
+def test_frozen_policy_fingerprints_exclude_every_v14_kind(policy_version: int) -> None:
+    frozen = find_benchmark_emulation_fingerprints(
+        _POSITIVE_FILES, policy_version=policy_version
+    )
+    assert not set(_kinds(frozen)) & _NEW_KINDS
+    current = find_benchmark_emulation_fingerprints(_POSITIVE_FILES, policy_version=13)
+    assert set(_kinds(current)) >= _NEW_KINDS
+    # Everything a frozen policy already carried is byte-identical at v13: the
+    # new kinds are purely additive.
+    older_at_13 = [item for item in current if item["kind"] not in _NEW_KINDS]
+    assert older_at_13 == frozen
+    # The default remains the built-in policy version.
+    assert find_benchmark_emulation_fingerprints(_POSITIVE_FILES) == current
+
+
+def test_frozen_policy_generator_ngram_leads_are_empty() -> None:
+    files = [("src/task_spec.rs", COMET_TASK_SPEC_RS)]
+    assert find_fixture_generator_ngram_leads(files, policy_version=12) == []
+    assert find_fixture_generator_ngram_leads(files, policy_version=13)
+    assert find_fixture_generator_ngram_leads(
+        files
+    ) == find_fixture_generator_ngram_leads(files, policy_version=13)
+
+
+def test_review_leads_at_policy_12_match_the_frozen_inventory(tmp_path: Path) -> None:
+    archive = _archive(tmp_path, _POSITIVE_FILES)
+    frozen = TarSourceRepository(archive, policy_version=12).review_leads()
+    current = TarSourceRepository(archive, policy_version=13).review_leads()
+    frozen_fingerprints = frozen["emulation_fingerprints"]
+    current_fingerprints = current["emulation_fingerprints"]
+    assert isinstance(frozen_fingerprints, list)
+    assert isinstance(current_fingerprints, list)
+    assert not set(_kinds(frozen_fingerprints)) & _NEW_KINDS
+    assert set(_kinds(current_fingerprints)) & _NEW_KINDS
+    # Key shape is stable; content is frozen for policy <= 12.
+    assert frozen["fixture_generator_ngrams"] == []
+    assert current["fixture_generator_ngrams"]
+    assert set(frozen) == set(current)
+    inventory = json.loads(TarSourceRepository(archive, policy_version=12).inventory())
+    assert inventory["review_leads"]["fixture_generator_ngrams"] == []
+    assert not set(_kinds(inventory["review_leads"]["emulation_fingerprints"])) & (
+        _NEW_KINDS
+    )
+    # The repository default tracks the built-in policy version.
+    assert TarSourceRepository(archive).policy_version == 13
+
+
+# ── I7 catalog-writer inventory: fail-closed in code, not only in prose ──────
+
+_V13_PASS_CLAUSES = {
+    "i1_model_invocation": "genuine_model_result",
+    "i2_evidence_retention": "full_records_on_deciding_turn",
+    "i3_model_dissent": "model_dissent_preserved",
+    "i4_derived_value_authority": "no_derived_value",
+    "i5_production_engine": "no_family_compiler",
+    "i6_tool_execution_fidelity": "no_reported_tool_calls",
+    "i7_model_tool_planning": "no_tool_planning",
+    "i8_evaluation_independence": "evaluation_independent_runtime",
+}
+
+
+def _all_pass_decisions(policy_version: int = 13) -> list[dict[str, object]]:
+    clauses = dict(_V13_PASS_CLAUSES)
+    if policy_version < 13:
+        clauses.pop("i8_evaluation_independence")
+    return [
+        {
+            "invariant": invariant,
+            "disposition": "pass",
+            "pass_clause": clause,
+            "summary": "The reviewed path satisfies the published pass clause.",
+            "evidence_indices": [],
+        }
+        for invariant, clause in clauses.items()
+    ]
+
+
+def _i7(assessment: object) -> object:
+    decisions = assessment.decisions
+    return next(
+        decision
+        for decision in decisions
+        if decision.invariant is SourceReviewInvariant.MODEL_TOOL_PLANNING
+    )
+
+
+def test_i7_pass_without_a_tool_dispatch_note_is_coerced_to_inconclusive() -> None:
+    coercions: list[str] = []
+    assessment = source_review_module._validated_invariant_assessment(
+        _all_pass_decisions(),
+        submitted_evidence=[],
+        finding_evidence=[],
+        demoted_to_low=False,
+        policy_version=13,
+        notes=[
+            # A note on the right area but the wrong file does not finish
+            # the inventory; a note on the right file but another area does
+            # not either.
+            {"kind": "cleared", "area": "tool_dispatch", "path": "src/other.rs"},
+            {"kind": "concern", "area": "model_call", "path": "src/baseline.rs"},
+        ],
+        catalog_writer_lead_paths=frozenset({"src/baseline.rs"}),
+        coercions=coercions,
+    )
+    decision = _i7(assessment)
+    assert decision.disposition is SourceReviewInvariantDisposition.INCONCLUSIVE
+    assert decision.pass_clause is None
+    assert "catalog-writer" in decision.summary
+    assert coercions == [decision.summary]
+    # Every other invariant keeps the model's decision.
+    others = [item for item in assessment.decisions if item is not decision]
+    assert len(others) == 7
+    assert all(
+        item.disposition is SourceReviewInvariantDisposition.PASS for item in others
+    )
+
+
+def test_i7_pass_with_a_tool_dispatch_note_on_a_lead_file_is_kept() -> None:
+    coercions: list[str] = []
+    assessment = source_review_module._validated_invariant_assessment(
+        _all_pass_decisions(),
+        submitted_evidence=[],
+        finding_evidence=[],
+        demoted_to_low=False,
+        policy_version=13,
+        notes=[
+            {
+                "kind": "observation",
+                "area": "tool_dispatch",
+                "path": "./src/baseline.rs",
+                "line": 12,
+            }
+        ],
+        catalog_writer_lead_paths=frozenset({"src/baseline.rs", "src/route.rs"}),
+        coercions=coercions,
+    )
+    decision = _i7(assessment)
+    assert decision.disposition is SourceReviewInvariantDisposition.PASS
+    assert decision.pass_clause is not None
+    assert coercions == []
+
+
+def test_i7_breach_and_inconclusive_are_never_rewritten_by_the_inventory() -> None:
+    decisions = _all_pass_decisions()
+    decisions[6] = {
+        "invariant": "i7_model_tool_planning",
+        "disposition": "inconclusive",
+        "pass_clause": None,
+        "summary": "The bounded review could not finish the writer inventory.",
+        "evidence_indices": [],
+    }
+    assessment = source_review_module._validated_invariant_assessment(
+        decisions,
+        submitted_evidence=[],
+        finding_evidence=[],
+        demoted_to_low=False,
+        policy_version=13,
+        notes=[],
+        catalog_writer_lead_paths=frozenset({"src/baseline.rs"}),
+    )
+    decision = _i7(assessment)
+    assert decision.disposition is SourceReviewInvariantDisposition.INCONCLUSIVE
+    assert "catalog-writer" not in decision.summary
+
+
+def test_i7_without_any_catalog_writer_lead_is_untouched() -> None:
+    coercions: list[str] = []
+    assessment = source_review_module._validated_invariant_assessment(
+        _all_pass_decisions(),
+        submitted_evidence=[],
+        finding_evidence=[],
+        demoted_to_low=False,
+        policy_version=13,
+        notes=[],
+        catalog_writer_lead_paths=frozenset(),
+        coercions=coercions,
+    )
+    assert _i7(assessment).disposition is SourceReviewInvariantDisposition.PASS
+    assert coercions == []
+
+
+def test_policy_12_i7_pass_is_untouched_even_with_lead_paths() -> None:
+    coercions: list[str] = []
+    assessment = source_review_module._validated_invariant_assessment(
+        _all_pass_decisions(12),
+        submitted_evidence=[],
+        finding_evidence=[],
+        demoted_to_low=False,
+        policy_version=12,
+        notes=[],
+        catalog_writer_lead_paths=frozenset({"src/baseline.rs"}),
+        coercions=coercions,
+    )
+    assert assessment.schema_version == 1
+    assert _i7(assessment).disposition is SourceReviewInvariantDisposition.PASS
+    assert coercions == []
+
+
+def _benign_review(policy_version: int) -> dict[str, object]:
+    return {
+        "risk_level": "low",
+        "confidence": 0.9,
+        "categories": ["none"],
+        "evidence": [],
+        "invariants": _all_pass_decisions(policy_version),
+        "summary": "General model-backed request path.",
+    }
+
+
+def test_parse_review_coerces_i7_from_the_live_inventory_and_records_it(
+    tmp_path: Path,
+) -> None:
+    files = [
+        ("src/baseline.rs", COMET_BASELINE_RS),
+        ("src/single_tool_model.rs", COMET_SINGLE_TOOL_MODEL_RS),
+    ]
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=13)
+    assert repository.catalog_writer_lead_paths() >= {"src/baseline.rs"}
+    notes: list[dict[str, object]] = []
+    observation = source_review_module._parse_review(
+        _benign_review(13),
+        artifact_sha256="a" * 64,
+        repository=repository,
+        policy_version=13,
+        notes=notes,
+    )
+    # A low-risk finding cannot carry an inconclusive invariant, so the
+    # would-be clear becomes an inconclusive review outcome (operator hold /
+    # deeper review) instead of a signed clear.
+    assert observation.ok is False
+    assert observation.finding is None and observation.finding_digest is None
+    assert observation.failure_disposition == "inconclusive"
+    assert observation.error_code == "source-review-i7-inventory-unfinished"
+    # The coercion travels with the ledger as a host-authored observation.
+    assert len(notes) == 1
+    assert notes[0]["kind"] == "observation"
+    assert notes[0]["area"] == "tool_dispatch"
+    assert str(notes[0]["summary"]).startswith("host: Coerced from PASS")
+    assert observation.notes == (notes[0],)
+    assert "text" not in json.dumps(notes)
+
+
+def test_parse_review_coerces_i7_inside_an_elevated_signed_finding(
+    tmp_path: Path,
+) -> None:
+    files = [("src/baseline.rs", COMET_BASELINE_RS)]
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=13)
+    decisions = _all_pass_decisions()
+    decisions[4] = {
+        "invariant": "i5_production_engine",
+        "disposition": "breach",
+        "pass_clause": None,
+        "summary": "The reviewed path retains a reachable strict-policy breach.",
+        "evidence_indices": [0, 1],
+    }
+    review: dict[str, object] = {
+        "risk_level": "high",
+        "confidence": 0.95,
+        "categories": ["benchmark_emulation"],
+        "evidence": [
+            {
+                "path": "src/baseline.rs",
+                "line": _line_of(COMET_BASELINE_RS, "= if withhold_host_tools("),
+                "category": "benchmark_emulation",
+            },
+            {
+                "path": "src/baseline.rs",
+                "line": _line_of(COMET_BASELINE_RS, "            Vec::new()"),
+                "category": "benchmark_emulation",
+            },
+        ],
+        "invariants": decisions,
+        "summary": "Request-keyed host writes the catalog offered to the model.",
+    }
+    notes: list[dict[str, object]] = []
+    observation = source_review_module._parse_review(
+        review,
+        artifact_sha256="a" * 64,
+        repository=repository,
+        policy_version=13,
+        notes=notes,
+    )
+    assert observation.ok and observation.finding is not None
+    assert observation.risk_level == "high"
+    signed = observation.finding["invariant_assessment"]["decisions"]
+    i7 = next(item for item in signed if item["invariant"] == "i7_model_tool_planning")
+    assert i7["disposition"] == "inconclusive"
+    assert "catalog-writer" in i7["summary"]
+    assert len(notes) == 1 and str(notes[0]["summary"]).startswith("host: ")
+
+
+def test_parse_review_keeps_i7_pass_when_the_ledger_inventoried_the_writer(
+    tmp_path: Path,
+) -> None:
+    files = [("src/baseline.rs", COMET_BASELINE_RS)]
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=13)
+    notes: list[dict[str, object]] = [
+        {
+            "kind": "observation",
+            "category": "none",
+            "area": "tool_dispatch",
+            "path": "src/baseline.rs",
+            "line": _line_of(COMET_BASELINE_RS, "= if withhold_host_tools("),
+            "summary": "One catalog writer; reachable with a non-empty catalog.",
+            "stage": "l1",
+        }
+    ]
+    observation = source_review_module._parse_review(
+        _benign_review(13),
+        artifact_sha256="a" * 64,
+        repository=repository,
+        policy_version=13,
+        notes=notes,
+    )
+    assert observation.finding is not None
+    decisions = observation.finding["invariant_assessment"]["decisions"]
+    i7 = next(
+        item for item in decisions if item["invariant"] == "i7_model_tool_planning"
+    )
+    assert i7["disposition"] == "pass"
+    assert len(notes) == 1
+
+
+def test_parse_review_at_policy_12_never_coerces(tmp_path: Path) -> None:
+    files = [("src/baseline.rs", COMET_BASELINE_RS)]
+    repository = TarSourceRepository(_archive(tmp_path, files), policy_version=12)
+    assert repository.catalog_writer_lead_paths() == frozenset()
+    notes: list[dict[str, object]] = []
+    observation = source_review_module._parse_review(
+        _benign_review(12),
+        artifact_sha256="a" * 64,
+        repository=repository,
+        policy_version=12,
+        notes=notes,
+    )
+    assert observation.finding is not None
+    decisions = observation.finding["invariant_assessment"]["decisions"]
+    assert len(decisions) == 7
+    assert all(item["disposition"] == "pass" for item in decisions)
+    assert notes == []
+
+
+# ── literal extraction: lifetimes, char literals, and Rust test modules ──────
+
+
+def test_rust_lifetimes_do_not_swallow_the_literal_that_follows() -> None:
+    source = (
+        "fn f<'a>(s: &'a str) -> &'a str { \"generator sentence here\" }\n"
+        'const X: &\'static str = "second generator sentence";\n'
+        "let c = 'x'; let n = '\\n'; let u = '\\u{1F600}'; let q = '\\'';\n"
+        "r1, r2, r3 := '\\u00e9', '\\U0001F600', '\\101'\n"
+        'let after = "third one survives the char literals";\n'
+    )
+    assert generator_ngrams.go_string_literals(source) == [
+        "generator sentence here",
+        "second generator sentence",
+        "third one survives the char literals",
+    ]
+
+
+def test_public_subtraction_file_keeps_every_long_literal() -> None:
+    datagen = _STARTER_KIT / "src" / "datagen.rs"
+    if not datagen.is_file():
+        pytest.skip("starter kit not checked out beside the screener")
+    source = datagen.read_text("utf-8")
+    extracted = generator_ngrams.go_string_literals(source)
+    naive = [
+        item.replace('\\"', '"')
+        for item in re.findall(r'"((?:[^"\\\n]|\\.)*)"', source)
+    ]
+    long_naive = {item for item in naive if len(item.split()) >= 5}
+    assert long_naive <= set(extracted)
+
+
+def test_served_rust_line_with_lifetimes_still_yields_an_admissible_lead() -> None:
+    served = (
+        "fn ack<'a>(request: &'a str) -> &'a str {\n"
+        f'    let ack: &\'static str = "{_GENERATOR_SENTENCE}";\n'
+        "    if request == ack { return ack; }\n"
+        "    request\n"
+        "}\n"
+    )
+    leads = find_fixture_generator_ngram_leads([("src/intent.rs", served)])
+    assert len(leads) == 1
+    assert leads[0]["admissible"] is True
+    cited = {int(location["line"]) for location in leads[0]["locations"]}
+    assert _line_of(served, "let ack") in cited
+
+
+def test_cfg_test_use_at_the_top_does_not_demote_the_served_path() -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "use pretty_assertions::assert_eq;\n"
+        "#[cfg(test)]\n"
+        "mod fixtures;\n"
+        "\n"
+        "pub fn classify(request: &str) -> Route {\n"
+        f'    let ack = "{_GENERATOR_SENTENCE}";\n'
+        "    if request == ack { return Route::Ack; }\n"
+        "    Route::Model\n"
+        "}\n"
+    )
+    leads = find_fixture_generator_ngram_leads([("src/intent.rs", source)])
+    assert len(leads) == 1
+    assert leads[0]["admissible"] is True
+    assert all(location["admissible"] for location in leads[0]["locations"])
+
+
+def test_cfg_test_module_is_bounded_by_its_braces() -> None:
+    source = (
+        "pub fn served() -> &'static str {\n"
+        '    "nothing generator-shaped here"\n'
+        "}\n"
+        "\n"
+        '#[cfg(all(test, feature = "fixtures"))]\n'
+        "#[allow(dead_code)]\n"
+        "mod tests {\n"
+        "    use super::*;\n"
+        "    #[test]\n"
+        "    fn ack() {\n"
+        f'        assert_eq!(route("{_GENERATOR_SENTENCE}"), Route::Ack);\n'
+        "    }\n"
+        "}\n"
+        "\n"
+        "pub fn after_the_tests(request: &str) -> Route {\n"
+        f'    if request == "{_GENERATOR_SENTENCE}" {{ return Route::Ack; }}\n'
+        "    Route::Model\n"
+        "}\n"
+    )
+    leads = find_fixture_generator_ngram_leads([("src/intent.rs", source)])
+    assert len(leads) == 1
+    by_line = {
+        int(location["line"]): bool(location["admissible"])
+        for location in leads[0]["locations"]
+    }
+    assert by_line[_line_of(source, "assert_eq!(route(")] is False
+    assert by_line[_line_of(source, "if request ==")] is True
+    assert leads[0]["admissible"] is True

@@ -72,12 +72,34 @@ map to I7 except `draft-replacement-guard` → I3):
   `looks_like_decline`, chained `.contains("...")` predicates, `"the search
   returned"`).
 - `fixture-generator-ngram` (inventory key `fixture_generator_ngrams`) — a
-  file whose quoted spans match at least two hashed private generator template
-  n-grams (`ditto_screener/data/generator_ngram_corpus.json`, rebuilt by
-  `scripts/build_generator_ngram_corpus.py`; public starter-kit surfaces are
-  subtracted). Tests, docs, fixtures, and Rust `#[cfg(test)]` blocks carry
-  `admissible: false`: `_is_non_runtime_path` keeps them inadmissible as
-  citations, so the hit is a search prompt into the served path only.
+  file whose quoted spans match at least two hashed generator template n-grams
+  (`ditto_screener/data/generator_ngram_corpus.json`, rebuilt by
+  `scripts/build_generator_ngram_corpus.py` whenever
+  `research/dittobench-datagen/{datagen,gen,universe}/*.go` change; starter-kit
+  surfaces are subtracted). The corpus is a deterministic hashed index of the
+  **public** generator tree, not a secrecy boundary — it is hashed only so
+  matched text stays out of findings. Tests, docs, fixtures, and Rust
+  `#[cfg(test)] mod … { … }` blocks carry `admissible: false`:
+  `_is_non_runtime_path` keeps them inadmissible as citations, so the hit is a
+  search prompt into the served path only.
+
+Every lead above, and the `fixture_generator_ngrams` key's content, exists only
+for review runs at policy `>= 13` (`_Fingerprint.min_policy_version`, a floor).
+A rescreen at policy v10–v12 receives exactly the inventory that policy was
+signed against: no new kinds and an empty `fixture_generator_ngrams` list.
+
+The I7 inventory is also enforced in code for policy `>= 13`, not only in the
+prompt: when the inventory carried a catalog-writer lead
+(`catalog-writer-empty-tools`, `catalog-narrowing-retain`,
+`tool-choice-none-literal`) and the reviewer passed I7 without at least one
+recorded `tool_dispatch` note citing one of the lead files, the host coerces
+the I7 decision to `inconclusive` and appends a `host:` observation to the
+notes ledger. On an elevated (medium/high) finding the coerced decision and its
+reason sign inside the finding; on a would-be clear (risk `low`, which the
+protocol forbids from carrying an `inconclusive` invariant) the review outcome
+itself becomes `inconclusive` (`source-review-i7-inventory-unfinished`) and
+routes to deeper review / operator hold with the ledger attached. A PASS on an
+unfinished inventory therefore never signs a clear.
 
 Known one-commit evasions (recorded so nobody mistakes a miss for evidence):
 `Vec::with_capacity(0)` or an iterator-built catalog instead of `Vec::new()`;

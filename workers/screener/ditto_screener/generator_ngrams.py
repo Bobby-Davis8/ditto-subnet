@@ -1,13 +1,16 @@
 """Hashed generator-template n-gram corpus shared by the screener and its builder.
 
-The private DittoBench generator renders every user-facing surface from closed
-template pools (``datagen.go`` category templates, ``memory_v2.go`` declarative
+The DittoBench generator renders every user-facing surface from closed template
+pools (``datagen.go`` category templates, ``memory_v2.go`` declarative
 acknowledgement sentences, story oracle phrasings, world record shapes). Miner
 fixtures that assert those exact sentences are a cheap review lead: the harness
-was tuned against the generator surface rather than against a product. The
-screener ships only unsalted SHA-256 prefixes of normalized word n-grams, so
-no template text leaves the research tree; a fixture hit is reported as a
-location-only lead and the hashed corpus never yields the phrase back.
+was tuned against the generator surface rather than against a product.
+
+The corpus is a deterministic hashed index of that generator surface, NOT a
+secrecy boundary: ``research/dittobench-datagen`` is public, so anyone can
+regenerate the same hashes in one command. It is kept as unsalted SHA-256
+prefixes of normalized word n-grams only so that a fixture hit is reported as a
+location-only lead and no matched text ever appears in a finding or a note.
 
 This module owns normalization, hashing, and corpus loading so the build script
 (``scripts/build_generator_ngram_corpus.py``) and the runtime scanner cannot
@@ -41,6 +44,13 @@ _PLACEHOLDER = re.compile(
 )
 _TOKEN = re.compile(r"[a-z0-9]+")
 _APOSTROPHE = re.compile(r"[’']")
+# A Go rune or Rust char literal: one character or one escape (``\n``,
+# ``\xHH``, ``\u{...}``, Go ``\uXXXX`` / ``\UXXXXXXXX`` / octal); anything
+# else after an apostrophe is a Rust lifetime marker and is stepped over.
+_CHAR_LITERAL = re.compile(
+    r"'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F]{1,6}\}|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}"
+    r"|U[0-9a-fA-F]{8}|[0-7]{3}|[^\n]))'"
+)
 
 _STOPWORDS = frozenset(
     {
@@ -168,7 +178,9 @@ def go_string_literals(source: str) -> list[str]:
     Interpreted strings keep their escape sequences decoded for the common
     cases (``\\"``, ``\\n``, ``\\t``, ``\\\\``); raw backtick strings are taken
     verbatim. Rune / char literals and ``//`` / ``/* */`` comments are skipped,
-    which also covers the Rust starter kit's public template literals.
+    which also covers the Rust starter kit's public template literals; a Rust
+    lifetime apostrophe is stepped over so ``fn f<'a>(s: &'a str)`` never hides
+    the literal that follows it.
     """
     literals: list[str] = []
     index = 0
@@ -209,10 +221,12 @@ def go_string_literals(source: str) -> list[str]:
             index += 1
             continue
         if char == "'":
-            end = index + 1
-            while end < length and source[end] != "'":
-                end += 2 if source[end] == "\\" else 1
-            index = end + 1
+            # Only a genuine rune / char literal (``'x'``, ``'\\n'``, ``'\\u{1F}'``)
+            # is consumed as a span. A Rust lifetime (``&'static str``, ``<'a>``)
+            # has no closing quote nearby; treating it as a literal would swallow
+            # every ``"..."`` template up to the next apostrophe.
+            literal = _CHAR_LITERAL.match(source, index)
+            index = literal.end() if literal is not None else index + 1
             continue
         index += 1
     return literals

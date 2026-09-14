@@ -663,7 +663,9 @@ class SourceReviewAdjudicator:
         note_count = len(notes)
         try:
             api_key = self._read_api_key()
-            repository = TarSourceRepository(archive_path)
+            repository = TarSourceRepository(
+                archive_path, policy_version=policy_version
+            )
         except (OSError, ValueError) as error:
             logger.warning("adjudication could not start: %s", error)
             return _escalate(

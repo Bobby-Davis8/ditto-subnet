@@ -13,6 +13,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ditto_screener import generator_ngrams
+from ditto_screening_protocol import (
+    SCREENING_FLOOR_POLICY_VERSION,
+    SCREENING_POLICY_VERSION,
+)
 
 _MAX_LEADS = 32
 _MAX_LEADS_PER_RULE_FILE = 4
@@ -86,6 +90,11 @@ class _Fingerprint:
     # per writer site instead of consuming the per-file cap on near-duplicates.
     # Empty keeps the historical all-roles signature.
     dedupe_roles: tuple[str, ...] = ()
+    # Lowest screening policy version whose inventory carries this fingerprint.
+    # A frozen policy's L1 inventory must stay byte-identical across screener
+    # builds, so a fingerprint added for policy N is filtered out of every
+    # review run at policy < N. Always a floor (``>=``), never an enumeration.
+    min_policy_version: int = SCREENING_FLOOR_POLICY_VERSION
 
 
 def _words(value: str) -> re.Pattern[str]:
@@ -804,6 +813,11 @@ _STATIC_MALICIOUS_RULES = (
 # edit-distance, registry, generator-path, and family-label tells are
 # language-agnostic and run across Rust/Python/TS/Go alike.
 _ANSWER_LANGUAGES = frozenset({"rust", "python", "ts"})
+
+# Screener policy version that introduced the 2026-09-13 catalog-writer,
+# schema-mutation, draft-replacement, and generator-n-gram leads. Policy <= 12
+# inventories are frozen: the leads exist only for review runs at or above it.
+_V14_LEAD_MIN_POLICY_VERSION = 13
 
 _EMULATION_FINGERPRINTS = (
     _Fingerprint(
@@ -1634,6 +1648,7 @@ _EMULATION_FINGERPRINTS = (
         # or a literal `.contains("` test). The honest look-alike -- forwarding an
         # already-empty request catalog -- carries no classifier role.
         kind="catalog-writer-empty-tools",
+        min_policy_version=_V14_LEAD_MIN_POLICY_VERSION,
         severity="high",
         roles=(
             _Role(
@@ -1691,6 +1706,7 @@ _EMULATION_FINGERPRINTS = (
         # threshold / top_k vocabulary in-window) is the published safe harbor
         # and suppresses the lead.
         kind="catalog-narrowing-retain",
+        min_policy_version=_V14_LEAD_MIN_POLICY_VERSION,
         severity="medium",
         roles=(
             _Role(
@@ -1740,6 +1756,7 @@ _EMULATION_FINGERPRINTS = (
         # the request catalog through has no reason to disable calling; a
         # parameter default (`tool_choice=None,`) does not match.
         kind="tool-choice-none-literal",
+        min_policy_version=_V14_LEAD_MIN_POLICY_VERSION,
         severity="medium",
         roles=(
             _Role(
@@ -1764,6 +1781,7 @@ _EMULATION_FINGERPRINTS = (
         # injected into the request catalog are the served effect. Appending
         # one uniform note to every tool carries no name selector.
         kind="tool-schema-mutation",
+        min_policy_version=_V14_LEAD_MIN_POLICY_VERSION,
         severity="high",
         roles=(
             _Role(
@@ -1810,6 +1828,7 @@ _EMULATION_FINGERPRINTS = (
         # returned"`). A transport failover that lets a model still author the
         # text carries no content predicate.
         kind="draft-replacement-guard",
+        min_policy_version=_V14_LEAD_MIN_POLICY_VERSION,
         severity="medium",
         roles=(
             _Role(
@@ -2029,6 +2048,8 @@ def _fingerprint_language(path: str) -> str | None:
 
 def find_benchmark_emulation_fingerprints(
     files: Iterable[tuple[str, str]],
+    *,
+    policy_version: int = SCREENING_POLICY_VERSION,
 ) -> list[dict[str, object]]:
     """Return bench-v12 anti-emulation fingerprints as location-only review leads.
 
@@ -2043,7 +2064,16 @@ def find_benchmark_emulation_fingerprints(
     serve/run entrypoint. Scanning is language-aware: each file is classified from
     its suffix, and a fingerprint whose tell is language-specific runs only on the
     languages it applies to.
+
+    ``policy_version`` selects the frozen lead set: a fingerprint whose
+    ``min_policy_version`` exceeds it never fires, so a rescreen at an older
+    policy sees exactly the inventory that policy was signed against.
     """
+    fingerprints = tuple(
+        fingerprint
+        for fingerprint in _EMULATION_FINGERPRINTS
+        if fingerprint.min_policy_version <= policy_version
+    )
     findings: list[dict[str, object]] = []
     for path, text in sorted(files, key=lambda item: _path_priority(item[0])):
         if not _is_executable_source_path(path):
@@ -2056,7 +2086,7 @@ def find_benchmark_emulation_fingerprints(
             continue
         code_lines = _mask_comments(text).splitlines()
         code_lines.extend([""] * (len(raw_lines) - len(code_lines)))
-        for fingerprint in _EMULATION_FINGERPRINTS:
+        for fingerprint in fingerprints:
             if fingerprint.languages and language not in fingerprint.languages:
                 continue
             scan_lines = code_lines if fingerprint.scan == "code" else raw_lines
@@ -2163,7 +2193,16 @@ _MAX_NGRAM_LEAD_LOCATIONS = 6
 # the same fixture file is the tuning signal.
 _MIN_NGRAM_HITS_PER_FILE = 2
 _QUOTED_SPAN = re.compile(r"\"((?:[^\"\\\n]|\\.)*)\"|'((?:[^'\\\n]|\\.)*)'")
-_RUST_CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
+# Rust has no single-quoted strings, only char literals and lifetimes; letting
+# the ``'...'`` alternative run on Rust would open a span at ``<'a>`` and swallow
+# the double-quoted literal that follows it.
+_DOUBLE_QUOTED_SPAN = re.compile(r"\"((?:[^\"\\\n]|\\.)*)\"")
+# ``#[cfg(test)]`` and ``#[cfg(all(test, ...))]`` both gate a test module.
+_RUST_CFG_TEST = re.compile(r"^\s*#\[cfg\((?:test\b|all\(\s*test\b)")
+_RUST_ATTRIBUTE = re.compile(r"^\s*#!?\[")
+_RUST_MOD_BLOCK = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+)
 # Fixture data directories are inadmissible n-gram citation sites even though
 # the executable-surface classifier (which the static preflight relies on)
 # leaves them alone.
@@ -2177,18 +2216,48 @@ def _is_fixture_path(path: str) -> bool:
     return bool(_FIXTURE_PATH_PARTS.intersection(parts[:-1]))
 
 
-def _rust_test_block_start(path: str, lines: list[str]) -> int | None:
-    """Return the 1-based line where a Rust file's trailing test module begins."""
+def _rust_test_block_ranges(path: str, lines: list[str]) -> list[tuple[int, int]]:
+    """Return the inclusive 1-based line ranges of a Rust file's test modules.
+
+    Only a ``#[cfg(test)]`` (or ``#[cfg(all(test, ...))]``) attribute whose next
+    non-blank, non-attribute line opens ``mod <ident> {`` starts a block; a
+    ``#[cfg(test)] use ...`` or ``#[cfg(test)] mod tests;`` near the top of a
+    served file must never demote the served code below it. The block ends
+    where brace depth returns to zero (or at EOF when it never does).
+    """
     if _fingerprint_language(path) != "rust":
-        return None
-    for line_number, line in enumerate(lines, 1):
-        if _RUST_CFG_TEST.match(line):
-            return line_number
-    return None
+        return []
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        if not _RUST_CFG_TEST.match(lines[index]):
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < len(lines) and (
+            not lines[cursor].strip() or _RUST_ATTRIBUTE.match(lines[cursor])
+        ):
+            cursor += 1
+        if cursor >= len(lines) or not _RUST_MOD_BLOCK.match(lines[cursor]):
+            index += 1
+            continue
+        depth = 0
+        end = len(lines)
+        for line_number in range(cursor, len(lines)):
+            code = _DOUBLE_QUOTED_SPAN.sub('""', lines[line_number][:4096])
+            depth += code.count("{") - code.count("}")
+            if depth <= 0:
+                end = line_number + 1
+                break
+        ranges.append((index + 1, end))
+        index = end
+    return ranges
 
 
 def find_fixture_generator_ngram_leads(
     files: Iterable[tuple[str, str]],
+    *,
+    policy_version: int = SCREENING_POLICY_VERSION,
 ) -> list[dict[str, object]]:
     """Return location-only leads for fixtures that quote generator templates.
 
@@ -2200,8 +2269,16 @@ def find_fixture_generator_ngram_leads(
     location is a non-runtime path or sits inside a Rust test block, so the
     reviewer treats it as a search prompt into the served path and never as a
     citation: ``_is_non_runtime_path`` keeps the fixture itself inadmissible.
-    Neither the matched text nor the hash leaves the archive.
+    Neither the matched text nor the hash leaves the archive. The corpus is a
+    hashed index of the public generator surface, not a secrecy boundary; it is
+    hashed so matched text stays out of findings.
+
+    The lead exists only for ``policy_version >= 13``; a frozen older policy
+    receives an empty list so the inventory key shape stays stable while its
+    content stays byte-identical to what that policy was signed against.
     """
+    if policy_version < _V14_LEAD_MIN_POLICY_VERSION:
+        return []
     corpus = generator_ngrams.load_corpus()
     if not corpus:
         return []
@@ -2211,7 +2288,12 @@ def find_fixture_generator_ngram_leads(
         if not lines:
             continue
         non_runtime = _is_non_runtime_path(path) or _is_fixture_path(path)
-        test_block_start = _rust_test_block_start(path, lines)
+        test_blocks = _rust_test_block_ranges(path, lines)
+        quoted_span = (
+            _DOUBLE_QUOTED_SPAN
+            if _fingerprint_language(path) == "rust"
+            else _QUOTED_SPAN
+        )
         matched: set[str] = set()
         locations: list[dict[str, object]] = []
         for line_number, line in enumerate(lines, 1):
@@ -2220,8 +2302,8 @@ def find_fixture_generator_ngram_leads(
                 spans = [clipped]
             else:
                 spans = [
-                    span.group(1) or span.group(2) or ""
-                    for span in _QUOTED_SPAN.finditer(clipped)
+                    next((group for group in span.groups() if group is not None), "")
+                    for span in quoted_span.finditer(clipped)
                 ]
             hits: set[str] = set()
             for span in spans:
@@ -2230,8 +2312,8 @@ def find_fixture_generator_ngram_leads(
                 continue
             matched.update(hits)
             if len(locations) < _MAX_NGRAM_LEAD_LOCATIONS:
-                in_test_block = (
-                    test_block_start is not None and line_number >= test_block_start
+                in_test_block = any(
+                    start <= line_number <= end for start, end in test_blocks
                 )
                 locations.append(
                     {

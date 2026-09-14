@@ -2312,7 +2312,9 @@ class TerraSolSourceReviewAgent:
             workspace = Path(tempfile.mkdtemp(prefix="ditto-l2-source-"))
         try:
             _extract_readonly_workspace(Path(archive_path), workspace)
-            repository = TarSourceRepository(archive_path)
+            repository = TarSourceRepository(
+                archive_path, policy_version=policy_version
+            )
             return await self._run_model(
                 workspace,
                 repository,

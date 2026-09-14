@@ -5,14 +5,18 @@ Usage (from ``workers/screener``)::
 
     uv run python scripts/build_generator_ngram_corpus.py [--check]
 
-Reads the private DittoBench generator surface files under
-``research/dittobench-datagen`` and writes SHA-256 prefixes of every
-informative word n-gram found in their string literals to
-``ditto_screener/data/generator_ngram_corpus.json``. The corpus is the only
-generator-derived artifact the screener image carries; the template text never
-leaves the research tree. ``--check`` exits non-zero when the committed corpus
-is missing hashes the current generator would produce (the corpus lags the
-generator) so a bench bump that adds surfaces can regenerate deliberately.
+Reads the DittoBench generator surface files under
+``research/dittobench-datagen`` (a public tree) and writes SHA-256 prefixes of
+every informative word n-gram found in their string literals to
+``ditto_screener/data/generator_ngram_corpus.json``. The corpus is a
+deterministic hashed index of that public surface, not a secrecy boundary: it
+is hashed only so a hit is reported as a location-only lead and matched text
+never appears in a finding. Rerun this script whenever
+``research/dittobench-datagen/{datagen,gen,universe}/*.go`` change (the
+bench-version-bump checklist names it). ``--check`` exits non-zero when the
+committed corpus is missing hashes the current generator would produce (the
+corpus lags the generator) so a bench bump that adds surfaces can regenerate
+deliberately.
 
 Bench versions are immutable, so a hash committed once stays derivable
 forever; a committed hash the current generator no longer yields means the
@@ -50,9 +54,9 @@ SOURCE_FILES = (
     "universe/world.go",
 )
 
-# Public surfaces every honest miner legitimately mirrors. Any gram derivable
-# from these is subtracted so the corpus names only the private generator
-# surface; the starter kit's own public datagen never trips the lead.
+# Starter-kit surfaces every honest miner legitimately mirrors. Any gram
+# derivable from these is subtracted so the corpus names only the generator
+# surface the kit does not ship; the kit's own datagen never trips the lead.
 PUBLIC_SOURCE_FILES = ("miners/dittobench-starter-kit/src/datagen.rs",)
 # Public prose and fixture data hashed line by line rather than as literals.
 PUBLIC_TEXT_FILES = (

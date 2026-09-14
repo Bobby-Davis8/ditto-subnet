@@ -39,6 +39,7 @@ from ditto_screener.review_provider import (
 from ditto_screener.source_causality import analyze_static_candidates_v2
 from ditto_screener.source_reachability import analyze_reachability
 from ditto_screener.source_signals import (
+    CATALOG_WRITER_FINGERPRINT_KINDS,
     find_benchmark_emulation_fingerprints,
     find_decisive_malicious_source,
     find_fixture_generator_ngram_leads,
@@ -1959,7 +1960,9 @@ decline predicate behind a trait method), so absence of a hit is not evidence:
   returned"). A parseable first draft that never ships is the I3 breach; a
   transport failover is the honest look-alike.
 The inventory's "fixture_generator_ngrams" list files whose quoted spans match
-at least two hashed private generator template n-grams. Those locations are
+at least two hashed generator template n-grams (a deterministic index of the
+public generator surface, hashed only so matched text stays out of findings;
+the starter kit's own public templates are subtracted). Those locations are
 search prompts into the served path only: a test, doc, fixture, or Rust
 #[cfg(test)] block is inadmissible as a citation (admissible: false), and a
 fixture that asserts a generator sentence is an I5 tuning lead, never a
@@ -2427,12 +2430,21 @@ class TarSourceRepository:
     """A read-only, size-bounded view over regular files in a verified tarball."""
 
     def __init__(
-        self, archive_path: str, *, static_preflight_v2_mode: str = "off"
+        self,
+        archive_path: str,
+        *,
+        static_preflight_v2_mode: str = "off",
+        policy_version: int = SCREENING_POLICY_VERSION,
     ) -> None:
         if static_preflight_v2_mode not in {"off", "shadow", "enforce"}:
             raise ValueError("static preflight mode must be off, shadow, or enforce")
         self._archive_path = archive_path
         self._static_preflight_v2_mode = static_preflight_v2_mode
+        # The review inventory is policy-scoped: leads introduced for policy N
+        # never appear in a run at policy < N, so a frozen policy's L1
+        # inventory stays byte-identical across screener builds.
+        self.policy_version = policy_version
+        self._review_leads_cache: dict[str, object] | None = None
         self._binary_analysis_cache: dict[str, dict[str, object]] = {}
         members: list[_Member] = []
         seen: set[str] = set()
@@ -2641,7 +2653,37 @@ class TarSourceRepository:
                 binary_analysis = binary_analysis[: len(opaque)]
 
     def review_leads(self) -> dict[str, object]:
-        """Precompute bounded location-only leads without exposing source text."""
+        """Precompute bounded location-only leads without exposing source text.
+
+        The result is scoped to ``self.policy_version`` and cached: the
+        inventory shown to the reviewer and the host-side fail-closed checks
+        in ``_parse_review`` must read the same lead set.
+        """
+        if self._review_leads_cache is None:
+            self._review_leads_cache = self._compute_review_leads()
+        return self._review_leads_cache
+
+    def catalog_writer_lead_paths(self) -> frozenset[str]:
+        """Archive paths carrying a catalog-writer lead in this review's inventory."""
+        leads = self.review_leads()
+        fingerprints = leads.get("emulation_fingerprints")
+        paths: set[str] = set()
+        if not isinstance(fingerprints, list):
+            return frozenset()
+        for finding in fingerprints:
+            if not isinstance(finding, dict):
+                continue
+            if finding.get("kind") not in CATALOG_WRITER_FINGERPRINT_KINDS:
+                continue
+            locations = finding.get("locations")
+            if not isinstance(locations, list):
+                continue
+            for location in locations:
+                if isinstance(location, dict) and isinstance(location.get("path"), str):
+                    paths.add(_normalized_note_path(str(location["path"])))
+        return frozenset(paths)
+
+    def _compute_review_leads(self) -> dict[str, object]:
         readable: list[tuple[str, str]] = []
         bytes_scanned = 0
         files_scanned = 0
@@ -2697,8 +2739,12 @@ class TarSourceRepository:
             "items": [*find_source_review_leads(readable), *static_advisories][
                 :_MAX_LEAD_SCAN_FILES
             ],
-            "emulation_fingerprints": find_benchmark_emulation_fingerprints(readable),
-            "fixture_generator_ngrams": find_fixture_generator_ngram_leads(readable),
+            "emulation_fingerprints": find_benchmark_emulation_fingerprints(
+                readable, policy_version=self.policy_version
+            ),
+            "fixture_generator_ngrams": find_fixture_generator_ngram_leads(
+                readable, policy_version=self.policy_version
+            ),
             "unmatchable_category_guards": guard_report(
                 find_unmatchable_category_guards(
                     (path, mask_comments(text)) for path, text in readable
@@ -3461,6 +3507,7 @@ class OpenRouterSourceReviewAgent:
             repository = TarSourceRepository(
                 archive_path,
                 static_preflight_v2_mode=self._static_preflight_v2_mode,
+                policy_version=policy_version,
             )
             result, clearance_certified = await self._run(
                 repository,
@@ -3475,6 +3522,7 @@ class OpenRouterSourceReviewAgent:
                 artifact_sha256=artifact_sha256,
                 repository=repository,
                 policy_version=policy_version,
+                notes=notes,
             )
             return replace(
                 observation,
@@ -3992,6 +4040,41 @@ def _execute_tool(
     raise ValueError("source reviewer requested an unsupported tool")
 
 
+def _normalized_note_path(path: str) -> str:
+    return path.strip().removeprefix("./")
+
+
+_I7_INVENTORY_UNFINISHED_CODE = "source-review-i7-inventory-unfinished"
+_I7_INVENTORY_COERCION_SUMMARY = (
+    "Coerced from PASS: the inventory carried catalog-writer leads in "
+    "{count} file(s) and the ledger recorded no tool_dispatch note citing any "
+    "of them; the I7 catalog-writer inventory is unfinished."
+)
+
+
+def _catalog_writer_inventory_gap(
+    notes: Sequence[Mapping[str, object]],
+    catalog_writer_lead_paths: frozenset[str],
+) -> frozenset[str]:
+    """Return lead paths no ``tool_dispatch`` note cited (empty when satisfied).
+
+    The I7 catalog-writer inventory is satisfied by at least one recorded note
+    with area ``tool_dispatch`` whose path is one of the inventory's
+    catalog-writer lead files; any note kind counts because an observation, a
+    concern, and a cleared entry each prove the writer was inventoried.
+    """
+    if not catalog_writer_lead_paths:
+        return frozenset()
+    cited = {
+        _normalized_note_path(str(note.get("path")))
+        for note in notes
+        if note.get("area") == "tool_dispatch" and isinstance(note.get("path"), str)
+    }
+    if cited & catalog_writer_lead_paths:
+        return frozenset()
+    return catalog_writer_lead_paths
+
+
 def _validated_invariant_assessment(
     value: object,
     *,
@@ -3999,8 +4082,27 @@ def _validated_invariant_assessment(
     finding_evidence: list[dict[str, object]],
     demoted_to_low: bool,
     policy_version: int = 12,
+    notes: Sequence[Mapping[str, object]] = (),
+    catalog_writer_lead_paths: frozenset[str] = frozenset(),
+    coercions: list[str] | None = None,
 ) -> SourceReviewInvariantAssessment:
-    """Filter invariant citations through the host evidence boundary."""
+    """Filter invariant citations through the host evidence boundary.
+
+    For ``policy_version >= 13`` the I7 catalog-writer inventory is enforced
+    fail-closed in code, not only in the prompt: when the review inventory
+    surfaced a catalog-writer lead and the model passed I7 without one
+    ``tool_dispatch`` note citing a lead file, the PASS is coerced to
+    INCONCLUSIVE and the reason is appended to ``coercions`` for the audit
+    (``_parse_review`` turns a coerced low-risk reply into an inconclusive
+    review outcome because the protocol forbids a low finding from carrying
+    an INCONCLUSIVE invariant). Policies <= 12 never carry those leads, so
+    their assessments are untouched.
+    """
+    inventory_gap = (
+        _catalog_writer_inventory_gap(notes, catalog_writer_lead_paths)
+        if policy_version >= 13
+        else frozenset()
+    )
 
     # PASS evidence cannot support a violation and is never authoritative. Some
     # otherwise valid model replies echo inspected citation indices on PASS
@@ -4066,6 +4168,24 @@ def _validated_invariant_assessment(
                 )
             )
             continue
+        if (
+            inventory_gap
+            and decision.invariant == SourceReviewInvariant.MODEL_TOOL_PLANNING
+            and decision.disposition == SourceReviewInvariantDisposition.PASS
+        ):
+            summary = _I7_INVENTORY_COERCION_SUMMARY.format(count=len(inventory_gap))
+            if coercions is not None:
+                coercions.append(summary)
+            decisions.append(
+                SourceReviewInvariantDecision(
+                    invariant=decision.invariant,
+                    disposition=SourceReviewInvariantDisposition.INCONCLUSIVE,
+                    pass_clause=None,
+                    summary=summary,
+                    evidence_indices=[],
+                )
+            )
+            continue
         decisions.append(
             decision.model_copy(update={"evidence_indices": evidence_indices})
         )
@@ -4078,7 +4198,17 @@ def _parse_review(
     artifact_sha256: str,
     repository: TarSourceRepository,
     policy_version: int = SCREENING_POLICY_VERSION,
+    notes: list[dict[str, object]] | None = None,
 ) -> SourceReviewObservation:
+    """Validate the reviewer's final reply into a signed, location-only finding.
+
+    ``notes`` is the live ledger the reviewer recorded during the run; it is
+    read for the policy-v13 I7 catalog-writer inventory check and receives one
+    host-authored observation whenever that check coerces a decision, so the
+    coercion travels with the ledger to the operator.
+    """
+    if notes is None:
+        notes = []
     if not isinstance(value, dict) or set(value) != {
         "risk_level",
         "confidence",
@@ -4261,6 +4391,54 @@ def _parse_review(
     # The finding travels to the platform on quarantine and must hash to the
     # digest bound into the signed verdict, so build it through the shared
     # protocol model rather than a local canonicalization.
+    coercions: list[str] = []
+    invariant_assessment = _validated_invariant_assessment(
+        invariants,
+        submitted_evidence=submitted_evidence,
+        finding_evidence=normalized_evidence,
+        demoted_to_low=risk == "low" and submitted_risk != "low",
+        policy_version=policy_version,
+        notes=notes,
+        catalog_writer_lead_paths=(
+            repository.catalog_writer_lead_paths()
+            if policy_version >= 13
+            else frozenset()
+        ),
+        coercions=coercions,
+    )
+    for reason in coercions:
+        _append_note(
+            notes,
+            {
+                "kind": "observation",
+                "category": "none",
+                "summary": f"host: {reason}"[:300],
+                "stage": "l1",
+                "area": "tool_dispatch",
+            },
+        )
+    if coercions and risk == "low":
+        # The protocol forbids a low-risk finding from carrying an INCONCLUSIVE
+        # invariant, so a would-be clear whose I7 inventory is unfinished cannot
+        # sign at all: the review outcome itself is inconclusive and routes to
+        # deeper review / operator hold with the ledger attached, exactly like a
+        # budget-exhausted review with recorded concerns. Elevated findings keep
+        # the coerced I7 inside the signed finding (they quarantine regardless).
+        logger.warning(
+            "source review artifact_sha256=%s: I7 PASS coerced to inconclusive; "
+            "%d catalog-writer lead file(s) had no tool_dispatch note",
+            artifact_sha256,
+            len(repository.catalog_writer_lead_paths()),
+        )
+        return SourceReviewObservation(
+            ok=False,
+            risk_level=None,
+            finding_digest=None,
+            categories=(),
+            error_code=_I7_INVENTORY_UNFINISHED_CODE,
+            failure_disposition="inconclusive",
+            notes=tuple(notes),
+        )
     finding = SourceReviewFinding(
         artifact_sha256=artifact_sha256,
         prompt_revision=_prompt_revision(policy_version),
@@ -4272,13 +4450,7 @@ def _parse_review(
             for item in normalized_evidence
         ],
         summary=summary,
-        invariant_assessment=_validated_invariant_assessment(
-            invariants,
-            submitted_evidence=submitted_evidence,
-            finding_evidence=normalized_evidence,
-            demoted_to_low=risk == "low" and submitted_risk != "low",
-            policy_version=policy_version,
-        ),
+        invariant_assessment=invariant_assessment,
     ).require_policy_v10_invariants()
     return SourceReviewObservation(
         ok=True,
