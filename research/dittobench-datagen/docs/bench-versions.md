@@ -24,6 +24,7 @@ applied to an existing version. It ships as a new one.
 | 10 (pre-activation) | `2027-02-01` | A generator-as-spec contract: seed-scoped ontologies, recursive query programs, independent renderers, and linked metamorphic/counterfactual cases. Runtime execution is available; Platform activation remains separate. |
 | 11 (pre-activation) | `2027-03-01` | Anti-template-fitting: sampled program shapes, compositional surface grammar, descriptive entity binding, a multi-edit surface-noise projector, and per-seed composed injection markers. Runtime execution is available; Platform activation remains separate. |
 | 12 (pre-activation) | `2027-04-01` | Anti-KV-substrate: prose-only amounts with per-seed shuffled record order, no `%+d`/`->` format tells, universal relational subject binding, larger-minus-settled rebalanced, and compositional injection markers and routing cues. Runtime execution is available; Platform activation remains separate. |
+| 13 (pre-activation) | `2027-05-01` | Claim-span provenance and causal model dependence (shadow): the grader names the served span it credited (`Verdict.Provenance`) and its accepted forms per claim unit; the validator relay records hashed value tokens of every model completion and harness-authored prompt span per case; the scorer checks `served_text_not_model_emitted` and `answer_in_prompt` per credited claim and signs a run-level `claim_provenance` block. v12 grading is unchanged; the case-scoped `inference_base_url` makes calls attributable under concurrent `/run`. |
 
 ## V10 generator-as-spec contract
 
@@ -474,6 +475,35 @@ grading-authoritative `ExpectedAnswer`, `DistractorAnswers`, `AnswerKind`, and
 expected tool specs. v12 changes what competence a run must demonstrate, not the
 transport. Run sizes, the deterministic grader, the inference boundary,
 LongMemEval floors, and the v9 efficiency stack all carry forward unchanged.
+
+## Bench v13 claim-span provenance and causal gates (shadow)
+
+v13 changes no dataset semantics and no score: the v13 grading policy is the
+v12 policy plus a report of **which served span earned the credit** and the
+canonical forms the grader accepts for that claim (`grade.Verdict.Provenance`,
+`grade.ClaimAlternatives`, grouped per claim unit -- a number's digits and its
+English word, a money claim's major-unit form, a direction's accepted phrases,
+a list's items and their alternatives). Every v2..v12 verdict is byte-identical
+(`TestV13ProvenanceBankGraderVerdicts` re-grades the whole bank under v12).
+
+The validator-side half lives in `services/dittobench-api`: the inference
+broker records, per attributed completion, the hashed value tokens of the
+model's completion spans and of the harness-authored request spans
+(`cmd/dittobench-api/claim_span_capture.go`), and the scorer checks the
+credited claim against them (`internal/scoregates/text_provenance.go`,
+`causal_dependence.go`), publishing `served_text_not_model_emitted`,
+`answer_in_prompt`, `no_model_completion`, `claim_provenance_unattributed_call`
+and the fail-open `claim_provenance_incomplete` / `claim_provenance_unavailable`
+per case, plus a signed run-level `claim_provenance` block (identity factor).
+Both ship behind one posture switch defaulting to **shadow**. The published
+vectors both sides are tested against are in `grade/audit_v13_bank.go`
+(compute-then-launder, GIH, `/100` rewrite, direction map, composed slot, draft
+replacement, assistant-prefill launder; RAG quoting, tool-result quoting,
+JSON mode, `final_answer` tool, formatter, number-word formatter, diacritic
+fold, non-Latin value, markdown/list, two-completion splice, multi-turn
+compute, cross-case assistant history). The wire contract, the attribution
+rules, and the Unicode-aware normaliser are documented in
+`services/dittobench-api/PROTOCOL.md` under "bench_version 13".
 
 ## Auditing an old score
 

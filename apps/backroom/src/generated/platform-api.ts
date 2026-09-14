@@ -6073,7 +6073,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             /** Case Set Sha256 */
             case_set_sha256: string;
             /** Contract Version */
@@ -14274,7 +14274,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             composite_policy: components["schemas"]["ConfirmationCompositePolicy"];
             /** Confirmation Profile Checksum */
             confirmation_profile_checksum: string;
@@ -14319,7 +14319,7 @@ export interface components {
              * @default 9
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             /** Checksum */
             checksum: string;
             composite: components["schemas"]["ConfirmationCompositeProfile"];
@@ -16719,7 +16719,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             /** Case Set Digest */
             case_set_digest: string;
             /** Dataset Revision */
@@ -19081,7 +19081,7 @@ export interface components {
              * @default 9
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             /**
              * Bundle Id
              * Format: uuid
@@ -21398,7 +21398,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             score_gates: components["schemas"]["PublicV9ScoreGateEvidence"];
         };
         /**
@@ -25568,7 +25568,7 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required";
+            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required" | "claim_provenance_flagged";
             /** Review Required */
             review_required: boolean;
             /** Review Share Threshold Bps */
@@ -25606,7 +25606,7 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required";
+            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required" | "claim_provenance_flagged";
             /** Sub Floor Bps */
             sub_floor_bps: number;
             /** Threshold Bps */
@@ -25635,11 +25635,61 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required";
+            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required" | "claim_provenance_flagged";
             /** Slice Attribution Complete */
             slice_attribution_complete: boolean;
             /** Threshold Bps */
             threshold_bps: number;
+        };
+        /**
+         * V13ClaimProvenanceGate
+         * @description Bench v13 claim-span provenance + causal answer_in_prompt gate summary.
+         *
+         *     Mirror of ``internal/scoregates.ClaimProvenanceEvidence``. Present on every
+         *     bench_version>=13 digest (the scorer attaches it to every v13 run). The
+         *     factor is ALWAYS full: the gates act per claim (a flagged case's own score
+         *     is zeroed under enforce), so the run-level term is an identity that keeps
+         *     the signed schema uniform. ``flagged_cases`` is the UNION of the two flagged
+         *     subsets; ``unattributed_call_cases`` is the subset of ``unsettled_cases``
+         *     the harness caused by making case-less completions under concurrency (fail
+         *     closed under enforce, so they count toward ``zeroed_cases``).
+         */
+        V13ClaimProvenanceGate: {
+            /** Administered Cases */
+            administered_cases: number;
+            /** Answer In Prompt Cases */
+            answer_in_prompt_cases: number;
+            /** Attribution Complete */
+            attribution_complete: boolean;
+            /** Eligible Cases */
+            eligible_cases: number;
+            /**
+             * Factor Bps
+             * @constant
+             */
+            factor_bps: 10000;
+            /** Flagged Bps */
+            flagged_bps: number;
+            /** Flagged Cases */
+            flagged_cases: number;
+            /** Not Model Emitted Cases */
+            not_model_emitted_cases: number;
+            /**
+             * Posture
+             * @enum {string}
+             */
+            posture: "shadow" | "enforce";
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required" | "claim_provenance_flagged";
+            /** Unattributed Call Cases */
+            unattributed_call_cases: number;
+            /** Unsettled Cases */
+            unsettled_cases: number;
+            /** Zeroed Cases */
+            zeroed_cases: number;
         };
         /** V7InferenceCalibration */
         V7InferenceCalibration: {
@@ -25672,7 +25722,7 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required";
+            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required" | "claim_provenance_flagged";
             /** Threshold Bps */
             threshold_bps: number;
             /** Unexpected Executions */
@@ -25691,7 +25741,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             /** Dataset Sha256 */
             dataset_sha256: string;
             /** Effective Composite Micros */
@@ -25784,7 +25834,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             composite_policy: components["schemas"]["V9ConfirmationCompositePolicy"];
             /** Confirmation Profile Checksum */
             confirmation_profile_checksum: string;
@@ -25877,7 +25927,7 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
             /**
              * Bundle Id
              * Format: uuid
@@ -26161,7 +26211,7 @@ export interface components {
              * Result
              * @enum {string}
              */
-            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required";
+            result: "passed" | "below_threshold" | "zero_inference" | "insufficient_evidence" | "not_applicable" | "latency_implausible" | "answer_stuffed" | "review_required" | "claim_provenance_flagged";
             /** Successful Inference Cases */
             successful_inference_cases: number;
             /** Successful Requests */
@@ -26190,7 +26240,8 @@ export interface components {
              * Bench Version
              * @enum {integer}
              */
-            bench_version: 9 | 10 | 11 | 12;
+            bench_version: 9 | 10 | 11 | 12 | 13;
+            claim_provenance?: components["schemas"]["V13ClaimProvenanceGate"] | null;
             inference_latency?: components["schemas"]["V12InferenceLatencyGate"] | null;
             model_dependence?: components["schemas"]["V12ModelDependenceGate"] | null;
             model_use: components["schemas"]["V9ModelUseGate"];
