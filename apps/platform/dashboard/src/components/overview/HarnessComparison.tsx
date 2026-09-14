@@ -19,6 +19,7 @@ import {
   harnessMethodText,
   loadMemoryField,
   memoryFieldRevision,
+  memoryChartVersion,
   memoryFieldSnapshot,
   memoryTimelineHtml,
   memoryVersionHtml,
@@ -38,18 +39,20 @@ export function HarnessComparison(props: { store: LeaderboardStore }): JSX.Eleme
   const store = props.store;
   const timeline = useEndpoint<TimelinePayload>("/public/bench/timeline", { pollMs: REFRESH_MS });
   const [mode, setMode] = createSignal<MemoryChartMode>("version");
-  // The chart follows the version the board is ranked by: during a rollout
-  // that is the settled (active) version, never the one still collecting.
-  const chartVersion = createMemo<number | null>(() => {
-    const bench = store.bench();
-    const version = store.settledView() ? bench.active : bench.current;
-    return version == null ? null : Number(version);
-  });
-
   // Last-good data survives a failed tick; only a failure with nothing to
   // show renders the explicit unavailable state (load() catch, 4728–4730).
   const [lastData, setLastData] = createSignal<TimelinePayload | null>(null);
   const failed = (): boolean => Boolean(timeline.error());
+
+  // The contract the one-version chart shows (see memoryChartVersion).
+  const chartVersion = createMemo<number | null>(() =>
+    memoryChartVersion({
+      settledView: store.settledView(),
+      bench: store.bench(),
+      rolloutActive: store.rollout()?.active_version,
+      releases: lastData()?.releases,
+    }),
+  );
   createEffect(() => {
     if (timeline.error()) return;
     let data: TimelinePayload | undefined;
@@ -61,7 +64,10 @@ export function HarnessComparison(props: { store: LeaderboardStore }): JSX.Eleme
     if (!data) return;
     setLastData(data);
     const versions = (data.releases || []).map((release) => Number(release.bench_version));
-    void loadMemoryField(versions, Math.max(...versions.concat([0])));
+    const live = [Math.max(...versions.concat([0]))];
+    const active = Number(store.rollout()?.active_version);
+    if (active > 0 && !live.includes(active)) live.push(active);
+    void loadMemoryField(versions, live);
   });
 
   const shownVersions = createMemo<Record<number, boolean>>(() => {

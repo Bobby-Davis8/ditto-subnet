@@ -306,12 +306,17 @@ export function resetMemoryFieldCache(): void {
   memoryPendingByVersion = {};
 }
 
+/** Fetch each contract's finalized board. Settled contracts are fetched once
+ * and kept; `liveVersions` are the contracts that can still receive scores
+ * (the newest release, and the active version while a rollout collects), and
+ * they refetch on every call. */
 export function loadMemoryField(
   versions: number[],
-  activeVersion: number,
+  liveVersions: number | readonly number[],
 ): Promise<Record<number, MemoryFieldEntry[]>> {
+  const live = typeof liveVersions === "number" ? [liveVersions] : liveVersions;
   const wanted = versions.filter(
-    (version) => !memoryFieldByVersion[version] || version === activeVersion,
+    (version) => !memoryFieldByVersion[version] || live.includes(version),
   );
   if (!wanted.length) return Promise.resolve(memoryFieldByVersion);
   return poolMap(wanted, 3, (version) =>
@@ -1253,6 +1258,30 @@ const TICK_STEPS_HOURS = [1, 2, 3, 6, 12, 24, 48, 72, 96, 168, 336];
 
 function utcClock(t: number): string {
   return new Date(t).toISOString().slice(11, 16);
+}
+
+/**
+ * Which contract the one-version chart shows. It follows the version the
+ * board is ranked by (the settled version mid-rollout, never the one still
+ * collecting). The timeline is its own endpoint, so a missing board falls
+ * back to the rollout's active version, then to the newest release, rather
+ * than leaving the chart waiting on data that may never arrive.
+ */
+export function memoryChartVersion(input: {
+  settledView: boolean;
+  bench: { active: number | null; current: number | null };
+  rolloutActive: number | null | undefined;
+  releases: readonly TimelineRelease[] | null | undefined;
+}): number | null {
+  const fromBoard = Number(input.settledView ? input.bench.active : input.bench.current);
+  if (fromBoard > 0) return fromBoard;
+  const active = Number(input.rolloutActive);
+  if (active > 0) return active;
+  const newest = Math.max(
+    0,
+    ...(input.releases || []).map((release) => Number(release.bench_version) || 0),
+  );
+  return newest > 0 ? newest : null;
 }
 
 /** Evenly stepped UTC time ticks inside [start, end], aligned to the step so

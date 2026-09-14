@@ -10,6 +10,7 @@ import {
   harnessMeasuredVersions,
   harnessUnmeasuredVersions,
   loadMemoryField,
+  memoryChartVersion,
   memoryTimelineHtml,
   memoryVersionHtml,
   resetMemoryFieldCache,
@@ -595,6 +596,19 @@ describe("memory timeline field + champion (row 5)", () => {
     expect(v7).toBe(2);
   });
 
+  it("keeps refetching the active contract while a rollout collects", async () => {
+    // Mid-rollout the chart shows the settled v6 while v7 collects, and v6
+    // can still receive finalized runs; a v6 board fetched once would freeze
+    // its dots and awaiting-quorum count while its record line kept moving.
+    const paths: string[] = [];
+    restoreFetch = installFetch({ onRequest: (p) => paths.push(p) });
+    await loadMemoryField([5, 6, 7], [7, 6]);
+    await loadMemoryField([5, 6, 7], [7, 6]);
+    const count = (v: number): number =>
+      paths.filter((p) => p === "/public/leaderboard?bench_version=" + v).length;
+    expect([count(5), count(6), count(7)]).toEqual([1, 2, 2]);
+  });
+
   it("keeps the rendered graph mounted when unchanged data is refetched", async () => {
     const paths: string[] = [];
     renderOverview({ onRequest: (path) => paths.push(path) });
@@ -1021,6 +1035,30 @@ describe("memory chart follows the leaderboard's benchmark version", () => {
       kind: "state",
       text: "Bench v99 has no published release in the benchmark timeline, so there is no memory history to chart.",
     });
+  });
+
+  it("picks the board's version, then the rollout's, then the newest release", () => {
+    const releases = timeline.releases ?? [];
+    const board = { active: 6, current: 7 };
+    // The board decides when it has a version; mid-rollout that is the
+    // settled one, not the version still collecting.
+    expect(
+      memoryChartVersion({ settledView: false, bench: board, rolloutActive: 5, releases }),
+    ).toBe(7);
+    expect(
+      memoryChartVersion({ settledView: true, bench: board, rolloutActive: 5, releases }),
+    ).toBe(6);
+    // A failed leaderboard must not strand the chart on "waiting".
+    const none = { active: null, current: null };
+    expect(
+      memoryChartVersion({ settledView: false, bench: none, rolloutActive: 6, releases }),
+    ).toBe(6);
+    expect(
+      memoryChartVersion({ settledView: false, bench: none, rolloutActive: null, releases }),
+    ).toBe(7);
+    expect(
+      memoryChartVersion({ settledView: false, bench: none, rolloutActive: null, releases: [] }),
+    ).toBeNull();
   });
 
   it("aligns time ticks to whole steps", () => {
