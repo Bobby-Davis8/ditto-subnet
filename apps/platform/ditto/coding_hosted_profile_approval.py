@@ -1,14 +1,17 @@
 """Hosted-v2 profile approval document: deterministic builder and curator verifier.
 
-Run only on an owner-controlled machine. ``build`` binds one launch-checked
-execution/grading profile pair to its registered private-v2 release, the native
-release set and the native compatibility controls, recomputing every digest from
-bytes. Its output is an unsigned draft (``approved=false``) and carries no
-approval field that could be flipped. Approval exists only as a detached 64-byte
-Ed25519 curator signature over the exact canonical document bytes, the format
-the private-v2 publication signing message already uses. ``verify`` checks that
-signature against a pinned curator key. No private key is read, accepted or
-produced here, and nothing is activated.
+Run only on an owner-controlled machine. ``build`` binds one helper-produced
+execution/grading profile pair to its profile request, its registered private-v2
+release, the native release set, the private compatibility plan and the native
+compatibility controls. File digests are recomputed from input bytes; the other
+bound values are copied from pinned or cross-checked inputs, as listed in
+``docs/coding-hosted-profile-approval-v2.md``. Launch checks are attested by the
+helper receipt, not re-run here. The output is an unsigned draft
+(``approved=false``) and carries no approval field that could be flipped.
+Approval exists only as a detached 64-byte Ed25519 curator signature over the
+exact canonical document bytes, the format the private-v2 publication signing
+message already uses. ``verify`` checks that signature against a pinned curator
+key. No private key is read, accepted or produced here, and nothing is activated.
 """
 
 from __future__ import annotations
@@ -22,12 +25,19 @@ import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
+
+if TYPE_CHECKING:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 DOCUMENT_SCHEMA = "dittobench-coding-hosted-profile-approval-v1"
 REQUEST_SCHEMA = "dittobench-coding-hosted-profile-approval-request-v1"
 MAX_DOCUMENT_BYTES = 16 << 10
+MAX_PLAN_BYTES = 8 << 20
+MAX_PROFILE_REQUEST_BYTES = 1 << 20
 SIGNATURE_BYTES = 64
+# Kept equal to PROFILES in coding_runtime/qualification/{native,run}.py and
+# infra/scripts/build-coding-native-release.py by a parity test.
 LANGUAGE_PROFILES = {
     "python": "python-call-ast-v2",
     "node": "node-call-ast-v2",
@@ -44,6 +54,8 @@ REQUEST_FIELDS = frozenset(
         "registration_sha256",
         "release_manifest_sha256",
         "native_controls_approval_sha256",
+        "native_controls_provenance_sha256",
+        "native_controls_summary_sha256",
         "grader_contract_sha256",
         "curator_signing_key_sha256",
         "shadow_only",
@@ -54,6 +66,8 @@ _REQUEST_PINS = (
     "registration_sha256",
     "release_manifest_sha256",
     "native_controls_approval_sha256",
+    "native_controls_provenance_sha256",
+    "native_controls_summary_sha256",
     "grader_contract_sha256",
     "curator_signing_key_sha256",
 )
@@ -80,6 +94,108 @@ RECEIPT_FIELDS = frozenset(
         "approved",
         "shadow_only",
         "weight_eligible",
+    }
+)
+# The helper's dittobench-coding-hosted-profile-request-v1 JSON fields.
+PROFILE_REQUEST_FIELDS = frozenset(
+    {
+        "schema",
+        "catalog_index",
+        "image_digest",
+        "candidate_limits",
+        "protected_limits",
+        "max_combined_disk_bytes",
+        "budgets",
+        "build",
+        "test_groups",
+        "execution_timeout_milliseconds",
+        "shadow_only",
+        "weight_eligible",
+    }
+)
+_PROFILE_REQUEST_COMMAND = frozenset({"id", "argv", "timeout_milliseconds"})
+_PROFILE_REQUEST_BUILD = frozenset({"required", "command"})
+_PROFILE_REQUEST_GROUP = frozenset({"group", "command", "expected_total"})
+EXECUTION_PROFILE_KEYS = frozenset(
+    {"schema", "image_digest", "resource_policy", "budgets"}
+)
+# Hosted v2 grading profiles carry no test manifest. Kept equal to
+# ditto.api_server.coding_hosted_grading.GRADING_PROFILE_KEYS by a test; defined
+# here so this module does not import the grading control plane.
+GRADING_PROFILE_KEYS = frozenset(
+    {
+        "schema",
+        "image_digest",
+        "grader_contract_sha256",
+        "grader_bundle_sha256",
+        "resource_policy",
+        "build",
+        "test_groups",
+        "execution_timeout",
+    }
+)
+# Go codinggrader.ResourcePolicy and codingrunner.Limits field names.
+_RESOURCE_POLICY_FIELDS = frozenset(
+    {
+        "CandidateLimits",
+        "ProtectedLimits",
+        "MaxCombinedDiskBytes",
+        "MemoryLimitBytes",
+        "ScratchLimitBytes",
+        "PidsLimit",
+        "CPUQuotaMillis",
+    }
+)
+_LIMIT_FIELDS = frozenset(
+    {
+        "MaxBundleBytes",
+        "MaxWorkspaceBytes",
+        "MaxFileBytes",
+        "MaxPatchBytes",
+        "MaxEntries",
+        "MaxToolCalls",
+        "MaxReadBytes",
+        "MaxResponseBytes",
+        "MaxSearchResults",
+        "MaxReplayCacheBytes",
+        "MaxTranscriptBytes",
+    }
+)
+_BUDGET_FIELDS = frozenset(
+    {
+        "model_input_tokens",
+        "model_output_tokens",
+        "workspace_tool_calls",
+        "wall_time_seconds",
+    }
+)
+_COMMAND_FIELDS = frozenset({"ID", "Argv", "Timeout"})
+_BUILD_FIELDS = frozenset({"Required", "Command"})
+_TEST_GROUP_FIELDS = frozenset({"Group", "Command", "ExpectedTotal"})
+# Hosted grading test_groups order (codinggrader hostedEvidenceGroups).
+_TEST_GROUPS = ("hidden", "visible")
+_NANOS_PER_MILLISECOND = 1_000_000
+_MAX_COMMAND_NANOS = 600 * 1_000_000_000
+_MAX_EXECUTION_NANOS = 3600 * 1_000_000_000
+_INT64_MAX = (1 << 63) - 1
+# coding_runtime/qualification/prepare.py plan and run.py role/phase coverage.
+PLAN_FIELDS = frozenset(
+    {
+        "schema",
+        "source_sha",
+        "replicates",
+        "cases",
+        "production_api_approval",
+        "node_count_inventory_sha256",
+        "preparer_sha256",
+    }
+)
+_PLAN_CONTROLS = frozenset(
+    {
+        ("base", "visible"),
+        ("base", "hidden"),
+        ("reference", "visible"),
+        ("reference", "hidden"),
     }
 )
 # coding_runtime/qualification/native.py policy() and Binding.provenance().
@@ -178,17 +294,21 @@ DOCUMENT_SHA256_FIELDS = (
     "native_controls_summary_sha256",
     "curator_signing_key_sha256",
 )
+# Non-secret identities that ``verify`` prints before the digests.
+DOCUMENT_IDENTITY_FIELDS = (
+    "catalog_index",
+    "language",
+    "source_revision",
+    "task_version_id",
+    "corpus_release_id",
+    "image_digest",
+)
 DOCUMENT_FIELDS = frozenset(
     {
         *DOCUMENT_SHA256_FIELDS,
+        *DOCUMENT_IDENTITY_FIELDS,
         "schema",
         "coding_contract_version",
-        "catalog_index",
-        "task_version_id",
-        "corpus_release_id",
-        "image_digest",
-        "language",
-        "source_revision",
         "shadow_only",
         "weight_eligible",
     }
@@ -205,6 +325,7 @@ class ProfileApprovalError(ValueError):
 @dataclass(frozen=True)
 class ApprovalInputs:
     request: bytes
+    profile_request: bytes
     execution_profile: bytes
     grading_profile: bytes
     profile_receipt: bytes
@@ -212,6 +333,7 @@ class ApprovalInputs:
     registration: bytes
     release_index: bytes
     native_approval: bytes
+    native_plan: bytes
     native_summary: bytes
     native_provenance: bytes
 
@@ -256,13 +378,13 @@ def _revision(value: object) -> bool:
     )
 
 
-def _identifier(value: object) -> bool:
+def _identifier(value: object, maximum: int = 256) -> bool:
     from ditto.api_models.coding_evaluation import _bounded_identifier
 
     if not isinstance(value, str) or not value:
         return False
     try:
-        _bounded_identifier(value, 256)
+        _bounded_identifier(value, maximum)
     except ValueError:
         return False
     return True
@@ -270,6 +392,22 @@ def _identifier(value: object) -> bool:
 
 def _index(value: object) -> bool:
     return type(value) is int and 0 <= value <= 999_999
+
+
+def _language(value: object) -> bool:
+    return isinstance(value, str) and value in LANGUAGE_PROFILES
+
+
+def _positive(value: object, maximum: int = _INT64_MAX) -> bool:
+    return type(value) is int and 0 < value <= maximum
+
+
+def _same(left: object, right: object) -> bool:
+    """Type-strict JSON equality: ``true`` never equals ``1``, nor ``1.0`` ``1``."""
+
+    return json.dumps(left, sort_keys=True, separators=(",", ":")) == json.dumps(
+        right, sort_keys=True, separators=(",", ":")
+    )
 
 
 def _json(body: bytes, maximum: int, label: str) -> dict[str, Any]:
@@ -342,7 +480,7 @@ def _request(body: bytes) -> dict[str, Any]:
         and request["shadow_only"] is True
         and request["weight_eligible"] is False
         and _index(request["catalog_index"])
-        and request["language"] in LANGUAGE_PROFILES
+        and _language(request["language"])
         and _revision(request["source_revision"])
         and all(_digest(request[name]) for name in _REQUEST_PINS),
         "approval request is invalid",
@@ -350,12 +488,147 @@ def _request(body: bytes) -> dict[str, Any]:
     return request
 
 
+def _resource_policy(value: object) -> bool:
+    """Shape of Go codinggrader.ResourcePolicy; bounds are the helper's checks."""
+
+    return (
+        isinstance(value, dict)
+        and set(value) == _RESOURCE_POLICY_FIELDS
+        and all(
+            isinstance(value[name], dict)
+            and set(value[name]) == _LIMIT_FIELDS
+            and all(_positive(limit) for limit in value[name].values())
+            for name in ("CandidateLimits", "ProtectedLimits")
+        )
+        and all(
+            _positive(value[name])
+            for name in _RESOURCE_POLICY_FIELDS - {"CandidateLimits", "ProtectedLimits"}
+        )
+    )
+
+
+def _budgets(value: object, policy: dict[str, Any]) -> bool:
+    """Execution budgets as hosted inference and ProfileDigest accept them."""
+
+    return (
+        isinstance(value, dict)
+        and set(value) == _BUDGET_FIELDS
+        and all(_positive(budget) for budget in value.values())
+        and value["wall_time_seconds"] <= 3600
+        and value["workspace_tool_calls"] == policy["CandidateLimits"]["MaxToolCalls"]
+    )
+
+
+def _command(value: object) -> bool:
+    """Go codingrunner.CommandSpec as the grading profile encodes it."""
+
+    return (
+        isinstance(value, dict)
+        and set(value) == _COMMAND_FIELDS
+        and _identifier(value["ID"], 80)
+        and isinstance(value["Argv"], list)
+        and 0 < len(value["Argv"]) <= 64
+        and all(isinstance(argument, str) for argument in value["Argv"])
+        and _positive(value["Timeout"], _MAX_COMMAND_NANOS)
+        and value["Timeout"] % _NANOS_PER_MILLISECOND == 0
+    )
+
+
+def _grading_structure(grading: dict[str, Any]) -> bool:
+    """Build, hidden-then-visible driver groups and timeout of a grading profile.
+
+    Mirrors the shape ``coding_hosted_grading.expected_grading`` reads and the
+    Go hosted ``ValidateExecutionProfile`` group rules.
+    """
+
+    build = grading["build"]
+    groups = grading["test_groups"]
+    timeout = grading["execution_timeout"]
+    return (
+        isinstance(build, dict)
+        and set(build) == _BUILD_FIELDS
+        and type(build["Required"]) is bool
+        and _command(build["Command"])
+        and isinstance(groups, list)
+        and len(groups) == len(_TEST_GROUPS)
+        and all(
+            isinstance(group, dict)
+            and set(group) == _TEST_GROUP_FIELDS
+            and group["Group"] == name
+            and _positive(group["ExpectedTotal"], 1_000_000)
+            and _command(group["Command"])
+            and group["Command"]["Argv"][0] == "dittobench-test-driver"
+            for group, name in zip(groups, _TEST_GROUPS, strict=True)
+        )
+        and len({build["Command"]["ID"], *(g["Command"]["ID"] for g in groups)})
+        == 1 + len(groups)
+        and _positive(timeout, _MAX_EXECUTION_NANOS)
+        and timeout % _NANOS_PER_MILLISECOND == 0
+    )
+
+
+def _nanos(value: object) -> int | None:
+    return value * _NANOS_PER_MILLISECOND if type(value) is int else None
+
+
+def _requested_command(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != _PROFILE_REQUEST_COMMAND:
+        return None
+    return {
+        "ID": value["id"],
+        "Argv": value["argv"],
+        "Timeout": _nanos(value["timeout_milliseconds"]),
+    }
+
+
+def _requested_build(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != _PROFILE_REQUEST_BUILD:
+        return None
+    return {
+        "Required": value["required"],
+        "Command": _requested_command(value["command"]),
+    }
+
+
+def _requested_groups(value: object) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or not all(
+        isinstance(group, dict) and set(group) == _PROFILE_REQUEST_GROUP
+        for group in value
+    ):
+        return None
+    return [
+        {
+            "Group": group["group"],
+            "Command": _requested_command(group["command"]),
+            "ExpectedTotal": group["expected_total"],
+        }
+        for group in value
+    ]
+
+
+def _task_group(task_version_id: object) -> str | None:
+    """Private group of a catalog task: ``task_version_id`` is ``{group}-{condition}``.
+
+    ``coding_private_catalog_v2_compile._compile_group`` derives it that way for
+    each of the five memory conditions of one group.
+    """
+
+    from ditto.api_models.coding_private_catalog_v2 import CodingMemoryConditionV2
+
+    if not isinstance(task_version_id, str):
+        return None
+    groups = [
+        task_version_id.removesuffix(f"-{condition.value}")
+        for condition in CodingMemoryConditionV2
+        if task_version_id.endswith(f"-{condition.value}")
+    ]
+    return groups[0] if len(groups) == 1 and groups[0] else None
+
+
 def build_profile_approval(
     inputs: ApprovalInputs, *, curator_signing_key_sha256: str
 ) -> bytes:
     """Return the exact canonical unsigned approval document bytes."""
-
-    from ditto.api_server.coding_hosted_grading import GRADING_PROFILE_KEYS
 
     request = _request(inputs.request)
     _require(
@@ -366,8 +639,8 @@ def build_profile_approval(
     language = request["language"]
     revision = request["source_revision"]
 
-    # Profile set: every digest is recomputed from bytes; receipt claims are only
-    # compared against those recomputations, never copied on trust.
+    # Profile set. File digests are recomputed here; receipt claims are only
+    # compared with them. Launch checks are the helper's attestation.
     receipt = _canonical_json(inputs.profile_receipt, 1 << 16, "profile receipt")
     _require(
         set(receipt) == RECEIPT_FIELDS
@@ -395,12 +668,19 @@ def build_profile_approval(
         "grading profile bytes differ from the receipt",
     )
     _require(
-        execution.get("schema") == "dittobench-coding-hosted-authoring-profile-v2"
+        set(execution) == EXECUTION_PROFILE_KEYS
+        and execution["schema"] == "dittobench-coding-hosted-authoring-profile-v2"
         and set(grading) == GRADING_PROFILE_KEYS
         and grading["schema"] == "dittobench-coding-hosted-grading-profile-v2",
         "profile schema is invalid",
     )
-    image_digest = execution.get("image_digest")
+    policy = execution["resource_policy"]
+    _require(
+        _resource_policy(policy) and _budgets(execution["budgets"], policy),
+        "execution profile structure is invalid",
+    )
+    _require(_grading_structure(grading), "grading profile structure is invalid")
+    image_digest = execution["image_digest"]
     _require(
         _image_digest(image_digest)
         and grading["image_digest"] == image_digest
@@ -417,13 +697,50 @@ def build_profile_approval(
         and grading["grader_bundle_sha256"] == receipt["grader_bundle_sha256"],
         "grader bundle differs from the receipt",
     )
-    policy = execution.get("resource_policy")
-    limits = policy.get("CandidateLimits") if isinstance(policy, dict) else None
+    # The helper derives both profiles from one ResourcePolicy value.
     _require(
-        isinstance(limits, dict)
-        and type(limits.get("MaxPatchBytes")) is int
-        and limits["MaxPatchBytes"] == receipt["max_patch_bytes"],
+        _same(grading["resource_policy"], policy),
+        "grading resource policy differs from the execution profile",
+    )
+    _require(
+        _same(policy["CandidateLimits"]["MaxPatchBytes"], receipt["max_patch_bytes"]),
         "patch limit differs from the receipt",
+    )
+
+    # Profile request: the exact helper input the receipt names, and every value
+    # the helper copies from it into the profiles.
+    _require(
+        _sha(inputs.profile_request) == receipt["request_sha256"],
+        "profile request bytes differ from the receipt",
+    )
+    profile_request = _json(
+        inputs.profile_request, MAX_PROFILE_REQUEST_BYTES, "profile request"
+    )
+    _require(
+        set(profile_request) == PROFILE_REQUEST_FIELDS
+        and profile_request["schema"] == "dittobench-coding-hosted-profile-request-v1"
+        and profile_request["shadow_only"] is True
+        and profile_request["weight_eligible"] is False,
+        "profile request schema is invalid",
+    )
+    _require(
+        _same(profile_request["catalog_index"], index)
+        and _same(profile_request["image_digest"], image_digest)
+        and _same(profile_request["candidate_limits"], policy["CandidateLimits"])
+        and _same(profile_request["protected_limits"], policy["ProtectedLimits"])
+        and _same(
+            profile_request["max_combined_disk_bytes"], policy["MaxCombinedDiskBytes"]
+        )
+        and _same(profile_request["budgets"], execution["budgets"])
+        and _same(_requested_build(profile_request["build"]), grading["build"])
+        and _same(
+            _requested_groups(profile_request["test_groups"]), grading["test_groups"]
+        )
+        and _same(
+            _nanos(profile_request["execution_timeout_milliseconds"]),
+            grading["execution_timeout"],
+        ),
+        "profiles differ from the profile request",
     )
 
     # Private-v2 identity: payload authority task and the registered release.
@@ -522,7 +839,7 @@ def build_profile_approval(
         "profile image is not the reviewed language's release image",
     )
 
-    # Native compatibility controls: consumed approval, provenance and summary.
+    # Native compatibility controls: consumed approval and the plan it ran.
     _require(
         _sha(inputs.native_approval) == request["native_controls_approval_sha256"],
         "native approval differs from the reviewed pin",
@@ -563,6 +880,66 @@ def build_profile_approval(
             for name in LANGUAGE_PROFILES
         ),
         "native approval images differ from the release set",
+    )
+    # The plan carries private driver arguments and corpus paths: only its digest
+    # is bound, and no rejection reason names its content.
+    _require(
+        _sha(inputs.native_plan) == approval["plan_sha256"],
+        "native plan differs from the native approval",
+    )
+    plan = _compact_json(
+        inputs.native_plan, MAX_PLAN_BYTES, "native plan", newline=True
+    )
+    raw_cases = plan.get("cases")
+    cases: list[Any] = raw_cases if isinstance(raw_cases, list) else []
+    _require(
+        set(plan) == PLAN_FIELDS
+        and plan["schema"] == "dittobench-private-compatibility-plan-v1"
+        and plan["source_sha"] == revision
+        and type(plan["replicates"]) is int
+        and plan["replicates"] == 2
+        and plan["production_api_approval"] is False
+        and 0 < len(cases) <= 512
+        and all(isinstance(case, dict) for case in cases),
+        "native plan is invalid",
+    )
+    group = _task_group(receipt["task_version_id"])
+    _require(group is not None, "profile task is not a private group condition")
+    group_cases = [case for case in cases if case.get("group_id") == group]
+    _require(
+        len(group_cases) == len(_PLAN_CONTROLS)
+        and all(
+            isinstance(case.get("role"), str) and isinstance(case.get("phase"), str)
+            for case in group_cases
+        )
+        and {(case["role"], case["phase"]) for case in group_cases} == _PLAN_CONTROLS,
+        "native plan does not cover the profile task group",
+    )
+    _require(
+        all(case.get("language") == language for case in group_cases),
+        "native plan language differs from the reviewed language",
+    )
+    # Both roles of a phase must run exactly the profile's driver argv and count.
+    # Controls use a fixed command ID and timeout, so those are not compared.
+    _require(
+        all(
+            _same(case.get("argv"), profile_group["Command"]["Argv"])
+            and _same(case.get("expected_total"), profile_group["ExpectedTotal"])
+            for profile_group in grading["test_groups"]
+            for case in group_cases
+            if case["phase"] == profile_group["Group"]
+        ),
+        "grading test groups differ from the native plan",
+    )
+
+    # Native control outputs, each pinned independently.
+    _require(
+        _sha(inputs.native_provenance) == request["native_controls_provenance_sha256"],
+        "native provenance differs from the reviewed pin",
+    )
+    _require(
+        _sha(inputs.native_summary) == request["native_controls_summary_sha256"],
+        "native summary differs from the reviewed pin",
     )
     provenance = _compact_json(
         inputs.native_provenance, 1 << 20, "native provenance", newline=True
@@ -616,7 +993,6 @@ def build_profile_approval(
         isinstance(repo_digests, list) and image["image_ref"] in repo_digests,
         "native controls did not run the profile image",
     )
-    cases = summary["cases"]
     _require(
         summary["schema"] == "dittobench-private-compatibility-summary-v1"
         and summary["private_controls_passed"] is True
@@ -626,10 +1002,10 @@ def build_profile_approval(
         and summary["failed_controls"] == 0
         and type(summary["replicates"]) is int
         and summary["replicates"] == 2
-        and type(cases) is int
-        and cases > 0
+        and type(summary["cases"]) is int
+        and summary["cases"] == len(cases)
         and type(summary["controls"]) is int
-        and summary["controls"] == 2 * cases
+        and summary["controls"] == 2 * len(cases)
         and summary["controls"] == approval["controls"]
         and summary["languages"] == sorted(LANGUAGE_PROFILES)
         and all(
@@ -667,7 +1043,7 @@ def build_profile_approval(
         "release_manifest_sha256": _sha(inputs.release_index),
         "image_approval_sha256": image["approval_sha256"],
         "native_controls_approval_sha256": _sha(inputs.native_approval),
-        "native_controls_plan_sha256": approval["plan_sha256"],
+        "native_controls_plan_sha256": _sha(inputs.native_plan),
         "native_controls_provenance_sha256": _sha(inputs.native_provenance),
         "native_controls_summary_sha256": _sha(inputs.native_summary),
         "curator_signing_key_sha256": curator_signing_key_sha256,
@@ -696,7 +1072,7 @@ def parse_profile_approval_document(body: bytes) -> dict[str, Any]:
     )
     _require(
         _index(value["catalog_index"])
-        and value["language"] in LANGUAGE_PROFILES
+        and _language(value["language"])
         and _revision(value["source_revision"])
         and _image_digest(value["image_digest"])
         and _identifier(value["corpus_release_id"])
@@ -705,6 +1081,21 @@ def parse_profile_approval_document(body: bytes) -> dict[str, Any]:
         "approval document values are invalid",
     )
     return value
+
+
+def _curator_public_key(path: Path) -> tuple[Ed25519PublicKey, str]:
+    from ditto.api_server.coding_hippius_publication import (
+        HippiusPrivateInputPublicationError,
+        load_curator_signing_public_key,
+    )
+
+    _require(
+        isinstance(path, Path) and path.is_absolute(), "input path must be absolute"
+    )
+    try:
+        return load_curator_signing_public_key(path)
+    except HippiusPrivateInputPublicationError:
+        raise ProfileApprovalError("curator public key is invalid") from None
 
 
 def verify_profile_approval(
@@ -718,11 +1109,6 @@ def verify_profile_approval(
 
     from cryptography.exceptions import InvalidSignature
 
-    from ditto.api_server.coding_hippius_publication import (
-        HippiusPrivateInputPublicationError,
-        load_curator_signing_public_key,
-    )
-
     _require(
         _digest(curator_signing_key_sha256), "pinned curator key digest is invalid"
     )
@@ -731,12 +1117,7 @@ def verify_profile_approval(
         isinstance(signature, bytes) and len(signature) == SIGNATURE_BYTES,
         "curator signature is missing or malformed",
     )
-    try:
-        public_key, key_sha256 = load_curator_signing_public_key(
-            curator_public_key_path
-        )
-    except HippiusPrivateInputPublicationError:
-        raise ProfileApprovalError("curator public key is invalid") from None
+    public_key, key_sha256 = _curator_public_key(curator_public_key_path)
     _require(
         key_sha256 == curator_signing_key_sha256,
         "curator public key differs from the pinned identity",
@@ -763,28 +1144,20 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _read(path: Path, maximum: int) -> bytes:
+    from ditto.api_server.coding_hippius_publication import (
+        HippiusPrivateInputPublicationError,
+        _read_bounded_regular_file,
+    )
+
     _require(path.is_absolute(), "input path must be absolute")
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        raise ProfileApprovalError("input file is unreadable") from None
-    try:
-        info = os.fstat(descriptor)
-        _require(
-            stat.S_ISREG(info.st_mode) and 0 < info.st_size <= maximum,
-            "input file is not a bounded regular file",
+        return _read_bounded_regular_file(
+            path, maximum_bytes=maximum, label="input file"
         )
-        body = bytearray()
-        while len(body) <= maximum:
-            chunk = os.read(descriptor, maximum + 1 - len(body))
-            if not chunk:
-                break
-            body.extend(chunk)
-    finally:
-        os.close(descriptor)
-    _require(0 < len(body) <= maximum, "input file is not a bounded regular file")
-    return bytes(body)
+    except HippiusPrivateInputPublicationError:
+        raise ProfileApprovalError(
+            "input file is not a readable bounded regular file"
+        ) from None
 
 
 def _read_profiles(directory: Path) -> tuple[bytes, bytes, bytes]:
@@ -813,38 +1186,45 @@ def _write_new(path: Path, body: bytes) -> None:
         and stat.S_IMODE(parent.stat().st_mode) & 0o077 == 0,
         "output must be new in a protected directory",
     )
+    cloexec = getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(
-            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | cloexec, 0o600
         )
     except OSError:
         raise ProfileApprovalError("output cannot be created") from None
     try:
-        view = memoryview(body)
-        while view:
-            view = view[os.write(descriptor, view) :]
-        os.fsync(descriptor)
+        try:
+            view = memoryview(body)
+            while view:
+                view = view[os.write(descriptor, view) :]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        # Make the new directory entry durable, as the qualification writers do.
+        directory = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
-        os.close(descriptor)
         path.unlink(missing_ok=True)
         raise
-    os.close(descriptor)
 
 
 def _build(argv: list[str]) -> str:
-    from ditto.api_server.coding_hippius_publication import (
-        HippiusPrivateInputPublicationError,
-        load_curator_signing_public_key,
-    )
-
     parser = _Parser(add_help=False)
     for name in (
         "request",
+        "profile-request",
         "profiles",
         "payload-authority",
         "registration",
         "release-index",
         "native-approval",
+        "native-plan",
         "native-summary",
         "native-provenance",
         "curator-public-key",
@@ -853,15 +1233,11 @@ def _build(argv: list[str]) -> str:
         parser.add_argument(f"--{name}", type=Path, required=True)
     args = parser.parse_args(argv)
     execution, grading, receipt = _read_profiles(args.profiles)
-    try:
-        _public_key, key_sha256 = load_curator_signing_public_key(
-            args.curator_public_key
-        )
-    except HippiusPrivateInputPublicationError:
-        raise ProfileApprovalError("curator public key is invalid") from None
+    _public_key, key_sha256 = _curator_public_key(args.curator_public_key)
     body = build_profile_approval(
         ApprovalInputs(
             request=_read(args.request, 1 << 16),
+            profile_request=_read(args.profile_request, MAX_PROFILE_REQUEST_BYTES),
             execution_profile=execution,
             grading_profile=grading,
             profile_receipt=receipt,
@@ -869,6 +1245,7 @@ def _build(argv: list[str]) -> str:
             registration=_read(args.registration, 64 << 10),
             release_index=_read(args.release_index, 64 << 10),
             native_approval=_read(args.native_approval, 65536),
+            native_plan=_read(args.native_plan, MAX_PLAN_BYTES),
             native_summary=_read(args.native_summary, 1 << 20),
             native_provenance=_read(args.native_provenance, 1 << 20),
         ),
@@ -898,13 +1275,13 @@ def _verify(argv: list[str]) -> str:
         curator_public_key_path=args.curator_public_key,
         curator_signing_key_sha256=args.curator_signing_key_sha256,
     )
-    digests = {
+    printed = {
         "document_sha256": verified.document_sha256,
         "signature_sha256": verified.signature_sha256,
-        "image_digest": verified.document["image_digest"],
+        **{name: verified.document[name] for name in DOCUMENT_IDENTITY_FIELDS},
         **{name: verified.document[name] for name in DOCUMENT_SHA256_FIELDS},
     }
-    return "".join(f"{name}={value}\n" for name, value in digests.items())
+    return "".join(f"{name}={value}\n" for name, value in printed.items())
 
 
 def main(argv: list[str] | None = None) -> int:
