@@ -97,39 +97,12 @@ class HostedCodingTransport:
         adapter deliberately never retries an evaluate request.
         """
         try:
-            request = HostedCodingRequest.model_validate(
-                request.model_dump(mode="json", by_alias=True)
-            )
-            now = self._clock()
+            request, payload, now = self._checked(request, expected)
             if (
-                type(now) is not int
-                or not request.issued_at_unix <= now < request.expires_at_unix
+                request.operation == "acknowledge"
                 or expected.request_sha256 != hosted_message_digest(request)
-                or expected.platform_hotkey not in self._verifiers
-                or any(
-                    getattr(request, field) != getattr(expected, field)
-                    for field in (
-                        "evaluation_id",
-                        "validator_hotkey",
-                        "artifact_sha256",
-                        "assignment_sha256",
-                        "policy_sha256",
-                    )
-                )
             ):
                 raise ValueError("request authority")
-            payload = (
-                json.dumps(
-                    request.model_dump(mode="json", by_alias=True),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                + "\n"
-            ).encode()
-            if len(payload) > MAX_HOSTED_RESULT_BYTES:
-                raise ValueError("request bounds")
             async with asyncio.timeout(
                 min(HOSTED_CONTROL_TIMEOUT_SECONDS, request.expires_at_unix - now)
             ):
@@ -148,7 +121,92 @@ class HostedCodingTransport:
                 "hosted Coding control exchange failed"
             ) from None
 
-    async def _post(self, payload: bytes, validator_hotkey: str) -> tuple[int, bytes]:
+    async def acknowledge(
+        self,
+        *,
+        request: HostedCodingRequest,
+        result: HostedCodingResult,
+        expected: HostedResultExpectation,
+    ) -> None:
+        """Acknowledge one exact verified terminal result; only HTTP 204 succeeds.
+
+        ``expected`` describes ``result``, so its request digest is the status
+        request that produced the result, not this acknowledgement.
+        """
+        try:
+            request, payload, now = self._checked(request, expected)
+            body = (
+                json.dumps(
+                    result.model_dump(mode="json", by_alias=True),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode()
+            verify_hosted_result(
+                body=body,
+                expected=expected,
+                trusted_verifiers=self._verifiers,
+                now_unix=now,
+            )
+            if (
+                request.operation != "acknowledge"
+                or request.result_sha256 != hosted_message_digest(result)
+            ):
+                raise ValueError("acknowledgement authority")
+            async with asyncio.timeout(
+                min(HOSTED_CONTROL_TIMEOUT_SECONDS, request.expires_at_unix - now)
+            ):
+                await self._post(
+                    payload, request.validator_hotkey, acknowledgement=True
+                )
+        except Exception:
+            raise HostedCodingTransportError(
+                "hosted Coding control exchange failed"
+            ) from None
+
+    def _checked(
+        self, request: HostedCodingRequest, expected: HostedResultExpectation
+    ) -> tuple[HostedCodingRequest, bytes, int]:
+        request = HostedCodingRequest.model_validate(
+            request.model_dump(mode="json", by_alias=True)
+        )
+        now = self._clock()
+        if (
+            type(now) is not int
+            or not request.issued_at_unix <= now < request.expires_at_unix
+            or expected.platform_hotkey not in self._verifiers
+            or any(
+                getattr(request, field) != getattr(expected, field)
+                for field in (
+                    "evaluation_id",
+                    "validator_hotkey",
+                    "artifact_sha256",
+                    "assignment_sha256",
+                    "policy_sha256",
+                )
+            )
+        ):
+            raise ValueError("request authority")
+        payload = (
+            json.dumps(
+                request.model_dump(mode="json", by_alias=True),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode()
+        if len(payload) > MAX_HOSTED_RESULT_BYTES:
+            raise ValueError("request bounds")
+        return request, payload, now
+
+    async def _post(
+        self, payload: bytes, validator_hotkey: str, *, acknowledgement: bool = False
+    ) -> tuple[int, bytes]:
         async with self._client.stream(
             "POST",
             self._url,
@@ -165,6 +223,17 @@ class HostedCodingTransport:
                 part.strip().lower()
                 for part in response.headers.get("cache-control", "").split(",")
             }
+            if acknowledgement:
+                if (
+                    response.status_code != 204
+                    or "no-store" not in directives
+                    or response.headers.get("content-length", "0") != "0"
+                ):
+                    raise ValueError("acknowledgement response")
+                async for chunk in response.aiter_raw():
+                    if chunk:
+                        raise ValueError("acknowledgement body")
+                return 204, b""
             if (
                 response.status_code not in {200, 202}
                 or "no-store" not in directives
