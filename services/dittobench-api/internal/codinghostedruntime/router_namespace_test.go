@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -283,5 +284,117 @@ func TestRootlessRouterRequiresDaemonGatewayBeforeNamespaceListener(t *testing.T
 	rootlessListen = func(context.Context, rootlessnetns.Config) (net.Listener, error) { return nil, errors.New("refused") }
 	if listener, err := listenRouter(t.Context(), config); err == nil || listener != nil {
 		t.Fatal("namespace refusal became a listener")
+	}
+}
+
+type precheckSeams struct {
+	gatewayCalls, precheckCalls int
+	sockets                     []string
+	configs                     []rootlessnetns.Config
+}
+
+// stubPrecheck replaces the configuration loader's executable check and both
+// read-only precheck probes for the duration of a test.
+func stubPrecheck(t *testing.T, gateway string, gatewayErr, precheckErr error) *precheckSeams {
+	t.Helper()
+	seams := &precheckSeams{}
+	helper := rootlessHelper(t)
+	previousLoad, previousGateway, previousPrecheck := loadRuntimeConfig, daemonBridgeGateway, rootlessPrecheck
+	t.Cleanup(func() {
+		loadRuntimeConfig, daemonBridgeGateway, rootlessPrecheck = previousLoad, previousGateway, previousPrecheck
+	})
+	loadRuntimeConfig = func(path string) (*runtimeConfig, error) { return loadConfigChecked(path, rootlessExecutable(helper)) }
+	daemonBridgeGateway = func(_ context.Context, socket string) (netip.Addr, error) {
+		seams.gatewayCalls++
+		seams.sockets = append(seams.sockets, socket)
+		if gatewayErr != nil {
+			return netip.Addr{}, gatewayErr
+		}
+		return netip.MustParseAddr(gateway), nil
+	}
+	rootlessPrecheck = func(_ context.Context, config rootlessnetns.Config) error {
+		seams.precheckCalls++
+		seams.configs = append(seams.configs, config)
+		return precheckErr
+	}
+	return seams
+}
+
+func rootlessFixture(t *testing.T) (configWire, string) {
+	t.Helper()
+	wire, path := fixture(t)
+	wire.RouterNamespace, wire.RouterListen = routerNamespaceRootless, "172.17.0.1:18080"
+	writeConfig(t, path, wire)
+	return wire, path
+}
+
+func TestValidateRunsReadOnlyRootlessRouterPrecheck(t *testing.T) {
+	refused := errors.New("refused")
+	for name, tc := range map[string]struct {
+		gateway                 string
+		gatewayErr, precheckErr error
+		want                    error
+		precheckCalls           int
+	}{
+		"ready":            {gateway: "172.17.0.1", want: nil, precheckCalls: 1},
+		"gateway_mismatch": {gateway: "172.18.0.1", want: ErrConfig},
+		"daemon_down":      {gatewayErr: refused, want: ErrConfig},
+		"no_rootlesskit":   {gateway: "172.17.0.1", precheckErr: refused, want: ErrConfig, precheckCalls: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wire, path := rootlessFixture(t)
+			seams := stubPrecheck(t, tc.gateway, tc.gatewayErr, tc.precheckErr)
+			if err := Validate(path); err != tc.want {
+				t.Fatalf("Validate = %v, want %v", err, tc.want)
+			}
+			if seams.gatewayCalls != 1 || seams.precheckCalls != tc.precheckCalls || seams.sockets[0] != wire.DockerSocket {
+				t.Fatalf("precheck calls drift: %+v", seams)
+			}
+			want := rootlessnetns.Config{Address: netip.MustParseAddrPort("172.17.0.1:18080"), DockerSocket: wire.DockerSocket, HelperExecutable: rootlessHelper(t)}
+			if tc.precheckCalls == 1 && seams.configs[0] != want {
+				t.Fatalf("precheck config drift: %+v", seams.configs[0])
+			}
+			if _, err := os.Stat(filepath.Join(wire.StateRoot, "consumed")); !os.IsNotExist(err) {
+				t.Fatal("validation consumed attempt")
+			}
+		})
+	}
+	t.Run("host_mode_has_no_router_precheck", func(t *testing.T) {
+		wire, path := fixture(t)
+		writeConfig(t, path, wire)
+		seams := stubPrecheck(t, "", refused, refused)
+		if err := Validate(path); err != nil || seams.gatewayCalls != 0 || seams.precheckCalls != 0 {
+			t.Fatalf("host mode precheck: err=%v %+v", err, seams)
+		}
+	})
+}
+
+// A misconfigured rootless-netns host must refuse before Run consumes the
+// one-shot state root, installs its environment or contacts Docker otherwise.
+func TestRunRefusesRootlessRouterPrecheckBeforeConsumingAttempt(t *testing.T) {
+	refused := errors.New("refused")
+	for name, tc := range map[string]struct {
+		gateway                 string
+		gatewayErr, precheckErr error
+	}{
+		"gateway_mismatch": {gateway: "172.17.0.2"},
+		"daemon_down":      {gatewayErr: refused},
+		"detached_netns":   {gateway: "172.17.0.1", precheckErr: refused},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wire, path := rootlessFixture(t)
+			stubPrecheck(t, tc.gateway, tc.gatewayErr, tc.precheckErr)
+			environment := os.Environ()
+			if result, err := Run(t.Context(), path); err != ErrConfig || result != "" {
+				t.Fatalf("Run = %q, %v; want configuration refusal", result, err)
+			}
+			if _, err := os.Stat(filepath.Join(wire.StateRoot, "consumed")); !os.IsNotExist(err) {
+				t.Fatal("refused precheck consumed attempt")
+			}
+			entries, err := os.ReadDir(wire.StateRoot)
+			if err != nil || len(entries) != 0 || !slices.Equal(os.Environ(), environment) {
+				t.Fatal("refused precheck prepared the attempt environment")
+			}
+		})
 	}
 }

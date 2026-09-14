@@ -28,7 +28,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -796,6 +798,44 @@ func (d *LocalDocker) DefaultBridgeGateway(ctx context.Context) (netip.Addr, err
 		return netip.Addr{}, fmt.Errorf("inspect default bridge network: %w", err)
 	}
 	return parseDefaultBridgeGateway(out)
+}
+
+// DefaultBridgeGatewayFromSocket reads the same default bridge network with
+// one read-only Engine API request on an explicit local Unix socket. It uses no
+// Docker CLI, environment, configuration directory, context or credential
+// helper, so a one-shot runtime can check the daemon before it consumes its
+// state directory and installs its private Docker environment.
+func DefaultBridgeGatewayFromSocket(ctx context.Context, socket string) (netip.Addr, error) {
+	invalid := errors.New("default bridge network unavailable")
+	if ctx == nil || !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
+		return netip.Addr{}, invalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	transport := &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/networks/bridge", nil)
+	if err != nil {
+		return netip.Addr{}, invalid
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return netip.Addr{}, invalid
+	}
+	defer response.Body.Close()
+	const maximum = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
+	if err != nil || response.StatusCode != http.StatusOK || len(body) > maximum {
+		return netip.Addr{}, invalid
+	}
+	return parseDefaultBridgeGateway(body)
 }
 
 func parseDefaultBridgeGateway(out []byte) (netip.Addr, error) {

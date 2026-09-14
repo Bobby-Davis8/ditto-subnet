@@ -110,9 +110,19 @@ route returns 404. This was reproduced with RootlessKit, slirp4netns and Docker
 29.1.3: a listener on the RootlessKit bridge gateway saw the ICC-disabled job
 container's address, while a host listener saw only the host address.
 
-`router_namespace: rootless-netns` keeps per-container source binding. After
-consuming the invocation and checking the rootless daemon, but before any
-candidate starts, the worker:
+`router_namespace: rootless-netns` keeps per-container source binding.
+
+Before the invocation is consumed, both `--validate-only` and
+`--private-shadow-once` run a read-only precheck. It reads the default bridge
+with one Engine API `GET /networks/bridge` on the configured socket (no Docker
+CLI, configuration or credential helper) and requires its gateway to be
+`router_listen`'s address. It then runs steps 2-4 below without starting nsenter
+or creating a socket. Any failure is a configuration refusal that leaves the
+state root unconsumed. In this mode `--validate-only` therefore contacts the
+local daemon socket; host mode keeps the file-only validation.
+
+After consuming the invocation and checking the rootless daemon, but before any
+candidate starts, the worker repeats every check and:
 
 1. requires `docker network inspect bridge` to report exactly one private IPv4
    default-bridge gateway equal to `router_listen`'s address. `host.docker.internal`
@@ -217,8 +227,8 @@ Tests cover configuration/hash/authority rejection, protected files, concurrent
 single-use consumption, partial markers, environment replacement in a subprocess,
 bounded finalization retries, cancellation, cleanup failure and command-output
 redaction. The rootless-netns listener has unit tests for descriptor passing and
-socket verification over real socketpairs, child-pid and namespace refusals, and
-mode validation. The `coding-rootless-router.yml` workflow starts a real rootless
+socket verification over real socketpairs, child-pid and namespace refusals,
+mode validation, and the precheck refusing before consumption. The `coding-rootless-router.yml` workflow starts a real rootless
 Docker 29.1.3 daemon on a disposable runner and proves both the in-namespace
 admission and the host-address failure mode. Existing native worker/input/grader and Go/Python control tests remain
 the composition tests; the new launcher tests do not claim real Docker/private

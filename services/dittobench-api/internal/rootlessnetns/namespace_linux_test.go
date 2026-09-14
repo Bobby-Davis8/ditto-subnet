@@ -290,6 +290,9 @@ func TestListenRefusesHostTopologyBeforeStartingNsenter(t *testing.T) {
 	if _, err := listen(t.Context(), valid, sys); err == nil {
 		t.Fatal("host topology produced a listener")
 	}
+	if precheck(t.Context(), valid, sys) == nil {
+		t.Fatal("host topology passed the precheck")
+	}
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 	for name, config := range map[string]Config{
@@ -303,6 +306,9 @@ func TestListenRefusesHostTopologyBeforeStartingNsenter(t *testing.T) {
 	} {
 		if _, err := listen(t.Context(), config, sys); err == nil {
 			t.Fatalf("%s config accepted", name)
+		}
+		if precheck(t.Context(), config, sys) == nil {
+			t.Fatalf("%s config passed the precheck", name)
 		}
 	}
 	if _, err := listen(cancelled, valid, sys); err == nil {

@@ -57,6 +57,23 @@ func Listen(ctx context.Context, config Config) (net.Listener, error) {
 	return listen(ctx, config, productionSystem())
 }
 
+// Precheck performs every read-only listener prerequisite without starting
+// nsenter or creating a socket: the configured address and helper path, the
+// RootlessKit child pid, the pinned child namespaces and the non-detached
+// daemon topology behind the configured socket. Listen repeats all of them.
+func Precheck(ctx context.Context, config Config) error {
+	return precheck(ctx, config, productionSystem())
+}
+
+func precheck(ctx context.Context, config Config, sys system) error {
+	child, err := pinTopology(ctx, config, sys)
+	if err != nil {
+		return ErrListener
+	}
+	child.Close()
+	return nil
+}
+
 // ValidAddress is the shared router address policy: explicit private IPv4,
 // never loopback, and an unprivileged port.
 func ValidAddress(address netip.AddrPort) bool {

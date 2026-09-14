@@ -3,11 +3,15 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -617,6 +621,71 @@ func TestDefaultBridgeGatewayRequiresSinglePrivateIPv4DefaultBridge(t *testing.T
 	d.dockerCommand = func(context.Context, ...string) ([]byte, error) { return nil, errors.New("daemon down") }
 	if _, err := d.DefaultBridgeGateway(context.Background()); err == nil {
 		t.Fatal("unavailable daemon produced a gateway")
+	}
+}
+
+func TestDefaultBridgeGatewayFromSocketUsesOneReadOnlyEngineRequest(t *testing.T) {
+	const valid = `{"Name":"bridge","Id":"0123","Driver":"bridge","EnableIPv4":true,"IPAM":{"Driver":"default","Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]},"Internal":false,"Options":{"com.docker.network.bridge.default_bridge":"true"}}`
+	root, err := os.MkdirTemp("", "bridge-api-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "docker.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := http.StatusOK, valid
+	var requests []string
+	var mu sync.Mutex
+	server := &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		requests = append(requests, request.Method+" "+request.URL.String())
+		code, reply := status, body
+		mu.Unlock()
+		response.WriteHeader(code)
+		_, _ = response.Write([]byte(reply))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	set := func(code int, reply string) {
+		mu.Lock()
+		status, body = code, reply
+		mu.Unlock()
+	}
+
+	gateway, err := DefaultBridgeGatewayFromSocket(t.Context(), socket)
+	if err != nil || gateway != netip.MustParseAddr("172.17.0.1") {
+		t.Fatalf("engine default bridge rejected: %v %v", gateway, err)
+	}
+	mu.Lock()
+	if !slices.Equal(requests, []string{"GET /networks/bridge"}) {
+		t.Fatalf("unexpected engine requests: %v", requests)
+	}
+	mu.Unlock()
+	for name, reply := range map[string]struct {
+		code int
+		body string
+	}{
+		"not_found":   {http.StatusNotFound, valid},
+		"redirect":    {http.StatusFound, valid},
+		"user_bridge": {http.StatusOK, strings.Replace(valid, `"Name":"bridge"`, `"Name":"ditto-job-1"`, 1)},
+		"not_default": {http.StatusOK, strings.Replace(valid, `default_bridge":"true"`, `default_bridge":"false"`, 1)},
+		"oversized":   {http.StatusOK, valid + strings.Repeat(" ", 1<<20)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set(reply.code, reply.body)
+			if gateway, err := DefaultBridgeGatewayFromSocket(t.Context(), socket); err == nil {
+				t.Fatalf("invalid engine reply accepted as %s", gateway)
+			}
+		})
+	}
+	set(http.StatusOK, valid)
+	for _, bad := range []string{"docker.sock", socket + "/", filepath.Join(root, "missing.sock")} {
+		if _, err := DefaultBridgeGatewayFromSocket(t.Context(), bad); err == nil {
+			t.Fatalf("socket %q accepted", bad)
+		}
 	}
 }
 
