@@ -301,8 +301,9 @@ describe('Backroom MCP tools', () => {
     // inline execute) plus the bounded board projection; its tutorials live in
     // get_backroom_tool_help.
     // The five hosted-v2 assignment tools (list/get/preview/create/cancel) add
-    // about 5.7k of exact UUID, digest and subject bounds. Platform derives
-    // every digest from those fields, so none is droppable.
+    // 5.7k of exact UUID, digest and subject bounds (the rest of the catalog
+    // stays under the previous 130_000). Platform derives every digest from
+    // those fields, so none is droppable.
     expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(136_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
@@ -314,10 +315,18 @@ describe('Backroom MCP tools', () => {
     // line (its catalog entry is already the concise 157-char form, and the
     // catalog had no headroom left under 24_000), then to 25_100 to admit the
     // three one-line batched ATH rulings catalog entries (upload, preview,
-    // execute).
+    // execute). The five hosted-v2 assignment catalog lines (170 chars) fit
+    // under 25_100 as they are; existing Coding lines keep their routing terms.
     expect(descriptions.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
       25_100,
     )
+    // Raise the budget with a reason rather than strip routing terms clients
+    // use to pick these tools.
+    const catalogLine = (name: string) => response.tools.find((tool) => tool.name === name)?.description
+    expect(catalogLine('get_agent_coding_shadow_evaluations')).toMatch(
+      /future-height assignments, finalized issuances.*repair outcomes/,
+    )
+    expect(catalogLine('get_coding_catalog_releases')).toMatch(/signed .*commitments, retirement/)
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
       response.tools.find((tool) => tool.name === 'get_screening_review_queue')?.annotations
@@ -8085,6 +8094,30 @@ describe('Backroom MCP tools', () => {
         ] as const) {
           const response = await client.callTool({ name, arguments: args })
           expect(response.isError, `${name} ${JSON.stringify(args)}`).toBe(true)
+        }
+        // Platform refuses a trimmed reason over 512 characters; the service
+        // names the field before any request instead of forwarding a 409.
+        for (const [name, args] of [
+          ['create_coding_hosted_assignment', {
+            ...subject,
+            evaluationId,
+            attemptId,
+            deadlineUnix: 1_789_000_000,
+            confirmedAssignmentSha256: assignmentSha256,
+            reason: 'r'.repeat(513),
+            confirmation: plan.confirmation,
+          }],
+          ['cancel_coding_hosted_assignment', {
+            evaluationId,
+            expectedAssignmentSha256: assignmentSha256,
+            reason: 'r'.repeat(513),
+            confirmation: `CANCEL SHADOW CODING HOSTED ASSIGNMENT ${evaluationId} ${assignmentSha256}`,
+          }],
+        ] as const) {
+          const response = await client.callTool({ name, arguments: args })
+          expect(response.isError, name).toBe(true)
+          expect(readTextResult(response), name).toMatch(/reason/)
+          expect(readTextResult(response), name).toMatch(/512/)
         }
         expect(fetchMock).not.toHaveBeenCalled()
       } finally {

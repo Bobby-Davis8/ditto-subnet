@@ -71,8 +71,8 @@ import {
   transitionCodingPrivateV2ReleaseInputSchema,
   reconcileCodingShadowInputSchema,
   issueCodingShadowTicketSetInputSchema,
-  cancelCodingHostedAssignmentInputSchema,
-  createCodingHostedAssignmentInputSchema,
+  cancelCodingHostedAssignmentMcpInputSchema,
+  createCodingHostedAssignmentMcpInputSchema,
   getCodingHostedAssignmentInputSchema,
   listCodingHostedAssignmentsInputSchema,
   previewCodingHostedAssignmentInputSchema,
@@ -551,7 +551,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   set_screener_node_channel_settings:
     'Apply complete revisioned concurrency limits for one enrolled screener node after reading get_screener_capacity.',
   get_coding_catalog_releases:
-    'Read shadow catalogs and exposures.',
+    'Read signed shadow catalog commitments, retirement, and exposure counts.',
   get_coding_private_v2_releases:
     'Read native v2 registrations; never launches.',
   get_coding_control_plane:
@@ -561,7 +561,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   quarantine_coding_private_v2_release:
     'Quarantine exact native v2.',
   retire_coding_private_v2_release:
-    'Retire exact native v2.',
+    'Retire one exact native v2 release.',
   reconcile_coding_shadow_artifact:
     'Prepare one exact weight-zero Coding run.',
   issue_coding_shadow_ticket_set:
@@ -577,13 +577,13 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   cancel_coding_hosted_assignment:
     'Cancel unstarted hosted-v2 assignment.',
   register_coding_catalog_release:
-    'Register a curator-signed, weight-zero catalog.',
+    'Register one curator-signed, weight-zero catalog commitment.',
   supersede_coding_catalog_release:
-    'Replace a catalog; tombstone its predecessor.',
+    'Atomically append a replacement catalog and tombstone its predecessor.',
   retire_coding_catalog_release:
-    'Irreversibly retire a shadow catalog.',
+    'Irreversibly retire a shadow catalog commitment after review.',
   get_agent_coding_shadow_evaluations:
-    'Read weight-zero coding runs, leases and outcomes.',
+    'Read future-height assignments, finalized issuances, and separate weight-zero coding runs, leases, and repair outcomes.',
   create_screener_bootstrap_grant:
     'Mint one short-lived, single-use, controller-fenced node enrollment grant. Returns the only token copy.',
   get_core_qualification_policy:
@@ -1625,8 +1625,8 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Create hosted-v2 Coding assignment',
       description:
-        'Create and bind one previewed hosted-v2 shadow assignment. Pass the same subject plus the preview evaluationId, attemptId, deadlineUnix, confirmedAssignmentSha256, a specific reason, and the exact confirmation CREATE SHADOW CODING HOSTED ASSIGNMENT {evaluation_id} {assignment_sha256}. Platform re-derives the authority and refuses any drift; Backroom never builds the phrase. Replays are idempotent. The response omits private task grant identifiers. Always weight-zero; this does not start a worker. Requires backroom:write; the signed-in operator is the audit actor.',
-      inputSchema: createCodingHostedAssignmentInputSchema,
+        'Create and bind one previewed hosted-v2 shadow assignment. Pass the same subject plus the preview evaluationId, attemptId, deadlineUnix, confirmedAssignmentSha256, a specific reason (8-512 characters), and the exact confirmation CREATE SHADOW CODING HOSTED ASSIGNMENT {evaluation_id} {assignment_sha256}. Platform re-derives the authority and refuses any drift; Backroom never builds the phrase. Replays are idempotent. The response omits private task grant identifiers. Always weight-zero; this does not start a worker. Requires backroom:write; the signed-in operator is the audit actor.',
+      inputSchema: createCodingHostedAssignmentMcpInputSchema,
       annotations: toolAnnotations('write', true),
     },
     async (input) =>
@@ -1638,8 +1638,8 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Cancel unstarted hosted-v2 Coding assignment',
       description:
-        'Append one immutable cancellation for a hosted-v2 assignment whose attempt never started (pending admission or admitted), even past its deadline. Read get_coding_hosted_assignment first, then pass evaluationId, expectedAssignmentSha256, a specific reason and the exact confirmation CANCEL SHADOW CODING HOSTED ASSIGNMENT {evaluation_id} {assignment_sha256}. Platform closes the private task as aborted and refuses later admission, start, binding, object grants and inference; no row is deleted. A started attempt is refused: only its worker can abort it. Replaying the same reason as the same operator is idempotent. Returns the post-write assignment view. Requires backroom:write.',
-      inputSchema: cancelCodingHostedAssignmentInputSchema,
+        'Append one immutable cancellation for a hosted-v2 assignment whose attempt never started (pending admission or admitted), even past its deadline. Read get_coding_hosted_assignment first, then pass evaluationId, expectedAssignmentSha256, a specific reason (8-512 characters) and the exact confirmation CANCEL SHADOW CODING HOSTED ASSIGNMENT {evaluation_id} {assignment_sha256}. Platform closes the private task as aborted and refuses later admission, start, binding, object grants and inference; no row is deleted. A started attempt is refused: only its worker can abort it. Replaying the same reason as the same operator is idempotent. Returns the post-write assignment view. Requires backroom:write.',
+      inputSchema: cancelCodingHostedAssignmentMcpInputSchema,
       annotations: toolAnnotations('write', true),
     },
     async (input) =>

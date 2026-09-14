@@ -106,14 +106,24 @@ Hosted-v2 shadow assignments have their own five tools over
   task grant identifiers Platform returns.
 - `cancel_coding_hosted_assignment` forwards
   `CANCEL SHADOW CODING HOSTED ASSIGNMENT {evaluation_id} {assignment_sha256}`
-  for an assignment whose attempt never started. Platform appends an immutable
-  cancellation, closes the private task as `aborted`, and refuses later
+  for an assignment whose attempt never started. Platform closes the private
+  task as `aborted`, appends an immutable cancellation, and refuses later
   admission, start, binding, grants and inference. A started attempt is
   refused: only its worker can abort it. The same reason from the same operator
   replays idempotently. The response is the post-write assignment view.
 
 All three writes carry the signed-in operator email as the audit actor and stay
-weight-zero. None starts a worker or approves a canary.
+weight-zero. None starts a worker or approves a canary. Create and cancel
+reasons must be 8 to 512 characters after trimming, Platform's own bound; the
+service refuses a longer one before any request. As with every MCP reason, the
+published input schema does not cap the length, and the tool description names
+the bound.
+
+`get_coding_control_plane` keeps its seven published native states. A cancelled
+assignment reads `aborted` there with `cancelled: true`; only the hosted
+assignment views report `state: cancelled`. A Platform that predates the flag
+parses as `cancelled: false`, so Platform and Backroom may deploy in either
+order.
 
 Shadow admission score floors remain the existing append-only
 `get_core_qualification_policy` / `set_core_qualification_policy` controls.

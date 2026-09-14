@@ -5338,20 +5338,6 @@ export const codingPrivateV2ReleasesSchema = z.object({
   weight_eligible: z.literal(false),
 })
 
-// Platform derives hosted-v2 state from durable rows and its database clock:
-// cancelled, then the private task close reason, then expired, running,
-// admitted, pending_admission.
-export const codingHostedOperationStateSchema = z.enum([
-  'pending_admission',
-  'admitted',
-  'running',
-  'completed',
-  'failed',
-  'aborted',
-  'expired',
-  'cancelled',
-])
-
 export const codingNativeControlStatusSchema = z.object({
   total_native_operations: z.number().int().nonnegative(),
   native_operations: z.array(z.object({
@@ -5364,7 +5350,17 @@ export const codingNativeControlStatusSchema = z.object({
     artifact_sha256: codingPrivateV2Digest,
     screened_image_sha256: codingPrivateV2Digest,
     assignment_sha256: codingPrivateV2Digest,
-    state: codingHostedOperationStateSchema,
+    // Platform never widens this published enum: an unknown value would fail
+    // the whole read. A cancelled assignment reads `aborted` with `cancelled`.
+    state: z.enum([
+      'pending_admission',
+      'admitted',
+      'running',
+      'completed',
+      'failed',
+      'aborted',
+      'expired',
+    ]),
     expires_at: z.string(),
     created_at: z.string(),
     admitted_at: z.string().nullable(),
@@ -5372,6 +5368,8 @@ export const codingNativeControlStatusSchema = z.object({
     frozen: z.boolean(),
     closed_at: z.string().nullable(),
     close_reason: z.enum(['completed', 'failed', 'aborted']).nullable(),
+    // Additive; absent from a Platform deployed before cancellation.
+    cancelled: z.boolean().default(false),
     registered_actor: z.string(),
     registered_reason: z.string(),
     shadow_only: z.literal(true),
@@ -5518,6 +5516,24 @@ const codingHostedOutcomeSchema = z.enum([
   'integrity_failure',
 ])
 const codingHostedCloseReasonSchema = z.enum(['completed', 'failed', 'aborted'])
+// Platform derives the lifecycle view state from durable rows and its database
+// clock: cancelled, then the private task close reason, then expired, running,
+// admitted, pending_admission. Only these new views carry `cancelled`.
+export const codingHostedAssignmentStateSchema = z.enum([
+  'pending_admission',
+  'admitted',
+  'running',
+  'completed',
+  'failed',
+  'aborted',
+  'expired',
+  'cancelled',
+])
+// Platform refuses a trimmed reason outside 8-512 characters on both writes, so
+// the service parse refuses it first with a named field error. The MCP catalog
+// copies below keep `reason` unbounded above, like every other MCP reason, and
+// state the bound in their descriptions instead.
+const codingHostedReasonSchema = auditReasonSchema(8).max(512)
 
 export const codingHostedAssignmentSubjectInputSchema = z.object({
   agentId: z.string().uuid(),
@@ -5541,16 +5557,22 @@ export const createCodingHostedAssignmentInputSchema =
     attemptId: z.string().uuid(),
     deadlineUnix: z.number().int().positive(),
     confirmedAssignmentSha256: codingPrivateV2Digest,
-    reason: auditReasonSchema(8),
+    reason: codingHostedReasonSchema,
     confirmation: z.string().min(1).max(1024),
   })
 
 export const cancelCodingHostedAssignmentInputSchema = z.object({
   evaluationId: z.string().uuid(),
   expectedAssignmentSha256: codingPrivateV2Digest,
-  reason: auditReasonSchema(8),
+  reason: codingHostedReasonSchema,
   confirmation: z.string().min(1).max(1024),
 })
+
+export const createCodingHostedAssignmentMcpInputSchema =
+  createCodingHostedAssignmentInputSchema.extend({ reason: auditReasonSchema(8) })
+
+export const cancelCodingHostedAssignmentMcpInputSchema =
+  cancelCodingHostedAssignmentInputSchema.extend({ reason: auditReasonSchema(8) })
 
 export const listCodingHostedAssignmentsInputSchema = z.object({
   limit: z.number().int().min(1).max(100).default(20),
@@ -5632,7 +5654,7 @@ export const codingHostedAssignmentSummarySchema = z.object({
   artifact_sha256: codingPrivateV2Digest,
   screened_image_sha256: codingPrivateV2Digest,
   assignment_sha256: codingPrivateV2Digest,
-  state: codingHostedOperationStateSchema,
+  state: codingHostedAssignmentStateSchema,
   created_at: z.string(),
   expires_at: z.string(),
   admitted_at: z.string().nullable(),
