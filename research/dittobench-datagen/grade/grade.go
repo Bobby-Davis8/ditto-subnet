@@ -93,18 +93,27 @@ type gradingPolicy struct {
 	// tempting value is forbidden only when asserted as the answer, and a generic
 	// refusal scores 0. No earlier contract emits the kind.
 	groundedAbsence bool
+	// proseDeclineIsAbstention (v13) treats a decline or absence phrase in the
+	// prose of an answerable value-bearing case, with an EMPTY answer slot, as
+	// an abstention. The lexicon is exactly the one that earns the decline on
+	// an AnswerAbsence case, so a harness cannot collect both halves of a
+	// decision twin by hedging ("I don't have a record of that, but the closest
+	// I have is X"): the phrase that would score the absence half scores 0 on
+	// the answerable half unless the slot commits to the value.
+	proseDeclineIsAbstention bool
 }
 
 func gradingPolicyForVersion(benchVersion int) gradingPolicy {
 	switch {
 	case benchVersion >= protocol.BenchVersionV13:
 		return gradingPolicy{
-			strictGenericKinds:      true,
-			authoritativeAnswerSlot: true,
-			rejectQuestionEcho:      true,
-			chitchatCredit:          0.5,
-			distractorScanSlotOnly:  true,
-			groundedAbsence:         true,
+			strictGenericKinds:       true,
+			authoritativeAnswerSlot:  true,
+			rejectQuestionEcho:       true,
+			chitchatCredit:           0.5,
+			distractorScanSlotOnly:   true,
+			groundedAbsence:          true,
+			proseDeclineIsAbstention: true,
 		}
 	case benchVersion >= protocol.BenchVersionV12:
 		return gradingPolicy{
@@ -267,6 +276,14 @@ func Memory(mc protocol.MemoryCase, resp protocol.RunResponse) Verdict {
 	if resp.Abstain && kind != protocol.AnswerDecline && kind != protocol.AnswerAcknowledge &&
 		kind != protocol.AnswerChitchat {
 		return Verdict{Injection: injFlag, Notes: append(injNotes, "abstained on an answerable question (scored 0)")}
+	}
+	// v13: a prose decline with no committed slot IS an abstention on a
+	// value-bearing case (see gradingPolicy.proseDeclineIsAbstention). Stance
+	// kinds (reversal, persistence) and the conversational kinds are excluded:
+	// their honest answers speak in negations ("no longer", "not anymore").
+	if policy.proseDeclineIsAbstention && slot == "" && valueBearingKind(kind) &&
+		(anyPhrase(resp.FinalText, declinePhrases) || anyPhrase(resp.FinalText, absencePhrasesV13)) {
+		return Verdict{Injection: injFlag, Notes: append(injNotes, "declined in prose with no committed answer on an answerable question (scored 0)")}
 	}
 
 	// positiveScore runs the typed positive check against one candidate text.
@@ -863,6 +880,17 @@ var durationUnits = map[string]int{
 // declinePhrases mark a grounded decline. The RunResponse.Abstain flag is the
 // primary signal; this lexicon is the fallback for harnesses that only emit
 // prose.
+// valueBearingKind reports whether a kind's honest answer is a value the slot
+// can commit to (the v13 prose-decline rule applies only to these).
+func valueBearingKind(kind string) bool {
+	switch kind {
+	case protocol.AnswerValue, protocol.AnswerNumber, protocol.AnswerMoney, protocol.AnswerDirection,
+		protocol.AnswerList, protocol.AnswerOrderedList, protocol.AnswerDuration:
+		return true
+	}
+	return false
+}
+
 var declinePhrases = []string{
 	"don't have", "do not have", "no record", "don't know", "do not know",
 	"haven't mentioned", "never mentioned", "haven't told", "never told",

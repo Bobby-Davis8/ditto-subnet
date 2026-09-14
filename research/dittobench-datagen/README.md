@@ -99,7 +99,7 @@ controls which executable contract is active. For the public full-profile seed
 | 9 (pre-activation) | `2027-01-01T00:00:00Z` | `b12edd3649dece3af415ad289a24a1a8615b7d906773e718ee637da14cbd541f` |
 | 10 (pre-activation) | `2027-02-01T00:00:00Z` | `04d6f3d9099dd9922f931d9a6f90caffd18e70d041d074986d68752ddf928a0f` |
 | 12 (pre-activation) | `2027-04-01T00:00:00Z` | `775e0eaf2d41c0cf4647c51f19c56ecc3bb6db37a780538bb7db745811ab91bb` |
-| 13 (pre-activation) | `2027-05-01T00:00:00Z` | `160d598a2cd0c096525d75894640b6528b951dc2bcc2ab97a9163e80e5931cb0` |
+| 13 (pre-activation) | `2027-05-01T00:00:00Z` | `6652f6a96725a38b81cb39dbef70ca1f8890fb5a74c18b3a3d35f92ca0fbe754` |
 
 Each is regenerated and asserted by CI (`TestV2KnownVector` and friends), so a
 value here that disagrees with `cmd/generate` is a bug in this table, not in the
