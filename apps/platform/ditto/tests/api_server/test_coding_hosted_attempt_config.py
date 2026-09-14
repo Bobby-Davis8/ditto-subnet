@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import cache
@@ -29,14 +29,20 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import select, text, update
 
 from ditto.api_server import coding_hosted_attempt_config as attempt
+from ditto.api_server import coding_hosted_control as control
 from ditto.api_server import coding_hosted_runtime as runtime
 from ditto.api_server.coding_hippius_custody import RsaOaepHippiusEvidenceKeyWrapper
 from ditto.api_server.coding_hippius_probe import (
+    PROBE_RECEIPT_MAX_AGE_SECONDS,
+    HippiusProbeCheck,
+    HippiusProbeCheckStatus,
+    hippius_private_input_authority_sha256,
     load_hippius_probe_receipt,
     write_hippius_probe_receipt,
 )
 from ditto.api_server.coding_hosted_attempt_config import HostedAttemptConfigError
 from ditto.api_server.coding_hosted_authoring_evidence import canonical, sha
+from ditto.api_server.coding_hosted_launch import inspect_launch
 from ditto.api_server.coding_hosted_runtime_config import load_runtime_config
 from ditto.api_server.coding_hosted_runtime_io import write_private
 from ditto.db.models import Agent, CodingHostedAssignment, CodingPrivateV2Release
@@ -49,9 +55,9 @@ from ditto.tests.api_server.test_coding_hosted_inputs import fixture
 from ditto.tests.db.queries.test_coding_hosted_admission import _admit, _request
 from ditto_screening_protocol import SCREENING_POLICY_VERSION
 
-READER = "6" * 64
 IMAGE = "sha256:" + "d" * 64
 REPOSITORY = "coding-runtime.invalid/python/runtime"
+REVISION = "5" * 40
 PROVIDER_KEY = b"synthetic-provider-key"
 HIPPIUS = {
     "DITTO_CODING_HIPPIUS_" + key: value
@@ -67,6 +73,14 @@ HIPPIUS = {
         "REGION": "decentralized",
     }.items()
 }
+# The release and probe bind the reader authority the Hippius environment derives.
+READER = hippius_private_input_authority_sha256(
+    endpoint_url="https://s3.hippius.com",
+    region="decentralized",
+    bucket="coding-private-inputs",
+    curator_access_key="hip_curator",
+    reader_access_key="hip_reader",
+)
 HOST_RECORD = {
     "schema": "dittobench-coding-hosted-host-prerequisites-v2",
     "shadow_only": True,
@@ -113,14 +127,36 @@ GRADING = canonical(
 )
 
 
-def probe_receipt(scratch: Path, *, age: float = 0, reader: str = READER) -> bytes:
+def probe_receipt(
+    scratch: Path,
+    *,
+    age: float = 0,
+    checked: float | None = None,
+    reader: str = READER,
+    evidence: dict | None = None,
+    padding: int = 0,
+) -> bytes:
     scratch.mkdir(mode=0o700)
-    base, _ = load_hippius_probe_receipt(_probe(scratch, _config()))
+    base, _ = load_hippius_probe_receipt(_probe(scratch, _config(**(evidence or {}))))
+    if padding:
+        base = replace(
+            base,
+            checks=(
+                *base.checks,
+                HippiusProbeCheck(
+                    name="synthetic_padding",
+                    status=HippiusProbeCheckStatus.PASS,
+                    detail="x" * padding,
+                ),
+            ),
+        )
     output = scratch / "fresh.json"
     write_hippius_probe_receipt(
         receipt=replace(
             base,
-            checked_at=datetime.fromtimestamp(time.time() - age, UTC).isoformat(),
+            checked_at=datetime.fromtimestamp(
+                time.time() - age if checked is None else checked, UTC
+            ).isoformat(),
             private_input_authority_sha256=reader,
         ),
         output=output,
@@ -128,12 +164,16 @@ def probe_receipt(scratch: Path, *, age: float = 0, reader: str = READER) -> byt
     return output.read_bytes()
 
 
-def stage_probe(f, body: bytes) -> str:
+def stage_input(f, kind: str, body: bytes) -> str:
+    """As the wrapper stages it: named by digest, not writable by anyone."""
     digest = sha(body)
-    write_private(f.layout.inbox / f"probe-receipt-{digest}.json", body)
+    path = f.layout.input(kind, digest)
+    write_private(path, body)
+    path.chmod(0o440)
     return digest
 
 
+@asynccontextmanager
 async def build(
     tmp_path, session_maker, *, admit=True, budget_seconds=3600, max_patch_bytes=1024
 ):
@@ -168,12 +208,13 @@ async def build(
         await _admit(session_maker, _request(authority))
 
     home = tmp_path / "home"
+    inputs = tmp_path / "inputs"
     release = home / "release" / authority.registration_sha256
     tools = tmp_path / "tools"
+    # No attempts directory: the materializer creates it as the worker.
     for directory in (
         home,
-        home / "attempts",
-        home / "inbox",
+        inputs,
         home / "private",
         home / "authority",
         home / "release",
@@ -202,6 +243,8 @@ async def build(
     (run_root / "docker.sock").chmod(0o600)
     layout = attempt.HostLayout(
         home=home,
+        inputs=inputs,
+        runtime_revision=REVISION,
         worker_executable=worker,
         python_executable=Path(shutil.which("python3", path="/usr/bin:/bin")),
         prerequisites_file=record,
@@ -243,15 +286,6 @@ async def build(
     }.items():
         write_private(release / name, origin.read_bytes())
     write_private(layout.evidence_public_key, evidence_key())
-    for name, body in {
-        f"execution-profile-{sha(execution)}.json": execution,
-        f"grading-profile-{sha(GRADING)}.json": GRADING,
-        f"inference-policy-{policy.digest()}.json": canonical(
-            policy.model_dump(mode="json", by_alias=True)
-        ),
-        f"budget-profile-{budget.digest()}.json": budget.canonical_bytes(),
-    }.items():
-        write_private(layout.inbox / name, body)
     f = SimpleNamespace(
         layout=layout,
         authority=authority,
@@ -262,18 +296,30 @@ async def build(
         units=lambda: None,
         repositories=[],
     )
+    for kind, body in {
+        "execution-profile": execution,
+        "grading-profile": GRADING,
+        "inference-policy": canonical(policy.model_dump(mode="json", by_alias=True)),
+        "budget-profile": budget.canonical_bytes(),
+    }.items():
+        stage_input(f, kind, body)
 
     def repository(_layout, digests):
         f.repositories.append(digests)
         return attempt.unique_repository(
-            digests, lambda reference: reference.startswith(REPOSITORY + "@")
+            digests, {f"{REPOSITORY}@{digest}" for digest in digests}
         )
 
     f.repository = repository
-    probe = stage_probe(f, probe_receipt(tmp_path / "probe"))
+    probe = stage_input(f, "probe-receipt", probe_receipt(tmp_path / "probe"))
     f.request = attempt.AttemptRequest.parse(
         evaluation_id=str(authority.evaluation_id),
+        runtime_revision=REVISION,
         assignment_sha256=authority.digest(),
+        execution_profile_sha256=authority.execution_profile_sha256,
+        grading_profile_sha256=authority.grading_profile_sha256,
+        inference_policy_sha256=authority.policy_sha256,
+        budget_profile_sha256=budget.digest(),
         probe_receipt_sha256=probe,
         evidence_wrapping_key_sha256=RsaOaepHippiusEvidenceKeyWrapper(
             layout.evidence_public_key
@@ -288,7 +334,7 @@ async def build(
 
 @pytest.fixture
 async def attempt_fixture(tmp_path, session_maker):
-    async for value in build(tmp_path, session_maker):
+    async with build(tmp_path, session_maker) as value:
         yield value
 
 
@@ -302,7 +348,22 @@ async def run(f, **changes):
 async def refused(f, stage: str, **changes) -> None:
     with pytest.raises(HostedAttemptConfigError, match=stage):
         await run(f, **changes)
-    assert list(f.layout.attempts.iterdir()) == []
+    attempts = f.layout.attempts
+    assert not attempts.exists() or list(attempts.iterdir()) == []
+
+
+async def runtime_refuses(f, session_maker) -> None:
+    """The runtime's locked launch inspection refuses the same state."""
+    with pytest.raises(ValueError):
+        await inspect_launch(
+            session_maker,
+            evaluation_id=f.authority.evaluation_id,
+            attempt_id=f.authority.attempt_id,
+            assignment_sha256=f.authority.digest(),
+            policy_sha256=f.authority.policy_sha256,
+            execution_profile_sha256=f.authority.execution_profile_sha256,
+            grading_profile_sha256=f.authority.grading_profile_sha256,
+        )
 
 
 @contextmanager
@@ -323,11 +384,12 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
 ):
     f = attempt_fixture
     secrets = {
-        str(f.layout.private / name)
-        for name in ("hippius-environment.json", "image-storage.json", "provider-key")
+        str(f.layout.private / name) for name in ("image-storage.json", "provider-key")
     }
     opened: list[str] = []
+    helpers: list[Path] = []
     real_os_open, real_open = os.open, builtins.open
+    real_helper = attempt.protected_helper
 
     def track_os_open(path, *args, **kwargs):
         opened.append(os.fsdecode(path))
@@ -338,15 +400,27 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
             opened.append(os.fsdecode(file))
         return real_open(file, *args, **kwargs)
 
+    def track_helper(path):
+        helpers.append(path)
+        return real_helper(path)
+
     monkeypatch.setattr(os, "open", track_os_open)
     monkeypatch.setattr(builtins, "open", track_open)
     monkeypatch.setattr(io, "open", track_open)
+    monkeypatch.setattr(attempt, "protected_helper", track_helper)
     receipt = await run(f)
     monkeypatch.undo()
-    # Secret credential files are referenced, never opened by the materializer.
+    # Credential files are referenced, never opened. The database and Hippius
+    # environments are parsed in memory exactly as the runtime parses them.
     assert not secrets & set(opened)
     assert str(f.layout.private / "postgres-environment.json") in opened
+    assert str(f.layout.private / "hippius-environment.json") in opened
+    # The installed worker is admitted, and its binary hashed, once.
+    assert helpers.count(f.layout.worker_executable) == 1
+    assert not hasattr(attempt, "require_installed_worker")
 
+    info = f.layout.attempts.lstat()
+    assert (info.st_mode & 0o777, info.st_uid) == (0o700, os.geteuid())
     root = f.layout.attempts / str(f.authority.attempt_id)
     config_path = root / "runtime.json"
     assert receipt["config_file"] == str(config_path)
@@ -363,6 +437,7 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
         PROVIDER_KEY,
         os.environ["POSTGRES_PASSWORD"].encode(),
         b"synthetic-reader-secret",
+        b"evidence-mediator-secret",
         b"synthetic-image-secret",
     ):
         assert secret not in body
@@ -374,6 +449,7 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
         "worker_id": None,
         "assignment_sha256": f.authority.digest(),
         "deadline_unix": f.authority.deadline_unix,
+        "runtime_revision": REVISION,
         "registration_sha256": f.authority.registration_sha256,
         "execution_profile_sha256": f.authority.execution_profile_sha256,
         "grading_profile_sha256": f.authority.grading_profile_sha256,
@@ -411,6 +487,10 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
         "seccomp_profile": "",
         "apparmor_profile": "",
     }
+    # The storage authorities the runtime derives are the ones the probe binds.
+    probe, _ = load_hippius_probe_receipt(Path(wire.probe_receipt_file))
+    assert probe.private_input_authority_sha256 == config.reader.authority_sha256
+    assert probe.sealed_evidence_authority_sha256 == config.evidence.authority_sha256
     assert wire.provider_key_file == str(f.layout.private / "provider-key")
     assert wire.unwrap_executable == str(f.layout.unwrap_executable)
     assert wire.transport_manifest_file.startswith(
@@ -435,11 +515,15 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
     assert config_path.read_bytes() == body
 
 
-async def test_refuses_existing_or_consumed_attempt_state(attempt_fixture):
+@pytest.mark.parametrize(
+    "marker", ["runtime/platform-consumed", "runtime/worker/consumed"]
+)
+async def test_refuses_existing_or_consumed_attempt_state(attempt_fixture, marker):
     f = attempt_fixture
+    f.layout.attempts.mkdir(mode=0o700)
     root = f.layout.attempts / str(f.authority.attempt_id)
-    (root / "runtime").mkdir(parents=True, mode=0o700)
-    (root / "runtime" / "platform-consumed").write_bytes(b"consumed\n")
+    (root / marker).parent.mkdir(parents=True)
+    (root / marker).write_bytes(b"consumed\n")
     with pytest.raises(HostedAttemptConfigError, match="already consumed"):
         await run(f)
     shutil.rmtree(root)
@@ -452,8 +536,9 @@ async def test_refuses_existing_or_consumed_attempt_state(attempt_fixture):
 async def test_refuses_mismatched_or_unlaunchable_assignment(
     tmp_path, session_maker, monkeypatch
 ):
-    async for f in build(tmp_path, session_maker, admit=False):
+    async with build(tmp_path, session_maker, admit=False) as f:
         await refused(f, "is not launchable")
+        await runtime_refuses(f, session_maker)
         await _admit(session_maker, _request(f.authority))
         await refused(f, "authority differs", assignment_sha256="0" * 64)
         await refused(f, "assignment unavailable", evaluation_id=uuid4())
@@ -468,6 +553,7 @@ async def test_refuses_mismatched_or_unlaunchable_assignment(
                 worker_id=uuid4(),
             )
         await refused(f, "is not launchable")
+        await runtime_refuses(f, session_maker)
 
 
 async def test_refuses_quarantined_release_and_unscreened_artifact(
@@ -481,6 +567,7 @@ async def test_refuses_quarantined_release_and_unscreened_artifact(
             .values(screening_policy_version=SCREENING_POLICY_VERSION - 1)
         )
     await refused(f, "artifact unavailable")
+    await runtime_refuses(f, session_maker)
     async with session_maker() as session, session.begin():
         await session.execute(
             update(Agent)
@@ -501,6 +588,7 @@ async def test_refuses_quarantined_release_and_unscreened_artifact(
             reason="synthetic quarantine",
         )
     await refused(f, "release unavailable")
+    await runtime_refuses(f, session_maker)
 
 
 async def test_refuses_closed_task(attempt_fixture, session_maker):
@@ -514,6 +602,7 @@ async def test_refuses_closed_task(attempt_fixture, session_maker):
             {"evaluation": f.authority.evaluation_id},
         )
     await refused(f, "task unavailable")
+    await runtime_refuses(f, session_maker)
 
 
 async def test_rechecks_authority_immediately_before_the_write(
@@ -523,8 +612,8 @@ async def test_rechecks_authority_immediately_before_the_write(
     snapshots = []
     real = attempt.read_launchable
 
-    async def racing(sessions, **kwargs):
-        snapshots.append(kwargs)
+    async def racing(sessions, request):
+        snapshots.append(request)
         if len(snapshots) == 2:
             async with session_maker() as session, session.begin():
                 await start_hosted_attempt(
@@ -533,7 +622,7 @@ async def test_rechecks_authority_immediately_before_the_write(
                     expected_attempt_id=f.authority.attempt_id,
                     worker_id=uuid4(),
                 )
-        return await real(sessions, **kwargs)
+        return await real(sessions, request)
 
     monkeypatch.setattr(attempt, "read_launchable", racing)
     await refused(f, "is not launchable")
@@ -542,16 +631,17 @@ async def test_rechecks_authority_immediately_before_the_write(
 
 async def test_refuses_mismatched_public_authorities(attempt_fixture):
     f = attempt_fixture
-    inbox = f.layout.inbox
-    execution = inbox / f"execution-profile-{f.authority.execution_profile_sha256}.json"
+    execution = f.layout.input(
+        "execution-profile", f.authority.execution_profile_sha256
+    )
     with swapped(execution, execution_profile(max_patch_bytes=2048)):
         await refused(f, "execution profile refused")
     with swapped(execution, f.execution.rstrip(b"\n") + b" \n"):
         await refused(f, "execution profile refused")
-    grading = inbox / f"grading-profile-{f.authority.grading_profile_sha256}.json"
+    grading = f.layout.input("grading-profile", f.authority.grading_profile_sha256)
     with swapped(grading, None):
         await refused(f, "grading profile refused")
-    policy = inbox / f"inference-policy-{f.authority.policy_sha256}.json"
+    policy = f.layout.input("inference-policy", f.authority.policy_sha256)
     other = native_policy(runtime_profile_sha256=f.budget.digest(), max_requests=3)
     with swapped(policy, canonical(other.model_dump(mode="json", by_alias=True))):
         await refused(f, "inference policy refused")
@@ -575,21 +665,141 @@ async def test_refuses_mismatched_public_authorities(attempt_fixture):
         await refused(f, "release authorities refused")
 
 
+async def test_refuses_reviewed_pins_that_differ_from_the_assignment(attempt_fixture):
+    f = attempt_fixture
+    # A pin that names a staged, well-formed input is still not the assignment's.
+    other_execution = stage_input(
+        f, "execution-profile", execution_profile(max_patch_bytes=2048)
+    )
+    for changes in (
+        {"execution_profile_sha256": other_execution},
+        {"grading_profile_sha256": "0" * 64},
+        {"inference_policy_sha256": "0" * 64},
+    ):
+        await refused(f, "assignment authority differs", **changes)
+    other_budget = budget_profile(
+        valid_from_unix=int(time.time()) - 1,
+        valid_until_unix=int(time.time()) + 7200,
+    )
+    await refused(
+        f,
+        "budget profile refused",
+        budget_profile_sha256=stage_input(
+            f, "budget-profile", other_budget.canonical_bytes()
+        ),
+    )
+    await run(f)
+
+
+async def test_refuses_a_runtime_revision_other_than_the_running_one(attempt_fixture):
+    f = attempt_fixture
+    units = []
+    f.units = lambda: units.append(True)
+    await refused(f, "runtime revision differs", runtime_revision="6" * 40)
+    # Refused before any host, unit or database check.
+    assert units == []
+
+
 async def test_refuses_wrong_stale_or_mismatched_probe_receipt(attempt_fixture):
     f = attempt_fixture
     await refused(f, "probe receipt refused", probe_receipt_sha256="f" * 64)
-    pinned = f.layout.inbox / f"probe-receipt-{f.request.probe_receipt_sha256}.json"
+    pinned = f.layout.input("probe-receipt", f.request.probe_receipt_sha256)
     with swapped(pinned, probe_receipt(f.tmp / "other")):
         await refused(f, "probe receipt refused")
-    pinned.chmod(0o644)
+    pinned.chmod(0o660)
     await refused(f, "probe receipt refused")
-    pinned.chmod(0o600)
-    # Fresh now, but older than 24 hours before the post-deadline finalization ends.
+    pinned.chmod(0o440)
     for index, age in enumerate((23 * 3600, 25 * 3600, -120)):
-        digest = stage_probe(f, probe_receipt(f.tmp / f"stale-{index}", age=age))
+        digest = stage_input(
+            f, "probe-receipt", probe_receipt(f.tmp / f"stale-{index}", age=age)
+        )
         await refused(f, "probe receipt is stale", probe_receipt_sha256=digest)
-    digest = stage_probe(f, probe_receipt(f.tmp / "reader", reader="7" * 64))
+    digest = stage_input(
+        f, "probe-receipt", probe_receipt(f.tmp / "reader", reader="7" * 64)
+    )
     await refused(f, "probe receipt authority differs", probe_receipt_sha256=digest)
+
+
+def test_probe_freshness_covers_the_runtime_evidence_publication_bound():
+    assert attempt.EVIDENCE_PUBLICATION_SECONDS == (
+        runtime.WORKER_FINALIZATION_SECONDS
+        + runtime.WORKER_SHUTDOWN_GRACE_SECONDS
+        + 2 * control.SHUTDOWN_OPERATION_SECONDS
+    )
+    deadline = 2_000_000_000
+    now = deadline - 600
+    edge = deadline + attempt.EVIDENCE_PUBLICATION_SECONDS
+    edge -= PROBE_RECEIPT_MAX_AGE_SECONDS
+    assert not attempt.probe_fresh(edge, now, deadline)
+    assert attempt.probe_fresh(edge + 1, now, deadline)
+    # A receipt that only outlives the Go timeout, without grace and drain.
+    assert not attempt.probe_fresh(
+        deadline
+        + runtime.WORKER_FINALIZATION_SECONDS
+        + 1
+        - PROBE_RECEIPT_MAX_AGE_SECONDS,
+        now,
+        deadline,
+    )
+    assert not attempt.probe_fresh(now + 1, now, deadline)
+    assert not attempt.probe_fresh(now - PROBE_RECEIPT_MAX_AGE_SECONDS, now, deadline)
+
+
+async def test_probe_receipt_must_stay_fresh_through_the_last_publication(
+    attempt_fixture,
+):
+    f = attempt_fixture
+    edge = (
+        f.authority.deadline_unix
+        + attempt.EVIDENCE_PUBLICATION_SECONDS
+        - PROBE_RECEIPT_MAX_AGE_SECONDS
+    )
+    digest = stage_input(
+        f, "probe-receipt", probe_receipt(f.tmp / "edge", checked=edge)
+    )
+    await refused(f, "probe receipt is stale", probe_receipt_sha256=digest)
+    digest = stage_input(
+        f, "probe-receipt", probe_receipt(f.tmp / "inside", checked=edge + 1)
+    )
+    receipt = await run(f, probe_receipt_sha256=digest)
+    assert receipt["probe_receipt_sha256"] == digest
+
+
+async def test_refuses_a_probe_receipt_over_the_runtime_read_bound(attempt_fixture):
+    f = attempt_fixture
+    # Valid for the probe loader's own bound, but not for load_runtime_config's.
+    body = probe_receipt(f.tmp / "large", padding=70000)
+    assert 65536 < len(body) < 1 << 20
+    load_hippius_probe_receipt(f.tmp / "large" / "fresh.json")
+    digest = stage_input(f, "probe-receipt", body)
+    await refused(f, "probe receipt refused", probe_receipt_sha256=digest)
+
+
+async def test_refuses_storage_authorities_the_hippius_environment_does_not_derive(
+    attempt_fixture,
+):
+    f = attempt_fixture
+    digest = stage_input(
+        f,
+        "probe-receipt",
+        probe_receipt(f.tmp / "sealed", evidence={"bucket": "other-sealed-evidence"}),
+    )
+    await refused(f, "sealed evidence authority differs", probe_receipt_sha256=digest)
+    hippius = f.layout.private / "hippius-environment.json"
+    reader = HIPPIUS | {"DITTO_CODING_HIPPIUS_PRIVATE_INPUT_READER_ACCESS_KEY": "hip_x"}
+    with swapped(hippius, canonical(reader)):
+        await refused(f, "probe receipt authority differs")
+    mediator = HIPPIUS | {"DITTO_CODING_HIPPIUS_EVIDENCE_MEDIATOR_ACCESS_KEY": "hip_y"}
+    with swapped(hippius, canonical(mediator)):
+        await refused(f, "sealed evidence authority differs")
+    shared = HIPPIUS | {
+        "DITTO_CODING_HIPPIUS_SEALED_EVIDENCE_BUCKET": "coding-private-inputs"
+    }
+    with swapped(hippius, canonical(shared)):
+        await refused(f, "storage environment refused")
+    with swapped(hippius, canonical(HIPPIUS | {"UNEXPECTED": "value"})):
+        await refused(f, "storage environment refused")
+    await run(f)
 
 
 @pytest.mark.parametrize(
@@ -603,7 +813,7 @@ async def test_refuses_wrong_stale_or_mismatched_probe_receipt(attempt_fixture):
 async def test_refuses_assignment_bound_authorities_unfit_for_the_attempt(
     tmp_path, session_maker, changes, stage
 ):
-    async for f in build(tmp_path, session_maker, **changes):
+    async with build(tmp_path, session_maker, **changes) as f:
         await refused(f, stage)
 
 
@@ -631,7 +841,7 @@ async def test_refuses_unsafe_secret_file_metadata(attempt_fixture):
 
 
 async def test_refuses_live_units_custody_socket_and_free_form_host_values(
-    attempt_fixture,
+    attempt_fixture, monkeypatch
 ):
     f = attempt_fixture
 
@@ -663,31 +873,64 @@ async def test_refuses_live_units_custody_socket_and_free_form_host_values(
     record.chmod(0o666)
     await refused(f, "host refused")
     record.chmod(0o444)
+    f.layout.attempts.mkdir(mode=0o700)
     for path, mode in (
         (f.layout.unwrap_executable, 0o755),
         (f.layout.docker_socket, 0o644),
         (f.layout.attempts, 0o755),
         (f.layout.docker_executable, 0o777),
+        (f.layout.docker_executable, 0o644),
+        (f.layout.inputs, 0o770),
     ):
         original = path.stat().st_mode & 0o777
         path.chmod(mode)
-        with pytest.raises(HostedAttemptConfigError, match="host refused"):
+        with pytest.raises(HostedAttemptConfigError):
             await run(f)
         path.chmod(original)
+    f.layout.attempts.rmdir()
+    f.layout.attempts.symlink_to(f.tmp)
+    with pytest.raises(HostedAttemptConfigError, match="host refused"):
+        await run(f)
+    f.layout.attempts.unlink()
+    # Execute access is the worker's own, not a root owner's mode bits.
+    real_access = os.access
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            os,
+            "access",
+            lambda path, mode: (
+                Path(path) != f.layout.docker_executable and real_access(path, mode)
+            ),
+        )
+        await refused(f, "host refused")
     await run(f)
 
 
 def test_unit_listing_accepts_only_stopped_or_failed_units():
     assert attempt.idle_units(b"")
+    assert attempt.idle_units(b"\n  \n")
     assert attempt.idle_units(
         b"ditto-coding-hosted-worker.service loaded inactive dead Attempt\n"
-        b"ditto-coding-custody@1.service loaded failed failed Custody\n"
+        b"ditto-coding-custody@1.service not-found failed failed Custody\n"
     )
-    for state in (b"active running", b"activating start", b"deactivating stop"):
+    for state in (
+        b"active running",
+        b"activating start",
+        b"deactivating stop",
+        b"reloading reload",
+    ):
         assert not attempt.idle_units(
             b"ditto-coding-custody@1.service loaded " + state + b" Custody\n"
         )
-    assert not attempt.idle_units(b"ditto-coding-hosted-worker.service\n")
+    # Short or unparseable lines are refused, never read as stopped.
+    for line in (
+        b"ditto-coding-hosted-worker.service\n",
+        b"ditto-coding-hosted-worker.service loaded\n",
+        b"ditto-coding-hosted-worker.service loaded inactive\n",
+    ):
+        assert not attempt.idle_units(line)
+    with pytest.raises(UnicodeDecodeError):
+        attempt.idle_units(b"\xff loaded inactive dead\n")
 
 
 def test_executor_repository_must_be_the_unique_local_runtime_holding_every_image():
@@ -698,13 +941,52 @@ def test_executor_repository_must_be_the_unique_local_runtime_holding_every_imag
         "coding-runtime.invalid/rust/runtime@" + IMAGE,
     }
     assert (
-        attempt.unique_repository({IMAGE, other}, held.__contains__)
+        attempt.unique_repository({IMAGE, other}, held)
         == "coding-runtime.invalid/go/runtime"
     )
     with pytest.raises(HostedAttemptConfigError, match="image unavailable"):
-        attempt.unique_repository({IMAGE}, held.__contains__)
+        attempt.unique_repository({IMAGE}, held)
     with pytest.raises(HostedAttemptConfigError, match="image unavailable"):
-        attempt.unique_repository({"sha256:" + "0" * 64}, held.__contains__)
+        attempt.unique_repository({"sha256:" + "0" * 64}, held)
+
+
+@pytest.mark.parametrize(
+    "listed,expected",
+    [
+        ([f'["{REPOSITORY}@{IMAGE}","{REPOSITORY}@OTHER"]', "null"], REPOSITORY),
+        ([f'["{REPOSITORY}@{IMAGE}"]'], None),
+        ([f'["{REPOSITORY}@{IMAGE}"]', "{}"], None),
+        ([], None),
+    ],
+    ids=["one-repository-holds-both", "partial", "malformed", "none"],
+)
+def test_docker_repository_inspects_every_candidate_in_one_call(
+    tmp_path, listed, expected
+):
+    other = "sha256:" + "e" * 64
+    log = tmp_path / "argv"
+    docker = tmp_path / "docker"
+    lines = "".join(
+        f"printf '%s\\n' '{line.replace('OTHER', other)}'\n" for line in listed
+    )
+    # A missing reference fails the command; present images are still listed.
+    docker.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{log}'\n{lines}exit 1\n")
+    docker.chmod(0o700)
+    layout = SimpleNamespace(
+        docker_executable=docker, docker_socket=tmp_path / "sock", home=tmp_path
+    )
+    if expected is None:
+        with pytest.raises(HostedAttemptConfigError, match="image unavailable"):
+            attempt.docker_repository(layout, {IMAGE, other})
+    else:
+        assert attempt.docker_repository(layout, {IMAGE, other}) == expected
+    argv = log.read_text().splitlines()
+    assert argv[:4] == ["image", "inspect", "--format", "{{json .RepoDigests}}"]
+    assert argv[4:] == [
+        f"{repository}@{digest}"
+        for repository in attempt.EXECUTOR_REPOSITORIES
+        for digest in sorted({IMAGE, other})
+    ]
 
 
 async def test_authority_snapshot_is_read_only(session_maker):
@@ -717,47 +999,63 @@ async def test_authority_snapshot_is_read_only(session_maker):
                 await session.execute(text(statement))
 
 
+PINS = {
+    "assignment_sha256": "a" * 64,
+    "execution_profile_sha256": "b" * 64,
+    "grading_profile_sha256": "c" * 64,
+    "inference_policy_sha256": "d" * 64,
+    "budget_profile_sha256": "e" * 64,
+    "probe_receipt_sha256": "f" * 64,
+    "evidence_wrapping_key_sha256": "0" * 64,
+}
+
+
 def test_request_pins_are_closed():
-    good = {
-        "evaluation_id": str(uuid4()),
-        "assignment_sha256": "a" * 64,
-        "probe_receipt_sha256": "b" * 64,
-        "evidence_wrapping_key_sha256": "c" * 64,
-    }
+    good = {"evaluation_id": str(uuid4()), "runtime_revision": REVISION, **PINS}
     attempt.AttemptRequest.parse(**good)
     for change in (
         {"evaluation_id": "00000000-0000-0000-0000-000000000000"},
         {"evaluation_id": good["evaluation_id"].upper()},
+        {"runtime_revision": "5" * 39},
+        {"runtime_revision": "5" * 64},
         {"assignment_sha256": "A" * 64},
+        {"budget_profile_sha256": "e" * 63},
         {"probe_receipt_sha256": "b" * 63},
         {"evidence_wrapping_key_sha256": "../" + "c" * 61},
+        {"extra_sha256": "1" * 64},
     ):
         with pytest.raises(HostedAttemptConfigError, match="request invalid"):
             attempt.AttemptRequest.parse(**{**good, **change})
+    missing = dict(good)
+    del missing["grading_profile_sha256"]
+    with pytest.raises(HostedAttemptConfigError, match="request invalid"):
+        attempt.AttemptRequest.parse(**missing)
 
 
 def test_cli_takes_only_closed_pins_and_refuses_off_host(tmp_path):
     command = [sys.executable, "-I", "-m", "ditto.coding_hosted_attempt_config"]
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(tmp_path)}
-    usage = subprocess.run(
-        [*command, "--materialize-attempt-config", "--config", "/tmp/x.json"],
-        cwd=Path(attempt.__file__).parents[2],
-        env=environment,
-        capture_output=True,
-        timeout=60,
-    )
-    assert usage.returncode == 2 and usage.stdout == b""
     pins = [
         "--materialize-attempt-config",
         "--evaluation-id",
         str(uuid4()),
-        "--assignment-sha256",
-        "a" * 64,
-        "--probe-receipt-sha256",
-        "b" * 64,
-        "--evidence-wrapping-key-sha256",
-        "c" * 64,
+        "--runtime-revision",
+        REVISION,
     ]
+    for name, value in PINS.items():
+        pins += [f"--{name.replace('_', '-')}", value]
+    for argv in (
+        ["--materialize-attempt-config", "--config", "/tmp/x.json"],
+        pins[:-2],
+    ):
+        usage = subprocess.run(
+            [*command, *argv],
+            cwd=Path(attempt.__file__).parents[2],
+            env=environment,
+            capture_output=True,
+            timeout=60,
+        )
+        assert usage.returncode == 2 and usage.stdout == b""
     result = subprocess.run(
         [*command, *pins],
         cwd=Path(attempt.__file__).parents[2],
