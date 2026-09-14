@@ -5,8 +5,10 @@ parses the signer settings from the environment ditto-api is about to start
 with and applies the loader's own ancestor, directory, owner, mode, link and
 size checks through ``lstat``. It never opens, reads or hashes the seed, so it
 cannot prove the seed derives the configured hotkey: API startup still does that
-and fails closed. ``scripts/update.sh`` runs it before touching pm2 whenever the
-sourced environment does not disable the signer.
+and fails closed. It runs as the dedicated ``ditto-api`` user, the only owner
+the checks accept: from a newly sealed release before ``scripts/update.sh``
+activates it, and as ditto-platform-api.service's ``ExecStartPre``
+(infra/docs/coding-hosted-control-signer-v2.md).
 """
 
 from __future__ import annotations

@@ -59,10 +59,15 @@ echo "==> starting API under pm2"
 # checkout. Starting them from here would crash-loop both slots, so this
 # script — like update.sh — starts every app EXCEPT the relay slots; relays
 # are rolled exclusively by deploy-relay-release.sh.
+# With DITTO_PLATFORM_API_SUPERVISOR=systemd, ditto-api runs as the dedicated
+# ditto-api user through ditto-platform-api.service and scripts/update.sh; a pm2
+# copy here would run as this user and contend for the API port.
 non_relay_apps="$(node -e '
+  const systemd = process.env.DITTO_PLATFORM_API_SUPERVISOR === "systemd";
   const names = require("./scripts/ecosystem.config.js").apps
     .map((app) => app.name)
-    .filter((name) => !name.startsWith("ditto-api-relay-"));
+    .filter((name) => !name.startsWith("ditto-api-relay-"))
+    .filter((name) => !(systemd && name === "ditto-api"));
   if (names.length === 0) {
     console.error("ERROR: no non-relay apps found in ecosystem.config.js");
     process.exit(1);
