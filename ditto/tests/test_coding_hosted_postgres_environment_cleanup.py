@@ -437,6 +437,47 @@ def test_playbook_fixture_ci_and_docs_registration() -> None:
     assert "extra vars" in section
 
 
+def test_docs_name_every_password_holder_and_order_rotation() -> None:
+    docs = (ROOT / "infra/docs/coding-hosted-postgres-v2.md").read_text()
+    section = _flat(docs.split("## Removal and rotation", 1)[1])
+    assert "does not revoke any credential" in section
+    runtime = (
+        ROOT / "apps/platform/ditto/api_server/coding_hosted_runtime.py"
+    ).read_text()
+    # The per-run copy the docs name is still written with the full entry list.
+    assert '"postgres.json",' in runtime and "config.postgres_entries" in runtime
+    plan_apply = (ROOT / ".github/workflows/infra-plan-apply.yml").read_text()
+    assert "TF_VAR_db_password: ${{ secrets.PLATFORM_DB_PASSWORD }}" in plan_apply
+    for holder in (
+        *COPIES,
+        "`<runtime_root>/postgres.json`",
+        "`write_worker_config`",
+        "retained evidence",
+        "`PLATFORM_DB_PASSWORD`",
+        "`infra-plan`",
+        "`TF_VAR_db_password`",
+        "`platform-db-password`",
+        "gs://ditto-app-dev-tfstate/gcp-platform",
+        "gs://ditto-app-dev-tfstate/ci-plans/gcp-platform/",
+        "/opt/ditto/secrets/postgres-ditto.password",
+        "`apps/platform/.env`",
+        "`DITTO_PG_PASSWORD`",
+        "`DITTO_CODING_PG_PASSWORD`",
+    ):
+        assert holder in section, holder
+    steps = [
+        "1. **Stop.**",
+        "2. **Rotate the `ditto` password.**",
+        "3. **Clean up.**",
+        "4. **Re-materialize.**",
+        "5. **Verify.**",
+    ]
+    positions = [section.index(step) for step in steps]
+    assert positions == sorted(positions)
+    assert "it is not complete without step 2" in section
+    assert "must not be extended to" in section
+
+
 def test_rehearsal_runs_only_in_the_infra_ansible_job() -> None:
     workflows = ROOT / ".github/workflows"
     infra = yaml.safe_load((workflows / "infra-ci.yml").read_text())

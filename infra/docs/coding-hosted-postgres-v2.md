@@ -333,32 +333,100 @@ that both paths are absent. A re-run reports both as already absent. The report
 and every refusal carry the source revision and paths only. `--check` lists what
 would be removed.
 
-Removal does not revoke database access. The `ditto` password stays valid, and
-the HBA, UFW and network rules follow the rollback steps above. Anything
-configured to read these copies, such as the worker or custody service, fails
-closed until the files are materialized again.
+### Removal is not revocation
 
-To rotate the copies:
-1. Stop the worker and every custody instance through their own reviewed
-   procedure, after reconciling unfinished attempts and evidence. Nothing here
-   stops or starts them.
-2. Run the cleanup playbook without exporting a password.
-3. Export the new value only in the controller environment, run the
-   materialization playbook and unset the value.
-4. Start services through their own reviewed procedure.
+Removing the two copies does not revoke any credential. The `ditto` password
+stays valid wherever it is held, including retained runtime roots, and the HBA,
+UFW and network rules follow the rollback steps above. Services configured to
+read these copies fail closed until the files are materialized again. Treat a
+suspected exposure of any holder below as a leak of the shared `ditto` role
+password: rotate that password as described below. Running cleanup alone is
+never a leak response.
 
-The cleanup role does not rotate the shared `ditto` PostgreSQL role password.
-That is a separate protected Platform database and application change, and it
-changes credentials for both Platform databases. Holders in this repository
-include:
-- the Terraform-managed Secret Manager secret `platform-db-password`
-  (`infra/terraform/stacks/gcp-platform`, `var.db_password`);
-- the protected `/opt/ditto/secrets/postgres-ditto.password` and role password
-  applied by `gcp-platform-pg.yml` and `roles/postgres`. A converge without
+### Holders of the `ditto` password
+
+On the Coding host, the complete `POSTGRES_*` list, including
+`POSTGRES_PASSWORD`, is held in:
+- `/var/lib/ditto-coding-custody/private/postgres-environment.json`, owned by
+  `ditto-coding-custody`, mode `0600`, read by the custody service through its
+  `postgres_environment_file`;
+- `/var/lib/ditto-coding-hosted/private/postgres-environment.json`, owned by
+  `ditto-coding-hosted`, mode `0600`, read by the hosted runtime through its
+  protected configuration's `postgres_environment_file`;
+- `<runtime_root>/postgres.json` for every hosted runtime invocation, including
+  each attempt of a bounded rollout. `write_worker_config` in
+  `apps/platform/ditto/api_server/coding_hosted_runtime.py` writes it as an
+  exclusive mode-`0600` file owned by `ditto-coding-hosted` for the Go worker's
+  start helper. Runtime roots are retained evidence and reconciliation state:
+  nothing deletes them automatically, including after a failure. This role
+  neither finds nor removes them, and must not be extended to;
+- any other protected configuration whose `postgres_environment_file` names a
+  separate copy, for example one written for the evidence recovery or canary
+  acceptance commands. This role does not find those either.
+
+While services run, the Go worker also passes the entries to the Python start
+helper as process environment, and each running Platform process holds the
+password in memory. Stopping the services ends both.
+
+Outside the Coding host:
+- the GitHub Actions secret `PLATFORM_DB_PASSWORD` in the `infra-plan`
+  environment. `.github/workflows/infra-plan-apply.yml` passes it to the
+  `gcp-platform` plan as `TF_VAR_db_password`;
+- the Secret Manager secret `platform-db-password`, whose version
+  `infra/terraform/stacks/gcp-platform` writes from `var.db_password`. The value
+  is also stored in that root's Terraform state
+  (`gs://ditto-app-dev-tfstate/gcp-platform`) and in each sealed plan under
+  `gs://ditto-app-dev-tfstate/ci-plans/gcp-platform/` until apply removes it. A
+  plan that is never applied stays there;
+- the Platform PostgreSQL VM: the `ditto` role, which serves both
+  `ditto_platform_dev` and `ditto_platform_prod`, and
+  `/opt/ditto/secrets/postgres-ditto.password` (`postgres:postgres`, `0640`),
+  both set by `gcp-platform-pg.yml` and `roles/postgres`. A converge without
   `DITTO_PG_PASSWORD` keeps the existing password; exporting a new value there
   changes it;
-- the Platform app `.env` that `roles/platform_app` renders from the secret for
-  both Platform environments;
-- these two Coding copies, which are removed and materialized again as above.
+- each Platform app VM's `apps/platform/.env` (`POSTGRES_PASSWORD`), which
+  `roles/platform_app` renders from `platform-db-password` for both Platform
+  environments;
+- an operator controller, only while `TF_VAR_db_password`, `DITTO_PG_PASSWORD`
+  or `DITTO_CODING_PG_PASSWORD` is exported for a protected run.
+
+### Rotation
+
+The cleanup role does not rotate the shared `ditto` PostgreSQL role password.
+Rotation is this ordered procedure, and it is not complete without step 2:
+steps 3 to 5 alone only replace two files with the same, still-valid password.
+
+1. **Stop.** Stop the Coding worker and every custody instance through their
+   own reviewed procedure, after reconciling unfinished attempts and evidence.
+   Nothing here stops or starts them. The cleanup listing must show only
+   `inactive` or `failed` units.
+2. **Rotate the `ditto` password.** This is a separate protected change that
+   is not implemented here. It must move every off-host holder above to one
+   new value: the `PLATFORM_DB_PASSWORD` GitHub secret; `platform-db-password`
+   through a reviewed `gcp-platform` plan and apply; the PostgreSQL role and
+   protected password file through `gcp-platform-pg.yml` with the new
+   `DITTO_PG_PASSWORD`; and the Platform app `.env` for both environments
+   through `gcp-platform-app.yml`, followed by a reviewed app restart.
+   Platform impact: once the role password changes, new database connections
+   from both the dev and prod Platform APIs fail until their `.env` is
+   re-rendered and the apps restart. Existing sessions stay authenticated.
+   Schedule it as a maintenance window for both environments. Its own
+   verification must show that the previous password no longer authenticates.
+3. **Clean up.** Run the cleanup playbook with the reviewed source revision,
+   without exporting any password.
+4. **Re-materialize.** Export the new value from `platform-db-password` only in
+   the controller environment as `DITTO_CODING_PG_PASSWORD`, run the
+   materialization playbook and unset it.
+5. **Verify.** Before starting anything, confirm that the materialization's
+   owner, mode and digest checks passed, that the cleanup report names the
+   reviewed source revision, that both Platform APIs connect, and that a
+   bounded native-service database query from the Coding host succeeds with
+   the new copies. Then start services through their own
+   reviewed procedure.
+
+Runtime roots written before step 2 still contain the previous password. After
+step 2 it no longer authenticates, but the files stay retained evidence. Decide
+their retention or disposal as a separate evidence change, never through this
+role.
 
 No automated database password rotation exists for this path.

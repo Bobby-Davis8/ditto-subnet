@@ -1,7 +1,9 @@
 ---
 # Remove only the native Coding host's two PostgreSQL environment copies. This is
-# a separate protected operation for rollback or before re-materializing a new
-# password. It needs no secret: do not export DITTO_CODING_PG_PASSWORD for it.
+# a separate protected operation for rollback, or step 3 of the ordered rotation
+# in infra/docs/coding-hosted-postgres-v2.md. Removal is not revocation: the ditto
+# password stays valid, including in retained runtime roots, until it is rotated.
+# It needs no secret: do not export DITTO_CODING_PG_PASSWORD for it.
 # It stops nothing, so stop the worker and every custody instance first.
 #
 #   GCP_OSLOGIN_USER=… ansible-playbook -i infra/ansible/inventory/gcp.yml \
