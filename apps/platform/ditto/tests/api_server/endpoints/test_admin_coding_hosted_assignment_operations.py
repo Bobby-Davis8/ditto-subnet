@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import defaultdict
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ditto.api_models.coding_hosted_assignment_admin import AdminHostedAssignmentDetail
 from ditto.db.models import (
     CodingHostedAssignment,
     CodingHostedAssignmentCancellation,
@@ -24,6 +27,12 @@ from ditto.db.models import (
     CodingHostedResultDelivery,
     CodingHostedTerminalFinalization,
     CodingHostedTerminalReservation,
+)
+from ditto.db.queries.coding_hosted_admission import HostedAssignmentAuthority
+from ditto.db.queries.coding_hosted_operations import (
+    get_hosted_assignment_detail,
+    hosted_assignment_detail,
+    list_hosted_assignment_summaries,
 )
 from ditto.db.queries.coding_hosted_private import close_hosted_private_task
 from ditto.tests.api_server.endpoints.test_admin_coding_hosted_assignments import (
@@ -132,6 +141,10 @@ async def test_cancel_requires_exact_confirmation_and_digest_then_replays(
         url, headers=_HEADERS, json=_cancel_body(evaluation, digest, reason="  short ")
     )
     assert short.status_code == 422
+    long = await client.post(
+        url, headers=_HEADERS, json=_cancel_body(evaluation, digest, reason="x" * 513)
+    )
+    assert long.status_code == 422
     assert await _count(session_maker, CodingHostedAssignmentCancellation) == 0
 
     cancelled = await client.post(
@@ -221,9 +234,12 @@ async def test_operator_create_replay_is_refused_after_cancel(
     replay = await client.post(_URL, headers=_HEADERS, json=create)
     assert replay.status_code == 409
     assert "cancelled" in replay.json()["message"]
+    # The published control-plane states never widen; the flag is additive.
     control = await client.get("/api/v1/admin/coding-control-plane", headers=_HEADERS)
     assert control.status_code == 200, control.text
-    assert control.json()["native_operations"][0]["state"] == "cancelled"
+    operation = control.json()["native_operations"][0]
+    assert (operation["state"], operation["cancelled"]) == ("aborted", True)
+    assert operation["close_reason"] == "aborted"
 
 
 @pytest.mark.asyncio
@@ -362,6 +378,163 @@ async def test_detail_redacts_private_state_and_sums_accounting(
         "max_patch_bytes",
     ):
         assert f'"{key}"' not in text
+
+
+async def _detail_with_commit_mid_read(
+    maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    evaluation: UUID,
+    commit,
+) -> AdminHostedAssignmentDetail:
+    """Commit ``commit()`` from another session right after the detail row read."""
+
+    async with maker() as session:
+        execute = session.execute
+        committed: list[object] = []
+
+        async def execute_then_commit(statement, *args, **kwargs):
+            result = await execute(statement, *args, **kwargs)
+            if not committed and isinstance(statement, Select):
+                committed.append(await commit())
+            return result
+
+        monkeypatch.setattr(session, "execute", execute_then_commit)
+        detail = await get_hosted_assignment_detail(session, evaluation_id=evaluation)
+    assert committed
+    return AdminHostedAssignmentDetail.model_validate(detail, from_attributes=True)
+
+
+@pytest.mark.asyncio
+async def test_detail_is_one_snapshot_when_evidence_commits_mid_read(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority, worker, _, _, ledger, grant = await inference_fixture(session_maker)
+    evaluation = authority.evaluation_id
+    assert await ledger.revoke(grant)
+    await _freeze(session_maker, authority, worker)
+
+    # A terminal (plus claim, close and deliveries) committing after the row
+    # read is simply not observed; it can never pair presence with no outcome.
+    view = await _detail_with_commit_mid_read(
+        session_maker,
+        monkeypatch,
+        evaluation,
+        lambda: _seed_terminal_chain(session_maker, authority, worker),
+    )
+    assert view.state == "running" and view.terminal_outcome is None
+    assert view.terminal is None and view.grading_claimed_at is None
+    assert view.private_task is not None and view.private_task.closed_at is None
+    assert (view.delivery_count, view.deliveries) == (0, [])
+
+    async def deliver_again() -> None:
+        async with session_maker() as session, session.begin():
+            session.add(
+                CodingHostedResultDelivery(
+                    result_sha256="c1" * 32,
+                    evaluation_id=evaluation,
+                    validator_hotkey=authority.validator_hotkey,
+                    body={},
+                )
+            )
+
+    # The delivery page is a second statement; the snapshot keeps it equal to
+    # the counts read with the row.
+    view = await _detail_with_commit_mid_read(
+        session_maker, monkeypatch, evaluation, deliver_again
+    )
+    assert view.terminal is not None
+    assert view.terminal.outcome == view.terminal_outcome == "completed"
+    assert view.state == "completed"
+    assert (view.delivery_count, view.acknowledged_count) == (2, 1)
+    assert len(view.deliveries) == 2 and view.deliveries_truncated is False
+    assert "c1" * 32 not in {row.result_sha256 for row in view.deliveries}
+
+
+@pytest.mark.asyncio
+async def test_list_total_and_page_share_one_snapshot(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _publication_receipt(Ed25519PrivateKey.generate())
+    bundle = (_registration(receipt), receipt)
+    for _ in range(2):
+        await _seed(session_maker, registration_bundle=bundle)
+
+    async with session_maker() as session:
+        execute = session.execute
+        created: list[HostedAssignmentAuthority] = []
+
+        async def execute_then_create(statement, *args, **kwargs):
+            result = await execute(statement, *args, **kwargs)
+            if not created and isinstance(statement, Select):
+                created.append(await _seed(session_maker, registration_bundle=bundle))
+            return result
+
+        monkeypatch.setattr(session, "execute", execute_then_create)
+        summaries, total, _ = await list_hosted_assignment_summaries(
+            session, limit=100, offset=0
+        )
+    assert created
+    assert total == len(summaries) == 2
+    assert created[0].evaluation_id not in {row.evaluation_id for row in summaries}
+
+
+def _unit_row(**values: object) -> defaultdict[str, object]:
+    now = datetime(2026, 9, 14, 12, tzinfo=UTC)
+    row: defaultdict[str, object] = defaultdict(lambda: None)
+    row.update(
+        evaluation_id=uuid4(),
+        attempt_id=uuid4(),
+        release_row_id=uuid4(),
+        registration_sha256="1" * 64,
+        agent_id=uuid4(),
+        validator_hotkey=f"5{'V' * 47}",
+        artifact_sha256="2" * 64,
+        screened_image_sha256="3" * 64,
+        assignment_sha256="4" * 64,
+        created_at=now,
+        expires_at=now.replace(hour=13),
+        started_at=now,
+        acknowledged=False,
+        registered_actor="test-operator",
+        registered_reason="synthetic shadow approval",
+        observed_at=now,
+        deadline_unix=int(now.timestamp()) + 3600,
+        selection_sha256="5" * 64,
+        policy_sha256="6" * 64,
+        execution_profile_sha256="7" * 64,
+        grading_profile_sha256="8" * 64,
+        delivery_count=0,
+        acknowledged_count=0,
+    )
+    row.update(values)
+    return row
+
+
+def test_detail_takes_terminal_presence_and_outcome_from_one_row() -> None:
+    reserved = datetime(2026, 9, 14, 12, 30, tzinfo=UTC)
+    view = AdminHostedAssignmentDetail.model_validate(
+        hosted_assignment_detail(
+            _unit_row(
+                terminal_reserved_at=reserved,
+                terminal_outcome="candidate_failure",
+                terminal_evidence_sha256="a4" * 32,
+            ),
+            (),
+        ),
+        from_attributes=True,
+    )
+    assert view.terminal is not None
+    assert view.terminal.outcome == view.terminal_outcome == "candidate_failure"
+    assert view.terminal.reserved_at == reserved
+    assert view.state == "running" and not view.cancellable
+    assert hosted_assignment_detail(_unit_row(), ()).terminal is None
+    # A reservation without an outcome is a named refusal, never a half view.
+    with pytest.raises(ValueError, match="outcome"):
+        hosted_assignment_detail(_unit_row(terminal_reserved_at=reserved), ())
+    with pytest.raises(ValueError, match="outcome"):
+        hosted_assignment_detail(_unit_row(terminal_outcome="resolved"), ())
 
 
 async def _seed_terminal_chain(

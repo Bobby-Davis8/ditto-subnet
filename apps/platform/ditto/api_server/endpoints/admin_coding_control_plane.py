@@ -36,7 +36,7 @@ def _state(
     now: datetime,
     cancelled: bool = False,
 ) -> CodingHostedOperationState:
-    return hosted_operation_state(
+    state = hosted_operation_state(
         started_at=assignment.started_at,
         admitted_at=assignment.admitted_at,
         expires_at=assignment.expires_at,
@@ -45,6 +45,10 @@ def _state(
         cancelled=cancelled,
         now=now,
     )
+    # This projection keeps its published seven states so a Backroom deployed
+    # before cancellation still parses it. A cancellation already closed any
+    # bound task as aborted; the record's ``cancelled`` flag carries the rest.
+    return "aborted" if state == "cancelled" else state
 
 
 @router.get("", response_model=AdminCodingControlPlaneResponse)
@@ -106,6 +110,7 @@ async def get_coding_control_plane(
             frozen=task is not None and task.frozen_at is not None,
             closed_at=task.closed_at if task is not None else None,
             close_reason=task.close_reason if task is not None else None,
+            cancelled=cancellation is not None,
             registered_actor=assignment.actor,
             registered_reason=assignment.reason,
             shadow_only=True,

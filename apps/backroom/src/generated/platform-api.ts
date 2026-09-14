@@ -14106,6 +14106,11 @@ export interface components {
              * Format: uuid
              */
             attempt_id: string;
+            /**
+             * Cancelled
+             * @default false
+             */
+            cancelled: boolean;
             /** Close Reason */
             close_reason: ("completed" | "failed" | "aborted") | null;
             /** Closed At */
@@ -14152,7 +14157,7 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "pending_admission" | "admitted" | "running" | "completed" | "failed" | "aborted" | "expired" | "cancelled";
+            state: "pending_admission" | "admitted" | "running" | "completed" | "failed" | "aborted" | "expired";
             /** Validator Hotkey */
             validator_hotkey: string;
             /**

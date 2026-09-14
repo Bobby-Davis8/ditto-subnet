@@ -67,10 +67,16 @@ class AdminHostedAssignmentCreated(AdminHostedAssignmentPlan):
 
 # --- Bounded cancellation and redacted lifecycle views -----------------------
 
+# The single source for these vocabularies in the operator views and queries.
 HostedTerminalOutcome = Literal[
     "completed", "candidate_failure", "infrastructure_failure", "integrity_failure"
 ]
 HostedCloseReason = Literal["completed", "failed", "aborted"]
+# The admin lifecycle views add ``cancelled``; the published control-plane
+# projection keeps its seven states and carries a separate flag instead.
+HostedAssignmentState = Literal[CodingHostedOperationState, "cancelled"]
+# Same trimmed bound as the assignment registration reason.
+MAX_HOSTED_REASON_LENGTH = 512
 
 
 class AdminHostedAssignmentCancelRequest(CodingEvaluationModel):
@@ -85,8 +91,10 @@ class AdminHostedAssignmentCancelRequest(CodingEvaluationModel):
     @classmethod
     def reason_is_substantive(cls, value: str) -> str:
         value = value.strip()
-        if len(value) < 8:
-            raise ValueError("reason must contain at least 8 characters")
+        if not 8 <= len(value) <= MAX_HOSTED_REASON_LENGTH:
+            raise ValueError(
+                f"reason must contain 8 to {MAX_HOSTED_REASON_LENGTH} characters"
+            )
         return value
 
     @field_validator("actor")
@@ -116,7 +124,7 @@ class AdminHostedAssignmentSummary(CodingEvaluationModel):
     artifact_sha256: Sha256
     screened_image_sha256: Sha256
     assignment_sha256: Sha256
-    state: CodingHostedOperationState
+    state: HostedAssignmentState
     created_at: datetime
     expires_at: datetime
     admitted_at: datetime | None

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import delete, func, insert, select, text, update
+from sqlalchemy import delete, event, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from ditto.api_models.coding_canonical import coding_canonical_json_bytes
@@ -24,6 +24,8 @@ from ditto.db.models import (
 from ditto.db.queries.coding_hosted_admission import (
     HostedAdmissionError,
     HostedAdmissionView,
+    HostedAssignmentCancelledError,
+    _locked_assignment,
     create_hosted_assignment,
     start_hosted_attempt,
 )
@@ -68,6 +70,47 @@ async def _start(maker, authority, worker=None):
             expected_attempt_id=authority.attempt_id,
             worker_id=worker or uuid4(),
         )
+
+
+async def _wait_for_lock_waiter(maker, *, owner_pid: int, table: str) -> None:
+    """Observe a real PostgreSQL lock wait on ``table`` behind ``owner_pid``."""
+    for _ in range(500):
+        async with maker() as observer:
+            waiting = await observer.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE pid <> :owner AND pid <> pg_backend_pid() "
+                    "AND datname = current_database() "
+                    "AND wait_event_type = 'Lock' AND query ILIKE :pattern"
+                ),
+                {"owner": owner_pid, "pattern": f"%{table}%"},
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"no lock waiter on {table}")
+
+
+def _task_insert(selection):
+    return insert(CodingHostedPrivateTask).values(
+        evaluation_id=selection.evaluation_id,
+        selection_sha256=selection.digest(),
+        selection_authority=selection.projection(),
+        catalog_index=selection.catalog_index,
+        max_patch_bytes=selection.max_patch_bytes,
+        authoring_grant_id=uuid4(),
+        grading_grant_id=uuid4(),
+    )
+
+
+def _cancellation_insert(authority, prior_state="pending_admission"):
+    return insert(CodingHostedAssignmentCancellation).values(
+        evaluation_id=authority.evaluation_id,
+        assignment_sha256=authority.digest(),
+        prior_state=prior_state,
+        reason=REASON,
+        actor=ACTOR,
+    )
 
 
 async def _snapshot(maker, authority):
@@ -123,19 +166,9 @@ async def test_pending_assignment_cancel_blocks_admission_and_binding(session_ma
                 reason="synthetic shadow test",
             )
     # PostgreSQL refuses a private task bound behind the Python guard's back.
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="cancelled"):
         async with session_maker() as session, session.begin():
-            await session.execute(
-                insert(CodingHostedPrivateTask).values(
-                    evaluation_id=authority.evaluation_id,
-                    selection_sha256=selection.digest(),
-                    selection_authority=selection.projection(),
-                    catalog_index=selection.catalog_index,
-                    max_patch_bytes=selection.max_patch_bytes,
-                    authoring_grant_id=uuid4(),
-                    grading_grant_id=uuid4(),
-                )
-            )
+            await session.execute(_task_insert(selection))
     after, task, cancellation = await _snapshot(session_maker, authority)
     assert task is None and cancellation is not None
     # The assignment row is retained exactly as approved.
@@ -257,7 +290,11 @@ async def test_replay_is_idempotent_and_conflicts_never_rewrite(session_maker):
             await _cancel(session_maker, authority, **changes)
     with pytest.raises(HostedAssignmentNotFoundError):
         await _cancel(session_maker, replace(authority, evaluation_id=uuid4()))
-    for audit in ({"reason": "short"}, {"actor": "   "}):
+    for audit in (
+        {"reason": "short"},
+        {"reason": "x" * 513},
+        {"actor": "   "},
+    ):
         with pytest.raises(HostedCancellationError, match="audit"):
             await _cancel(session_maker, authority, **audit)
     _, _, cancellation = await _snapshot(session_maker, authority)
@@ -358,9 +395,9 @@ async def test_expired_unstarted_assignment_is_visible_and_still_cancellable(
         expired = await get_hosted_assignment_detail(
             session, evaluation_id=authority.evaluation_id
         )
-    assert expired.summary.state == "expired"
-    assert expired.summary.assignment.started_at is None
-    assert expired.observed_at >= expired.summary.assignment.expires_at
+    assert expired.state == "expired" and expired.cancellable
+    assert expired.started_at is None
+    assert expired.observed_at >= expired.expires_at
     with pytest.raises(HostedAdmissionError, match="expired"):
         await _admit(session_maker, _request(authority))
     result = await _cancel(session_maker, authority)
@@ -372,13 +409,14 @@ async def test_expired_unstarted_assignment_is_visible_and_still_cancellable(
         summaries, total, _ = await list_hosted_assignment_summaries(
             session, limit=1, offset=0
         )
-    assert cancelled.summary.state == "cancelled"
+    assert cancelled.state == "cancelled" and not cancelled.cancellable
     assert cancelled.cancellation is not None
+    assert cancelled.cancellation.prior_state == "pending_admission"
     assert total == 1 and summaries[0].state == "cancelled"
     closed = {
         "started_at": None,
         "admitted_at": None,
-        "expires_at": expired.summary.assignment.expires_at,
+        "expires_at": expired.expires_at,
         "closed_at": expired.observed_at,
         "close_reason": "aborted",
         "now": expired.observed_at,
@@ -386,3 +424,119 @@ async def test_expired_unstarted_assignment_is_visible_and_still_cancellable(
     # Cancellation outranks the close reason; a close outranks expiry.
     assert hosted_operation_state(**closed, cancelled=True) == "cancelled"
     assert hosted_operation_state(**closed, cancelled=False) == "aborted"
+
+
+async def test_database_refuses_cancellation_while_the_task_is_open(session_maker):
+    authority, _, _, _ = await _prepared(session_maker, start=False)
+    with pytest.raises(IntegrityError, match="closed private task"):
+        async with session_maker() as session, session.begin():
+            await session.execute(_cancellation_insert(authority))
+    _, task, cancellation = await _snapshot(session_maker, authority)
+    assert cancellation is None
+    assert task is not None and task.closed_at is None
+
+
+async def test_replay_recloses_a_task_left_open_behind_the_ledger(session_maker):
+    authority, _, _, _ = await _prepared(session_maker, start=False)
+    # Only a trigger bypass can produce this state; replay must still converge.
+    async with session_maker() as session, session.begin():
+        await session.execute(text("SET LOCAL session_replication_role = replica"))
+        await session.execute(_cancellation_insert(authority))
+    replay = await _cancel(session_maker, authority)
+    assert replay.idempotent and replay.private_task_closed
+    _, task, _ = await _snapshot(session_maker, authority)
+    assert task is not None and task.close_reason == "aborted"
+    again = await _cancel(session_maker, authority)
+    assert again.idempotent and not again.private_task_closed
+
+
+async def test_task_insert_waits_for_an_uncommitted_cancellation(session_maker):
+    authority, selection, _, _ = await _prepared(session_maker, start=False, bind=False)
+
+    async def bind_behind_the_query_layer():
+        async with session_maker() as session, session.begin():
+            await session.execute(_task_insert(selection))
+
+    async with session_maker() as canceller, canceller.begin():
+        owner = int(await canceller.scalar(text("SELECT pg_backend_pid()")) or 0)
+        await cancel_hosted_assignment(
+            canceller,
+            evaluation_id=authority.evaluation_id,
+            expected_assignment_sha256=authority.digest(),
+            actor=ACTOR,
+            reason=REASON,
+        )
+        binding = asyncio.create_task(bind_behind_the_query_layer())
+        await _wait_for_lock_waiter(
+            session_maker, owner_pid=owner, table="coding_hosted_private_tasks"
+        )
+    # Without the trigger's FOR SHARE the insert would pass its unlocked check,
+    # wait only in the foreign-key check, and commit a task after cancellation.
+    with pytest.raises(IntegrityError, match="cancelled"):
+        await binding
+    _, task, cancellation = await _snapshot(session_maker, authority)
+    assert task is None and cancellation is not None
+
+
+async def test_cancellation_waits_for_an_uncommitted_task_and_closes_it(
+    session_maker,
+):
+    authority, selection, _, _ = await _prepared(session_maker, start=False, bind=False)
+    async with session_maker() as binder, binder.begin():
+        owner = int(await binder.scalar(text("SELECT pg_backend_pid()")) or 0)
+        await binder.execute(_task_insert(selection))
+        cancelling = asyncio.create_task(_cancel(session_maker, authority))
+        await _wait_for_lock_waiter(
+            session_maker, owner_pid=owner, table="coding_hosted_assignments"
+        )
+    result = await cancelling
+    assert not result.idempotent and result.private_task_closed
+    _, task, cancellation = await _snapshot(session_maker, authority)
+    assert cancellation is not None
+    assert task is not None and task.close_reason == "aborted"
+
+
+async def test_locked_authority_sees_a_cancellation_committed_during_its_wait(
+    session_maker,
+):
+    authority, _, _, _ = await _prepared(session_maker, start=False)
+    await _admit(session_maker, _request(authority))
+    async with session_maker() as canceller, canceller.begin():
+        owner = int(await canceller.scalar(text("SELECT pg_backend_pid()")) or 0)
+        await cancel_hosted_assignment(
+            canceller,
+            evaluation_id=authority.evaluation_id,
+            expected_assignment_sha256=authority.digest(),
+            actor=ACTOR,
+            reason=REASON,
+        )
+        starting = asyncio.create_task(_start(session_maker, authority))
+        await _wait_for_lock_waiter(
+            session_maker, owner_pid=owner, table="coding_hosted_assignments"
+        )
+    # The cancellation lookup must run after the lock wait; an EXISTS column in
+    # the locking SELECT keeps its pre-wait snapshot and would let start proceed.
+    with pytest.raises(HostedAssignmentCancelledError):
+        await starting
+    assignment, _, _ = await _snapshot(session_maker, authority)
+    assert assignment is not None and assignment.started_at is None
+
+
+async def test_started_assignment_lock_skips_the_cancellation_lookup(
+    engine, session_maker
+):
+    authority, _, _, _ = await _prepared(session_maker)
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        async with session_maker() as session, session.begin():
+            row = await _locked_assignment(session, authority.evaluation_id)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
+    assert row.started_at is not None
+    assert statements
+    assert not any("coding_hosted_assignment_cancellations" in s for s in statements)

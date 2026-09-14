@@ -1802,7 +1802,7 @@ class CodingHostedAssignmentCancellation(Base):
         CheckConstraint(
             "assignment_sha256 ~ '^[0-9a-f]{64}$' "
             "AND prior_state IN ('pending_admission','admitted') "
-            "AND length(trim(reason)) >= 8 "
+            "AND length(trim(reason)) BETWEEN 8 AND 512 "
             "AND length(trim(actor)) BETWEEN 1 AND 120",
             name="coding_hosted_assignment_cancellations_audit_check",
         ),

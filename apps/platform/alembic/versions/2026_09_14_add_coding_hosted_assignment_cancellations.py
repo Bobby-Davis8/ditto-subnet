@@ -5,11 +5,16 @@ Revises: e6f4a9c2d781
 Create Date: 2026-09-14
 
 A cancellation is a new immutable row; no assignment, task or evidence row is
-deleted or rewritten. Only an assignment whose attempt never started can be
-cancelled. Once the row exists PostgreSQL refuses every later change to the
-assignment (so it can never be admitted or started) and refuses binding a
-private task to it. Running attempts are stopped by the worker's own abort
-path, never by this ledger.
+deleted or rewritten. Only an assignment whose attempt never started, and whose
+bound private task (if any) is already closed, can be cancelled. Once the row
+exists PostgreSQL refuses every later change to the assignment (so it can never
+be admitted or started) and refuses binding a private task to it. Running
+attempts are stopped by the worker's own abort path, never by this ledger.
+
+Every branch serialises on the assignment row lock. Each later statement in the
+trigger takes a fresh READ COMMITTED snapshot, so it sees whatever the previous
+lock holder committed: a cancellation sees a task bound just before it, and a
+task insert waiting behind a cancellation sees that cancellation.
 """
 
 from collections.abc import Sequence
@@ -47,7 +52,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "assignment_sha256 ~ '^[0-9a-f]{64}$' "
             "AND prior_state IN ('pending_admission','admitted') "
-            "AND length(trim(reason)) >= 8 "
+            "AND length(trim(reason)) BETWEEN 8 AND 512 "
             "AND length(trim(actor)) BETWEEN 1 AND 120",
             name="coding_hosted_assignment_cancellations_audit_check",
         ),
@@ -57,7 +62,7 @@ def upgrade() -> None:
         DECLARE a coding_hosted_assignments%ROWTYPE;
         BEGIN
             IF TG_TABLE_NAME = 'coding_hosted_assignment_cancellations' THEN
-                -- Row lock serialises with admission/start on the same row.
+                -- Row lock serialises with admission, start, binding and close.
                 SELECT * INTO a FROM coding_hosted_assignments
                     WHERE evaluation_id = NEW.evaluation_id FOR UPDATE;
                 IF NOT FOUND
@@ -74,10 +79,33 @@ def upgrade() -> None:
                         'hosted cancellation requires an unstarted assignment'
                         USING ERRCODE = '23514';
                 END IF;
-            ELSIF EXISTS (
+                -- Object access is removed before the ledger row is appended.
+                IF EXISTS (
+                    SELECT 1 FROM coding_hosted_private_tasks t
+                    WHERE t.evaluation_id = NEW.evaluation_id
+                      AND t.closed_at IS NULL
+                ) THEN
+                    RAISE EXCEPTION
+                        'hosted cancellation requires a closed private task'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'coding_hosted_private_tasks' THEN
+                -- FOR SHARE waits for a cancellation holding FOR UPDATE and
+                -- makes a later cancellation wait for this insert to commit.
+                PERFORM 1 FROM coding_hosted_assignments
+                    WHERE evaluation_id = NEW.evaluation_id FOR SHARE;
+                IF EXISTS (
+                    SELECT 1 FROM coding_hosted_assignment_cancellations c
+                    WHERE c.evaluation_id = NEW.evaluation_id
+                ) THEN
+                    RAISE EXCEPTION 'hosted assignment is cancelled'
+                        USING ERRCODE = '23514';
+                END IF;
+            -- A BEFORE UPDATE row trigger fires with the row lock already held.
+            ELSIF NEW IS DISTINCT FROM OLD AND EXISTS (
                 SELECT 1 FROM coding_hosted_assignment_cancellations c
                 WHERE c.evaluation_id = NEW.evaluation_id
-            ) AND (TG_OP = 'INSERT' OR NEW IS DISTINCT FROM OLD) THEN
+            ) THEN
                 RAISE EXCEPTION 'hosted assignment is cancelled'
                     USING ERRCODE = '23514';
             END IF;

@@ -591,7 +591,7 @@ CREATE FUNCTION public.guard_hosted_assignment_cancellation() RETURNS trigger
         DECLARE a coding_hosted_assignments%ROWTYPE;
         BEGIN
             IF TG_TABLE_NAME = 'coding_hosted_assignment_cancellations' THEN
-                -- Row lock serialises with admission/start on the same row.
+                -- Row lock serialises with admission, start, binding and close.
                 SELECT * INTO a FROM coding_hosted_assignments
                     WHERE evaluation_id = NEW.evaluation_id FOR UPDATE;
                 IF NOT FOUND
@@ -608,10 +608,33 @@ CREATE FUNCTION public.guard_hosted_assignment_cancellation() RETURNS trigger
                         'hosted cancellation requires an unstarted assignment'
                         USING ERRCODE = '23514';
                 END IF;
-            ELSIF EXISTS (
+                -- Object access is removed before the ledger row is appended.
+                IF EXISTS (
+                    SELECT 1 FROM coding_hosted_private_tasks t
+                    WHERE t.evaluation_id = NEW.evaluation_id
+                      AND t.closed_at IS NULL
+                ) THEN
+                    RAISE EXCEPTION
+                        'hosted cancellation requires a closed private task'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'coding_hosted_private_tasks' THEN
+                -- FOR SHARE waits for a cancellation holding FOR UPDATE and
+                -- makes a later cancellation wait for this insert to commit.
+                PERFORM 1 FROM coding_hosted_assignments
+                    WHERE evaluation_id = NEW.evaluation_id FOR SHARE;
+                IF EXISTS (
+                    SELECT 1 FROM coding_hosted_assignment_cancellations c
+                    WHERE c.evaluation_id = NEW.evaluation_id
+                ) THEN
+                    RAISE EXCEPTION 'hosted assignment is cancelled'
+                        USING ERRCODE = '23514';
+                END IF;
+            -- A BEFORE UPDATE row trigger fires with the row lock already held.
+            ELSIF NEW IS DISTINCT FROM OLD AND EXISTS (
                 SELECT 1 FROM coding_hosted_assignment_cancellations c
                 WHERE c.evaluation_id = NEW.evaluation_id
-            ) AND (TG_OP = 'INSERT' OR NEW IS DISTINCT FROM OLD) THEN
+            ) THEN
                 RAISE EXCEPTION 'hosted assignment is cancelled'
                     USING ERRCODE = '23514';
             END IF;
@@ -1449,7 +1472,7 @@ CREATE TABLE public.coding_hosted_assignment_cancellations (
     reason text NOT NULL,
     actor text NOT NULL,
     cancelled_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT ck_coding_hosted_assignment_cancellations_coding_hosted_e78a CHECK (((assignment_sha256 ~ '^[0-9a-f]{64}$'::text) AND (prior_state = ANY (ARRAY['pending_admission'::text, 'admitted'::text])) AND (length(TRIM(BOTH FROM reason)) >= 8) AND ((length(TRIM(BOTH FROM actor)) >= 1) AND (length(TRIM(BOTH FROM actor)) <= 120))))
+    CONSTRAINT ck_coding_hosted_assignment_cancellations_coding_hosted_e78a CHECK (((assignment_sha256 ~ '^[0-9a-f]{64}$'::text) AND (prior_state = ANY (ARRAY['pending_admission'::text, 'admitted'::text])) AND ((length(TRIM(BOTH FROM reason)) >= 8) AND (length(TRIM(BOTH FROM reason)) <= 512)) AND ((length(TRIM(BOTH FROM actor)) >= 1) AND (length(TRIM(BOTH FROM actor)) <= 120))))
 );
 
 

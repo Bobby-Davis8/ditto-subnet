@@ -36,19 +36,11 @@ from ditto.api_models.coding_hosted_assignment_admin import (
     AdminHostedAssignmentPreviewRequest,
     AdminHostedAssignmentSubject,
     AdminHostedAssignmentSummary,
-    AdminHostedInferenceAccounting,
-    AdminHostedPrivateTaskStatus,
-    AdminHostedResultDelivery,
-    AdminHostedTerminalStatus,
 )
 from ditto.api_server.dependencies import get_session
 from ditto.api_server.endpoints.admin_quarantine import require_admin
 from ditto.coding_hosted_private import HostedTaskSelection
-from ditto.db.models import (
-    Agent,
-    CodingHostedAssignmentCancellation,
-    CodingPrivateV2Release,
-)
+from ditto.db.models import Agent, CodingPrivateV2Release
 from ditto.db.queries.benchmark_rollout import active_bench_version
 from ditto.db.queries.coding_certifications import active_validator_coding_certification
 from ditto.db.queries.coding_hosted_admission import (
@@ -58,9 +50,7 @@ from ditto.db.queries.coding_hosted_admission import (
     create_hosted_assignment,
 )
 from ditto.db.queries.coding_hosted_operations import (
-    HostedAssignmentDetail,
     HostedAssignmentNotFoundError,
-    HostedAssignmentSummary,
     HostedCancellationError,
     cancel_hosted_assignment,
     get_hosted_assignment_detail,
@@ -274,133 +264,6 @@ async def create_hosted_assignment_endpoint(
     )
 
 
-def _cancellation_record(
-    row: CodingHostedAssignmentCancellation,
-) -> AdminHostedAssignmentCancellationRecord:
-    return AdminHostedAssignmentCancellationRecord.model_validate(
-        {
-            "assignment_sha256": row.assignment_sha256,
-            "prior_state": row.prior_state,
-            "reason": row.reason,
-            "actor": row.actor,
-            "cancelled_at": row.cancelled_at,
-        }
-    )
-
-
-def _summary_fields(summary: HostedAssignmentSummary) -> dict[str, object]:
-    row = summary.assignment
-    return {
-        "evaluation_id": row.evaluation_id,
-        "attempt_id": row.attempt_id,
-        "release_row_id": row.release_row_id,
-        "registration_sha256": row.registration_sha256,
-        "agent_id": row.agent_id,
-        "validator_hotkey": row.validator_hotkey,
-        "artifact_sha256": row.artifact_sha256,
-        "screened_image_sha256": row.screened_image_sha256,
-        "assignment_sha256": row.assignment_sha256,
-        "state": summary.state,
-        "created_at": row.created_at,
-        "expires_at": row.expires_at,
-        "admitted_at": row.admitted_at,
-        "started_at": row.started_at,
-        "cancelled_at": summary.cancelled_at,
-        "closed_at": summary.closed_at,
-        "close_reason": summary.close_reason,
-        "terminal_outcome": summary.terminal_outcome,
-        "acknowledged": summary.acknowledged,
-        "registered_actor": row.actor,
-        "registered_reason": row.reason,
-    }
-
-
-def _detail(detail: HostedAssignmentDetail) -> AdminHostedAssignmentDetail:
-    summary = detail.summary
-    row = summary.assignment
-    inference = detail.inference
-    return AdminHostedAssignmentDetail.model_validate(
-        {
-            **_summary_fields(summary),
-            "observed_at": detail.observed_at,
-            "deadline_unix": row.authority["deadline_unix"],
-            "selection_sha256": row.authority["selection_sha256"],
-            "policy_sha256": row.authority["policy_sha256"],
-            "execution_profile_sha256": row.authority["execution_profile_sha256"],
-            "grading_profile_sha256": row.authority["grading_profile_sha256"],
-            "admission_request_sha256": row.admission_request_sha256,
-            "cancellable": row.started_at is None and detail.cancellation is None,
-            "cancellation": (
-                _cancellation_record(detail.cancellation)
-                if detail.cancellation is not None
-                else None
-            ),
-            "private_task": (
-                AdminHostedPrivateTaskStatus.model_validate(
-                    {
-                        "bound_at": detail.private_task.bound_at,
-                        "selection_sha256": detail.private_task.selection_sha256,
-                        "frozen_at": detail.private_task.frozen_at,
-                        "closed_at": detail.private_task.closed_at,
-                        "close_reason": detail.private_task.close_reason,
-                    }
-                )
-                if detail.private_task is not None
-                else None
-            ),
-            "authoring_evidence_reserved_at": detail.authoring_evidence_reserved_at,
-            "authoring_evidence_finalized_at": detail.authoring_evidence_finalized_at,
-            "grading_claimed_at": detail.grading_claimed_at,
-            "terminal": (
-                AdminHostedTerminalStatus(
-                    outcome=detail.terminal.outcome,
-                    evidence_sha256=detail.terminal.evidence_sha256,
-                    reserved_at=detail.terminal.reserved_at,
-                    finalized_at=detail.terminal.finalized_at,
-                )
-                if detail.terminal is not None
-                else None
-            ),
-            "inference": (
-                AdminHostedInferenceAccounting(
-                    policy_sha256=inference.policy_sha256,
-                    issued_at=inference.issued_at,
-                    expires_at=inference.expires_at,
-                    revoked_at=inference.revoked_at,
-                    request_limit=inference.request_limit,
-                    prompt_token_limit=inference.prompt_token_limit,
-                    completion_token_limit=inference.completion_token_limit,
-                    cost_usd_micros_limit=inference.cost_usd_micros_limit,
-                    request_count=inference.request_count,
-                    reserved_count=inference.reserved_count,
-                    settled_count=inference.settled_count,
-                    uncertain_count=inference.uncertain_count,
-                    charged_prompt_tokens=inference.charged_prompt_tokens,
-                    charged_completion_tokens=inference.charged_completion_tokens,
-                    charged_cost_usd_micros=inference.charged_cost_usd_micros,
-                    settled_prompt_tokens=inference.settled_prompt_tokens,
-                    settled_completion_tokens=inference.settled_completion_tokens,
-                    settled_cost_usd_micros=inference.settled_cost_usd_micros,
-                    verified=inference.verified,
-                )
-                if inference is not None
-                else None
-            ),
-            "delivery_count": detail.delivery_count,
-            "acknowledged_count": detail.acknowledged_count,
-            "deliveries": [
-                AdminHostedResultDelivery(
-                    result_sha256=delivery.result_sha256,
-                    delivered_at=delivery.delivered_at,
-                    acknowledged_at=delivery.acknowledged_at,
-                )
-                for delivery in detail.deliveries
-            ],
-            "deliveries_truncated": detail.delivery_count > len(detail.deliveries),
-        }
-    )
-
-
 @router.get("", response_model=AdminHostedAssignmentList)
 async def list_hosted_assignments(
     response: Response,
@@ -421,7 +284,7 @@ async def list_hosted_assignments(
         offset=offset,
         observed_at=now,
         assignments=[
-            AdminHostedAssignmentSummary.model_validate(_summary_fields(summary))
+            AdminHostedAssignmentSummary.model_validate(summary, from_attributes=True)
             for summary in summaries
         ],
     )
@@ -443,7 +306,7 @@ async def get_hosted_assignment(
         )
     except HostedAssignmentNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    return _detail(detail)
+    return AdminHostedAssignmentDetail.model_validate(detail, from_attributes=True)
 
 
 @router.post("/{evaluation_id}/cancel", response_model=AdminHostedAssignmentCancelled)
@@ -471,7 +334,9 @@ async def cancel_hosted_assignment_endpoint(
                 actor=payload.actor,
                 reason=payload.reason,
             )
-            cancellation = _cancellation_record(result.row)
+            cancellation = AdminHostedAssignmentCancellationRecord.model_validate(
+                result.row, from_attributes=True
+            )
     except HostedAssignmentNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except HostedCancellationError as error:
@@ -486,5 +351,7 @@ async def cancel_hosted_assignment_endpoint(
         idempotent=result.idempotent,
         private_task_closed=result.private_task_closed,
         cancellation=cancellation,
-        assignment=_detail(detail),
+        assignment=AdminHostedAssignmentDetail.model_validate(
+            detail, from_attributes=True
+        ),
     )
