@@ -20,6 +20,14 @@ import urllib.request
 
 GENERATION = re.compile(r"gen-[A-Za-z0-9_-]{1,180}\Z")
 ENDPOINT = "https://openrouter.ai/api/v1/generation"
+# Exact requested ID -> canonical_slug observed in OpenRouter /api/v1/models.
+# No prefix/date stripping: unrelated dated variants must fail validation.
+MODEL_ALIASES = {"openai/gpt-5.6-luna": "openai/gpt-5.6-luna-20260709",
+                 "google/gemini-3.1-flash-lite": "google/gemini-3.1-flash-lite-20260507"}
+
+
+def model_matches(requested, resolved):
+    return requested == resolved or MODEL_ALIASES.get(requested) == resolved
 
 
 def digest(path):
@@ -40,6 +48,17 @@ def money(value):
     if not result.is_finite() or result < 0:
         raise ValueError("charge must be finite and nonnegative")
     return result
+
+
+def decimal_stats(values):
+    ordered = sorted(values)
+    count = len(ordered)
+    if not count:
+        return None
+    midpoint = count // 2
+    median = ordered[midpoint] if count % 2 else (ordered[midpoint - 1] + ordered[midpoint]) / 2
+    return {"mean": str(sum(ordered, Decimal(0)) / count), "median": str(median),
+            "p95_nearest_rank": str(ordered[math.ceil(0.95 * count) - 1])}
 
 
 def report_requests(report):
@@ -146,6 +165,12 @@ def sanitize_receipt(generation, raw):
     charge = money(data.get("total_cost"))
     result = {"generation_id": generation, "status": "ok",
               "total_cost_usd": str(charge), "basis": "openrouter_generation.total_cost"}
+    result["charge_scope"] = "OpenRouter account charge only; excludes separately billed BYOK vendor usage"
+    upstream = data.get("upstream_inference_cost")
+    result["upstream_inference_cost_usd"] = None if upstream is None else str(money(upstream))
+    result["upstream_cost_classification"] = (
+        "provider_reported_byok_estimate_not_vendor_invoice" if data.get("is_byok") is True
+        else "not_added_for_non_byok_or_unknown_route")
     for key in ("model", "provider_name", "created_at", "is_byok", "cancelled",
                 "native_tokens_prompt", "native_tokens_completion", "native_tokens_reasoning",
                 "native_tokens_cached", "tokens_prompt", "tokens_completion"):
@@ -232,6 +257,9 @@ def summarize(requests, receipts):
     indexed = receipt_index(receipts)
     totals, counts, missing = defaultdict(Decimal), defaultdict(int), defaultdict(int)
     provisional, observed_counts = defaultdict(Decimal), defaultdict(int)
+    byok_estimates, byok_counts, byok_missing = defaultdict(Decimal), defaultdict(int), defaultdict(int)
+    route_unknown = defaultdict(int)
+    resolved_models = set()
     stages, seen = set(), set()
     for request in requests:
         key = (request["case_id"], request["stage"])
@@ -242,8 +270,10 @@ def summarize(requests, receipts):
                 raise ValueError("duplicate request attribution")
             seen.add(generation)
         receipt = indexed.get(generation, {})
-        if receipt.get("model") and receipt["model"] != request["model"]:
+        if receipt.get("model") and not model_matches(request["model"], receipt["model"]):
             raise ValueError("receipt model does not match attributed request")
+        if receipt.get("model"):
+            resolved_models.add((request["model"], receipt["model"]))
         if observed_cost(receipt) is not None:
             provisional[key] += money(observed_cost(receipt))
             observed_counts[key] += 1
@@ -252,10 +282,22 @@ def summarize(requests, receipts):
             continue
         totals[key] += money(receipt.get("total_cost_usd"))
         counts[key] += 1
+        if receipt.get("is_byok") is True:
+            byok_counts[key] += 1
+            if receipt.get("upstream_inference_cost_usd") is None:
+                byok_missing[key] += 1
+            else:
+                byok_estimates[key] += money(receipt["upstream_inference_cost_usd"])
+        elif receipt.get("is_byok") is not False:
+            route_unknown[key] += 1
     rows = [{"case_id": case, "stage": stage,
              "recorded_cost_usd": str(totals[(case, stage)]),
              "provisional_observed_cost_usd": str(provisional[(case, stage)]),
              "generations_with_observed_cost": observed_counts[(case, stage)],
+             "byok_generations": byok_counts[(case, stage)],
+             "byok_upstream_estimate_usd": str(byok_estimates[(case, stage)]),
+             "missing_byok_upstream_costs": byok_missing[(case, stage)],
+             "unknown_route_generations": route_unknown[(case, stage)],
              "priced_generations": counts[(case, stage)],
              "missing_generations": missing[(case, stage)],
              "saved_generation_coverage_complete": missing[(case, stage)] == 0}
@@ -267,14 +309,29 @@ def summarize(requests, receipts):
         case_totals[case] += totals[(case, stage)]
     captured_stats = None
     if not any(missing.values()) and case_totals:
-        ordered = sorted(case_totals.values())
-        count = len(ordered)
-        midpoint = count // 2
-        median = ordered[midpoint] if count % 2 else (ordered[midpoint - 1] + ordered[midpoint]) / 2
-        captured_stats = {"mean": str(sum(ordered, Decimal(0)) / count), "median": str(median),
-                          "p95_nearest_rank": str(ordered[math.ceil(0.95 * count) - 1])}
+        captured_stats = decimal_stats(case_totals.values())
+    known_route_costs = not any(missing.values()) and not any(byok_missing.values()) and not any(route_unknown.values())
+    selected_estimate = sum(totals.values(), Decimal(0)) + sum(byok_estimates.values(), Decimal(0))
+    estimated_questions = []
+    for case in sorted(case_totals):
+        keys = [key for key in stages if key[0] == case]
+        known = all(not missing[key] and not byok_missing[key] and not route_unknown[key] for key in keys)
+        value = sum((totals[key] + byok_estimates[key] for key in keys), Decimal(0))
+        estimated_questions.append({"case_id": case, "estimated_cost_usd": str(value) if known else None})
     return {"per_case": rows, "recorded_cost_usd": str(sum(totals.values(), Decimal(0))),
-            "recorded_cost_basis": "GET-generation-reconciled charges only",
+            "recorded_cost_basis": "GET-generation-reconciled OpenRouter account charges ONLY; BYOK vendor usage excluded",
+            "requested_resolved_models": [{"requested": a, "resolved": b, "exact_alias_mapping_used": a != b}
+                                          for a, b in sorted(resolved_models)],
+            "byok_generations": sum(byok_counts.values()),
+            "byok_upstream_estimate_usd": str(sum(byok_estimates.values(), Decimal(0))),
+            "missing_byok_upstream_costs": sum(byok_missing.values()),
+            "unknown_route_generations": sum(route_unknown.values()),
+            "selected_generation_estimated_cost_usd": str(selected_estimate) if known_route_costs else None,
+            "selected_generation_estimated_mean_per_question_usd": str(selected_estimate / len(case_totals)) if known_route_costs and case_totals else None,
+            "selected_generation_estimated_cost_per_question_usd": estimated_questions,
+            "selected_generation_estimated_cost_per_question_stats_usd": decimal_stats(
+                [money(row["estimated_cost_usd"]) for row in estimated_questions]) if known_route_costs else None,
+            "selected_generation_estimate_scope": "OpenRouter charges plus provider-reported BYOK upstream estimates, not vendor invoice or full lifecycle. Null if any captured generation/route/upstream estimate is unknown.",
             "provisional_observed_cost_usd": str(sum(provisional.values(), Decimal(0))),
             "provisional_cost_note": "Observed stream/response snapshots without finality proof. Not additive to reconciled charges; may differ from final charges.",
             "recorded_cost_by_stage_usd": stage_totals,
@@ -282,7 +339,7 @@ def summarize(requests, receipts):
             "captured_generation_cost_per_question_usd": [{"case_id": case, "recorded_cost_usd": str(value)}
                                                           for case, value in sorted(case_totals.items())],
             "captured_generation_cost_per_question_stats_usd": captured_stats,
-            "stats_scope": "Captured reader/judge generations only; not all-attempt or full-lifecycle costs. Stats omitted when any captured generation is unpriced.",
+            "stats_scope": "Captured OpenRouter account charges only; excludes BYOK vendor usage, uncaptured attempts and lifecycle costs. Stats omitted when any captured generation is unpriced.",
             "priced_generations": sum(counts.values()), "missing_generations": sum(missing.values()),
             "saved_generation_coverage_complete": not any(missing.values()),
             "all_attempts_coverage_proven": False,
@@ -300,12 +357,26 @@ def write_new(path, data):
         stream.write("\n")
 
 
+def classify_attempt(summary, classification):
+    if classification not in ("unclassified", "invalid_attempt"):
+        raise ValueError("unsupported cost attempt classification")
+    result = dict(summary, attempt_classification=classification)
+    if classification == "invalid_attempt":
+        result.update(include_in_valid_run_metrics=False, include_in_campaign_spend=True,
+                      captured_generation_cost_per_question_stats_usd=None,
+                      selected_generation_estimated_cost_per_question_stats_usd=None,
+                      selected_generation_estimated_mean_per_question_usd=None,
+                      stats_scope="INVALID attempt: attributed spend only; excluded from valid-run cost/performance means. No accuracy result.")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--receipts", type=Path, help="Existing sanitized receipt JSON; offline by default")
     parser.add_argument("--journal", type=Path, help="Passive backend reader/judge usage journal")
     parser.add_argument("--fetch", action="store_true", help="Authorized read-only provider metadata lookup")
+    parser.add_argument("--attempt-classification", choices=("unclassified", "invalid_attempt"), default="unclassified")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
@@ -326,7 +397,7 @@ def main():
               "captured_at": datetime.now(timezone.utc).isoformat(),
               "report_sha256": digest(args.report), "report_run_id": report.get("run_id"),
               "helper_sha256": digest(__file__), "receipts": receipts,
-              "summary": summarize(requests, receipts)}
+              "summary": classify_attempt(summarize(requests, receipts), args.attempt_classification)}
     if args.journal:
         result["journal_sha256"] = digest(args.journal)
     write_new(args.output, result)

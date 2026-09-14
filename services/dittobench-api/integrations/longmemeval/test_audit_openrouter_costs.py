@@ -165,6 +165,60 @@ class CostAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate generation receipt"):
             audit.merge_receipts([row, row], [row])
 
+    def test_byok_zero_router_charge_preserves_nonzero_upstream_estimate(self):
+        request = {"case_id": "q", "stage": "reader", "model": "openai/gpt-5.6-luna", "generation_id": "gen-a"}
+        receipt = audit.sanitize_receipt("gen-a", {"data": {"id": "gen-a", "model": "openai/gpt-5.6-luna-20260709",
+                                          "total_cost": 0, "is_byok": True, "upstream_inference_cost": "0.0017014"}})
+        summary = audit.summarize([request], [receipt])
+        self.assertEqual(summary["recorded_cost_usd"], "0")
+        self.assertEqual(summary["byok_upstream_estimate_usd"], "0.0017014")
+        self.assertEqual(summary["selected_generation_estimated_cost_usd"], "0.0017014")
+        self.assertEqual(summary["selected_generation_estimated_cost_per_question_usd"],
+                         [{"case_id": "q", "estimated_cost_usd": "0.0017014"}])
+        self.assertEqual(summary["selected_generation_estimated_cost_per_question_stats_usd"]["median"], "0.0017014")
+        self.assertTrue(summary["requested_resolved_models"][0]["exact_alias_mapping_used"])
+        self.assertIsNone(summary["full_lifecycle_cost_usd"])
+        self.assertEqual(receipt["upstream_cost_classification"], "provider_reported_byok_estimate_not_vendor_invoice")
+
+    def test_byok_missing_upstream_does_not_estimate_free(self):
+        request = {"case_id": "q", "stage": "reader", "model": "m", "generation_id": "gen-a"}
+        receipt = audit.sanitize_receipt("gen-a", {"data": {"id": "gen-a", "model": "m", "total_cost": 0, "is_byok": True}})
+        summary = audit.summarize([request], [receipt])
+        self.assertEqual(summary["missing_byok_upstream_costs"], 1)
+        self.assertIsNone(summary["selected_generation_estimated_cost_usd"])
+        self.assertIsNone(summary["selected_generation_estimated_cost_per_question_usd"][0]["estimated_cost_usd"])
+
+    def test_alias_mapping_exact_not_any_date_or_prefix(self):
+        self.assertTrue(audit.model_matches("openai/gpt-5.6-luna", "openai/gpt-5.6-luna-20260709"))
+        self.assertTrue(audit.model_matches("google/gemini-3.1-flash-lite", "google/gemini-3.1-flash-lite-20260507"))
+        self.assertFalse(audit.model_matches("google/gemini-3.1-flash-lite", "google/gemini-3.1-flash-lite-20260508"))
+        for resolved in ["openai/gpt-5.6-luna-20260809", "openai/gpt-5.6-luna-other", "openai/gpt-5.6-sol-20260709"]:
+            self.assertFalse(audit.model_matches("openai/gpt-5.6-luna", resolved))
+            request = {"case_id": "q", "stage": "reader", "model": "openai/gpt-5.6-luna", "generation_id": "gen-a"}
+            receipt = audit.sanitize_receipt("gen-a", {"data": {"id": "gen-a", "model": resolved, "total_cost": 0}})
+            with self.assertRaises(ValueError):
+                audit.summarize([request], [receipt])
+
+    def test_non_byok_upstream_not_added_twice_and_unknown_route_incomplete(self):
+        request = {"case_id": "q", "stage": "reader", "model": "m", "generation_id": "gen-a"}
+        raw = {"id": "gen-a", "model": "m", "total_cost": "1", "is_byok": False, "upstream_inference_cost": "0.8"}
+        receipt = audit.sanitize_receipt("gen-a", {"data": raw})
+        self.assertEqual(audit.summarize([request], [receipt])["selected_generation_estimated_cost_usd"], "1")
+        del receipt["is_byok"]
+        self.assertIsNone(audit.summarize([request], [receipt])["selected_generation_estimated_cost_usd"])
+
+    def test_invalid_attempt_keeps_spend_excludes_valid_question_means(self):
+        request = {"case_id": "q", "stage": "reader", "model": "m", "generation_id": "gen-a"}
+        receipt = audit.sanitize_receipt("gen-a", {"data": {"id": "gen-a", "model": "m", "total_cost": "1", "is_byok": False}})
+        summary = audit.classify_attempt(audit.summarize([request], [receipt]), "invalid_attempt")
+        self.assertEqual(summary["recorded_cost_usd"], "1")
+        self.assertEqual(summary["selected_generation_estimated_cost_usd"], "1")
+        self.assertTrue(summary["include_in_campaign_spend"])
+        self.assertFalse(summary["include_in_valid_run_metrics"])
+        self.assertIsNone(summary["captured_generation_cost_per_question_stats_usd"])
+        self.assertIsNone(summary["selected_generation_estimated_mean_per_question_usd"])
+        self.assertIsNone(summary["selected_generation_estimated_cost_per_question_stats_usd"])
+
     def test_preparation_inventory_scoped_no_raw_content(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

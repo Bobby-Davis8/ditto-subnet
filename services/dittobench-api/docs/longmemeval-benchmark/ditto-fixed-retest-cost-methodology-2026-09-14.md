@@ -31,9 +31,14 @@ allows historical lookup by saved generation ID. These are provider-reported
 account charges, not the backend's price-table estimates. OpenRouter says its
 [credit/API prices are USD-denominated](https://openrouter.ai/docs/faq).
 Keep `usage.cost` and generation `total_cost` as alternative evidence for the
-same request, not additive charges. Do not add upstream cost again. BYOK/vendor
-invoices, taxes and credit-purchase fees require separate evidence; a provider
-usage charge is not a complete cash-invoice reconciliation.
+same OpenRouter account charge, not additive charges. For ordinary non-BYOK
+requests, do not add upstream cost again. BYOK differs: separately preserve
+`upstream_inference_cost`, classify it as a provider-reported BYOK estimate,
+and report it beside the OpenRouter charge. OpenRouter's
+[activity documentation](https://openrouter.ai/docs/cookbook/administration/activity-export)
+describes external BYOK spend as market-rate estimates that may not reflect
+vendor discounts. BYOK/vendor invoices, taxes and credit-purchase fees require
+separate evidence; this is not a complete cash-invoice reconciliation.
 
 Use exact decimal arithmetic. Missing, malformed, inaccessible or delayed
 cost records remain unknown. An explicit provider zero is distinct from no
@@ -76,6 +81,116 @@ reauthentication. No provider key was retrieved and no historical generation
 lookup succeeded. No credentials are included in artifacts. This is an
 authentication blocker for recovery, not evidence of zero charges.
 No full fixed-graph reader/judge run has launched at this accounting handoff.
+
+### Resumed authentication and real-provider compatibility check
+
+After the user's reauthentication, local-key access and a historical generation
+GET succeeded. That supersedes the authentication blocker above. The first
+verified Luna receipt has `is_byok=true`, OpenRouter `total_cost=0`, and
+`upstream_inference_cost=0.0017014`. It is **not free inference**. The auditor
+now separates reconciled OpenRouter charges, BYOK upstream estimates, and an
+explicitly estimated selected-generation sum. That sum remains unknown when
+any referenced receipt, route classification or BYOK upstream estimate is
+missing; full lifecycle cost stays unknown regardless.
+
+The receipt resolves requested `openai/gpt-5.6-luna` to
+`openai/gpt-5.6-luna-20260709`. The public
+[OpenRouter model catalog](https://openrouter.ai/api/v1/models) independently
+returns that exact `canonical_slug` for that exact requested ID. The auditor
+allows only this explicit mapping, records both names and rejects arbitrary
+dated/prefix variants. A private sanitized receipt/catalog artifact is retained
+at `.tmp/cost-recovery/real-receipt-and-model-catalog.json`, SHA-256
+`eaee286d3def2d64aeec4eed5eae81d5f9a61134804aeda5293eb06d35761cb1`.
+
+A bounded analytics-schema GET returned HTTP 403 with the local inference key.
+The [official analytics guide](https://openrouter.ai/docs/cookbook/administration/analytics-cost-control)
+requires a management key. No account-spend query or account-balance attribution
+was performed. Historical seed/dream spend is still unestablished; successful
+reader metadata recovery does not fill that gap.
+
+### Recovered historical reader-only costs
+
+Both saved reader sets are now fully reconciled by generation ID: 1,281 OFF and
+1,312 ON, with no missing metadata receipts. Every saved generation is BYOK.
+These are the original fully seeded/dreamed, isolated LongMemEval-S Luna-medium
+conditions, not new fixed-graph results. The [frozen result report](ditto-full-memory-results-2026-09-13.md)
+records the exact OFF `20260913-054910-1b5755609b3ea95660fdba289e6a747adb8c5dae`
+and ON `20260913-055526-1b5755609b3ea95660fdba289e6a747adb8c5dae` runs.
+
+| Saved reader set | OpenRouter charges | BYOK upstream estimate | Estimated mean / median / p95 per question |
+| --- | ---: | ---: | --- |
+| OFF, 500 questions | $0 | $1.86599670 | $0.0037319934 / $0.00218895 / $0.00706200 |
+| ON, 500 questions | $0 | $1.56381271 | $0.00312762542 / $0.002258765 / $0.00756430 |
+
+The BYOK values are provider-reported upstream estimates, not independently
+verified vendor invoices. Query statistics sum saved reader generations per
+question; p95 uses nearest rank. Original preparation, historical judge calls,
+embeddings and failed attempts without saved IDs remain excluded/unknown.
+Neither row is an all-in evaluation cost. The exclusive-create recovery
+artifacts are `.tmp/cost-recovery/historical-{off,on}-cost-recovery.json`, SHA-256
+OFF `b6f35c67fd59bd89dd9ae7602ff7541c6abf9d1e19259db13bd8e59230c77563`
+and ON `a2c759afa536b37bbeed2fdbddd19a57b97e6386626a2dfd335e6da927ab9b83`.
+Their reaggregated per-question artifacts retain these input hashes plus the
+updated auditor hash; no original source/report/checkpoint was modified.
+
+The first actual judge receipt from the new run also resolves
+`google/gemini-3.1-flash-lite` to catalog-confirmed
+`google/gemini-3.1-flash-lite-20260507`. That exact mapping is now allowed, with
+all other variants still rejected. Its non-BYOK OpenRouter charge is
+$0.00007575, separately recorded from reader BYOK estimates. This one receipt
+verifies compatibility, not complete new-run cost coverage.
+
+### Invalid first fixed attempt: preserve expenditure, never a QA result
+
+The first fixed-source `5ad4eee2` attempt is **invalid**: its copied fixture
+lacked the `memory_pairs.metadata` schema column required by native hydration,
+so seeded contexts were empty. It was stopped; the cancellation wiring did not
+drain on SIGINT and the process ultimately exited 137 after forced termination.
+Its retained successful query/judge status fields do not make this a valid
+memory evaluation. No accuracy score is reported from this attempt.
+
+Closed evidence contains 384 checkpoint rows and 3,532 usage-journal events,
+deduplicated to 1,959 captured generations: 1,575 reader and 384 judge calls
+across 391 represented questions. The journal includes calls for cases absent
+from the completed checkpoint. The checkpoint SHA-256 is
+`5101d8966fad878f3ca2386ffada7df0eb6f2cc18e7006a4af6d12e467829b52`;
+the journal SHA-256 is
+`b7adeb0e07d0c580a340f011845b576394040bb9c56babf0d5feaa154c3e15a0`.
+
+Recovery uses a clearly marked `invalid_attempt` cost-only wrapper containing
+only case/model/provider-ID references, never copied scores, questions, answers
+or a fabricated complete run. `--attempt-classification invalid_attempt`
+retains the attributed charges but suppresses valid-run per-question cost
+mean/median/p95 fields. Charge this expenditure to the overall campaign, not
+the later valid rerun's per-question reader mean. Calls charged before any
+generation ID was observed remain an explicit unknown. The future valid run
+must use corrected schema and fail-closed native hydration/seed-context gates;
+no failed attempt is silently replaced in the accounting record.
+
+GET recovery completed for all 1,959 captured generations, with zero missing
+metadata/route/upstream-estimate records. It records $0.03843100 in OpenRouter
+judge charges and $0 in OpenRouter reader charges, plus $1.02672237 in reported
+BYOK reader estimates: **$1.06515337 estimated captured invalid-attempt spend**.
+Two provider receipts are marked canceled and remain included. The private
+`invalid-5ad-cost-recovery.json` SHA-256 is
+`15dfefc434ada33931d7515b790289681f5db77c2cd51ef404d8d326e5ef43f5`;
+its generation-receipt journal SHA-256 is
+`7b220d3846de55d5b600714772b19de3a28fa88f8d38c3d6ef5549d5609c2e5b`.
+This is not an invoice or a valid-query mean; preparation, embeddings and
+charges before capture still prevent a complete lifecycle total.
+
+### Additional acceptance gate for the corrected full run
+
+Run the independent `audit_backend_run.py` with
+`--require-hydration-preflight` for the corrected condition. It requires
+`lme_hydration_preflight=native-hydration-v1`, an exact checked-user count
+matching the unique selected fixture users (500 for this dataset), and a
+positive integer `seed_pair_count` in every case. With graph retrieval ON it
+also requires positive discovery calls, zero failures, a true discovery-complete
+flag and consistent zero reason counters. Historical audit behavior stays
+unchanged unless this flag is explicitly requested; no old result is rewritten.
+The flag proves the recorded acceptance checks, not unqualified generalization
+or absence of other retrieval limitations.
 
 ## New capture and aggregation
 
