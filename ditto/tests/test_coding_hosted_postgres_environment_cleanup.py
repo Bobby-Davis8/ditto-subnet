@@ -5,7 +5,6 @@ import json
 import os
 import pwd
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -33,6 +32,7 @@ PARENTS = [
     "/var/lib/ditto-coding-hosted/private",
 ]
 OWNERS = ("ditto-coding-custody", "ditto-coding-hosted")
+REHEARSAL_GATE = "DITTO_ANSIBLE_REHEARSAL"
 
 HOST = "Require the exact host, source and removal confirmation"
 LISTING = "List live worker and custody units"
@@ -295,6 +295,44 @@ def test_playbook_fixture_ci_and_docs_registration() -> None:
     assert "does not rotate" in section
 
 
+def test_rehearsal_runs_only_in_the_infra_ansible_job() -> None:
+    workflows = ROOT / ".github/workflows"
+    infra = yaml.safe_load((workflows / "infra-ci.yml").read_text())
+    this_file = str(Path(__file__).relative_to(ROOT))
+    for trigger in ("pull_request", "push"):
+        assert this_file in infra[True][trigger]["paths"]
+    (step,) = [
+        step
+        for job in infra["jobs"].values()
+        for step in job["steps"]
+        if REHEARSAL_GATE in step.get("env", {})
+    ]
+    assert step in infra["jobs"]["ansible"]["steps"]
+    assert step["env"] == {REHEARSAL_GATE: "1"}
+    assert step["working-directory"] == "${{ github.workspace }}"
+    # Lock-pinned pytest plugins plus the locked PyYAML version; no project install.
+    assert step["run"].split() == [
+        "uv",
+        "run",
+        "--locked",
+        "--only-group",
+        "dev",
+        "--with",
+        "pyyaml==6.0.3",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-rs",
+        this_file,
+    ]
+    # The job installs uv before any step that uses it.
+    uses = [step.get("uses", "") for step in infra["jobs"]["ansible"]["steps"]]
+    assert any(action.startswith("astral-sh/setup-uv@") for action in uses)
+    for other in workflows.glob("*.yml"):
+        if other.name != "infra-ci.yml":
+            assert REHEARSAL_GATE not in other.read_text(), other.name
+
+
 # Local rehearsal: the role's own enabled tasks run through ansible-core 2.21.2
 # against a temporary tree. Only this test rewrites paths, owners and the unit
 # listing; the role has no such inputs.
@@ -456,11 +494,12 @@ def _report(root: Path, verb: str, removed: list[str], absent: list[str]) -> str
     )
 
 
+# The rehearsal needs uvx, network access and coreutils, so root pytest shards
+# skip it and run only the structural tests above. The infra-ci Ansible job sets
+# the gate; with it set nothing else can skip, so a missing tool fails.
 rehearsal = pytest.mark.skipif(
-    shutil.which("uvx") is None
-    or not Path("/usr/bin/unlink").is_file()
-    or not Path("/usr/bin/printf").is_file(),
-    reason="local rehearsal needs uvx and coreutils unlink/printf",
+    os.environ.get(REHEARSAL_GATE) != "1",
+    reason=f"set {REHEARSAL_GATE}=1 to run the ansible-core rehearsal",
 )
 
 
