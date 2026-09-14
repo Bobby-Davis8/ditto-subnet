@@ -76,6 +76,9 @@ held-out generalization result or an apples-to-apples competitor comparison.
 Backend [#2743](https://github.com/ditto-assistant/backend/pull/2743) merged as
 `1617a1c14d80eb71b5890de0b056b67de3047a9e` after all 12 checks passed/skipped
 at `b44cf52cedb049f45d9be9d435b3a3998bcccb6c`.
+[Production deployment 34875709596](https://github.com/ditto-assistant/backend/actions/runs/34875709596)
+also completed successfully. A subsequent public build check returned the exact
+merge SHA `1617a1c14d80eb71b5890de0b056b67de3047a9e`, containing both changes.
 
 Strict prepared runs with `-require-graph -checkpoint PATH` durably save reader
 answers and original receipts before judging. Resume can judge that same answer
