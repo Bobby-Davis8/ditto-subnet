@@ -29,7 +29,7 @@ def full_analysis(control, treatment, ids, pilot_ids):
     result["previously_piloted_60"] = metrics(a, b, pilot_ids)
     result["remaining_440"] = metrics(a, b, sorted(set(ids)-set(pilot_ids)))
     result["wilson_95"] = {name: wilson(result[name+"_correct"], 500) for name in ("summary", "slices")}
-    result["scope"] = "Full500 isolated LongMemEval-S matched presentation experiment, graph ON both arms. Single reader/judge run, no regrading, no clean held-out or graph-treatment claim. Prior60 and remaining440 shown separately; ranker training overlap remains."
+    result["scope"] = "Full500 isolated LongMemEval-S matched presentation experiment, graph ON both arms. One first-pass run per arm plus explicitly documented failure-only recovery, not repeated stochastic trials. No clean held-out or graph-treatment claim. Prior60 and remaining440 shown separately; ranker training overlap remains."
     return result
 
 
