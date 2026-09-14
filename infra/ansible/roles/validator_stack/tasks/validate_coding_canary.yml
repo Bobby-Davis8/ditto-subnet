@@ -1,0 +1,19 @@
+---
+# Pure input validation for the default-off certification canary. It runs before
+# the role mutates the host and is exercised on localhost by
+# infra/ansible/tests/validator-stack-coding-canary.yml.
+- name: Validate the default-off certification canary profile
+  ansible.builtin.assert:
+    that:
+      - not (validator_stack_coding_canary_enabled | bool) or validator_stack_dittobench_coding_canary_enabled | bool
+      - not (validator_stack_coding_canary_enabled | bool) or not (validator_stack_coding_executor_connectivity_canary_enabled | bool)
+      - not (validator_stack_coding_canary_enabled | bool) or not (validator_stack_coding_executor_connectivity_canary_run_enabled | bool)
+      - not (validator_stack_coding_canary_enabled | bool) or (validator_stack_coding_canary_poll_seconds | float >= 1 and validator_stack_coding_canary_poll_seconds | float <= 300)
+      - not (validator_stack_dittobench_coding_canary_enabled | bool) or validator_stack_coding_runtime_image_digest is match('^sha256:[0-9a-f]{64}$')
+      - not (validator_stack_dittobench_coding_canary_enabled | bool) or validator_stack_coding_runtime_image_repository is match('^[a-z0-9]([a-z0-9._/:-]{0,253}[a-z0-9])?$')
+      - not (validator_stack_dittobench_coding_canary_enabled | bool) or '..' not in validator_stack_coding_runtime_image_repository
+    fail_msg: >-
+      The certification canary requires the scorer canary gate, is exclusive with
+      the executor connectivity canary, polls within [1, 300] seconds, and needs
+      a reviewed runtime image repository plus an immutable sha256 digest. Keep
+      both canary switches false until the whole profile has been approved.

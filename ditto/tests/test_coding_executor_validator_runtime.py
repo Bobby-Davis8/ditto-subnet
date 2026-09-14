@@ -10,6 +10,11 @@ DEFAULTS = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
 TASKS = (ROLE / "tasks/main.yml").read_text()
 ENVIRONMENT = (ROLE / "templates/validator.env.j2").read_text()
 VERIFIER = (ROLE / "files/verify-coding-executor-client-identity.sh").read_text()
+CANARY_VALIDATION = (ROLE / "tasks/validate_coding_canary.yml").read_text()
+CANARY_RENDER_TEST = (
+    ROOT / "infra/ansible/tests/validator-stack-coding-canary.yml"
+).read_text()
+INFRA_CI = (ROOT / ".github/workflows/infra-ci.yml").read_text()
 
 
 def test_validator_executor_runtime_and_identity_are_independently_default_off() -> (
@@ -64,3 +69,32 @@ def test_validator_environment_keeps_credentials_out_of_values() -> None:
         assert f"/run/secrets/{filename}" in ENVIRONMENT
     assert "BEGIN CERTIFICATE" not in ENVIRONMENT
     assert "BEGIN PRIVATE KEY" not in ENVIRONMENT
+
+
+def test_validator_certification_canary_is_double_gated_default_off() -> None:
+    assert DEFAULTS["validator_stack_dittobench_coding_canary_enabled"] is False
+    assert DEFAULTS["validator_stack_coding_canary_enabled"] is False
+    assert DEFAULTS["validator_stack_coding_canary_poll_seconds"] == 10
+    assert DEFAULTS["validator_stack_coding_runtime_image_repository"] == ""
+    assert DEFAULTS["validator_stack_coding_runtime_image_digest"] == ""
+    # Validation runs before the first host mutation in the role.
+    include = "ansible.builtin.include_tasks: validate_coding_canary.yml"
+    assert TASKS.index(include) < TASKS.index("ansible.builtin.command")
+    assert "validator_stack_dittobench_coding_canary_enabled | bool" in (
+        CANARY_VALIDATION
+    )
+    assert "'^sha256:[0-9a-f]{64}$'" in CANARY_VALIDATION
+    for line in (
+        "VALIDATOR_CODING_CANARY_ENABLED={{ 'true' if "
+        "validator_stack_coding_canary_enabled | bool else 'false' }}",
+        "DITTOBENCH_CODING_CANARY_ENABLED={{ 'true' if "
+        "dittobench_coding_canary_enabled else 'false' }}",
+        "DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST={{ "
+        "validator_stack_coding_runtime_image_digest if "
+        "dittobench_coding_canary_enabled else '' }}",
+    ):
+        assert line in ENVIRONMENT
+    # Compose pins the image-baked pack; the host must not select another root.
+    assert "\nDITTOBENCH_CODING_CERTIFICATION_ROOT=" not in ENVIRONMENT
+    assert "tests/validator-stack-coding-canary.yml" in INFRA_CI
+    assert "validator-stack-coding-canary-reject.yml" in CANARY_RENDER_TEST

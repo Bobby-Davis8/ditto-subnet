@@ -1,0 +1,109 @@
+---
+# Exercise the validator-stack certification canary gates and environment
+# rendering on localhost. This never converges the role or touches a host.
+- name: Verify the validator certification canary is default-off and fail-closed
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - ../roles/validator_stack/defaults/main.yml
+  vars:
+    validator_stack_pylon_token: pylon-token-placeholder
+    validator_stack_broker_token: broker-token-placeholder
+    validator_stack_wandb_api_key: wandb-placeholder
+    canary_template: ../roles/validator_stack/templates/validator.env.j2
+    valid_digest: "sha256:{{ '1' * 64 }}"
+    valid_repository: registry.invalid/ditto/coding-runtime
+  tasks:
+    - name: Accept the shipped defaults
+      ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
+
+    - name: Render the shipped defaults as disabled and empty
+      vars:
+        rendered: "{{ lookup('template', canary_template).splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - not validator_stack_coding_canary_enabled
+          - not validator_stack_dittobench_coding_canary_enabled
+          - validator_stack_coding_runtime_image_repository == ''
+          - validator_stack_coding_runtime_image_digest == ''
+          - "'VALIDATOR_CODING_CANARY_ENABLED=false' in rendered"
+          - "'VALIDATOR_CODING_CANARY_POLL_SECONDS=10' in rendered"
+          - "'DITTOBENCH_CODING_CANARY_ENABLED=false' in rendered"
+          - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' in rendered"
+          - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' in rendered"
+          - rendered | select('match', 'DITTOBENCH_CODING_CERTIFICATION_ROOT') | list == []
+
+    - name: Keep runtime image identity out of a disabled scorer
+      vars:
+        validator_stack_coding_runtime_image_repository: "{{ valid_repository }}"
+        validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+        rendered: "{{ lookup('template', canary_template).splitlines() }}"
+      ansible.builtin.assert:
+        that:
+          - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' in rendered"
+          - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' in rendered"
+
+    - name: Accept and render a staged scorer-only profile
+      vars:
+        validator_stack_dittobench_coding_canary_enabled: true
+        validator_stack_coding_runtime_image_repository: "{{ valid_repository }}"
+        validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+      block:
+        - name: Validate the staged scorer-only profile
+          ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
+
+        - name: Render the staged scorer-only profile
+          vars:
+            rendered: "{{ lookup('template', canary_template).splitlines() }}"
+          ansible.builtin.assert:
+            that:
+              - "'VALIDATOR_CODING_CANARY_ENABLED=false' in rendered"
+              - "'DITTOBENCH_CODING_CANARY_ENABLED=true' in rendered"
+              - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' + valid_repository in rendered"
+              - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' + valid_digest in rendered"
+
+    - name: Accept and render the complete canary profile
+      vars:
+        validator_stack_coding_canary_enabled: true
+        validator_stack_dittobench_coding_canary_enabled: true
+        validator_stack_coding_canary_poll_seconds: 30
+        validator_stack_coding_runtime_image_repository: "{{ valid_repository }}"
+        validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+      block:
+        - name: Validate the complete canary profile
+          ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
+
+        - name: Render the complete canary profile
+          vars:
+            rendered: "{{ lookup('template', canary_template).splitlines() }}"
+          ansible.builtin.assert:
+            that:
+              - "'VALIDATOR_CODING_CANARY_ENABLED=true' in rendered"
+              - "'VALIDATOR_CODING_CANARY_POLL_SECONDS=30' in rendered"
+              - "'DITTOBENCH_CODING_CANARY_ENABLED=true' in rendered"
+              - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' + valid_repository in rendered"
+              - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' + valid_digest in rendered"
+
+    - name: Reject every incomplete or unsafe profile
+      ansible.builtin.include_tasks: validator-stack-coding-canary-reject.yml
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+      loop:
+        - {name: validator worker without the scorer route, validator: true, scorer: false}
+        - {name: validator worker beside the connectivity canary, validator: true, connectivity: true}
+        - {name: validator worker beside the connectivity run, validator: true, connectivity_run: true}
+        - {name: poll below one second, validator: true, poll: 0}
+        - {name: poll above five minutes, validator: true, poll: 301}
+        - {name: empty runtime digest, digest: ""}
+        - {name: tag instead of digest, digest: latest}
+        - {name: uppercase runtime digest, digest: "sha256:{{ 'A' * 64 }}"}
+        - {name: short runtime digest, digest: "sha256:{{ '1' * 63 }}"}
+        - {name: empty runtime repository, repository: ""}
+        - {name: repository with a digest, repository: "registry.invalid/runtime@sha256:{{ '1' * 64 }}"}
+        - {name: repository with a trailing slash, repository: registry.invalid/runtime/}
+        - {name: repository with a parent segment, repository: registry.invalid/../runtime}
+        - {name: repository with uppercase, repository: Registry.invalid/runtime}
+        - {name: repository with whitespace, repository: "registry.invalid/run time"}
