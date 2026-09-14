@@ -52,6 +52,7 @@ type configWire struct {
 	DockerSocket            string                      `json:"docker_socket"`
 	RouterListen            string                      `json:"router_listen"`
 	RouterNamespace         string                      `json:"router_namespace"`
+	RouterExpiresAtUnix     int64                       `json:"router_expires_at_unix"`
 	EgressNetwork           string                      `json:"egress_network"`
 	EgressProxy             string                      `json:"egress_proxy"`
 	ExecutorRepository      string                      `json:"executor_repository"`
@@ -84,7 +85,13 @@ type runtimeConfig struct {
 type rootlessRouter struct {
 	address netip.AddrPort
 	helper  string
+	// expires is min(router_expires_at_unix, attempt deadline). Candidate
+	// access through the in-namespace listener ends then.
+	expires time.Time
 }
+
+// maxRouterAuthority matches the connectivity profile's longest window.
+const maxRouterAuthority = 24 * time.Hour
 
 func privateJSON(path string, maximum int64, value any) ([]byte, error) {
 	body, err := readPrivate(path, maximum)
@@ -193,6 +200,11 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 	var router *rootlessRouter
 	switch wire.RouterNamespace {
 	case "", routerNamespaceHost:
+		// Host nftables bound this listener's candidate traffic; the field
+		// belongs only to the rootless-netns window below.
+		if wire.RouterExpiresAtUnix != 0 {
+			return nil, ErrConfig
+		}
 	case routerNamespaceRootless:
 		// The helper is bound to the installed worker's own bundle directory; no
 		// configured path can select another executable.
@@ -201,7 +213,17 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 		if workerErr != nil || !filepath.IsAbs(worker) || !executable(helper) || !executable(rootlessnetns.NsenterExecutable) {
 			return nil, ErrConfig
 		}
-		router = &rootlessRouter{address: routerAddress, helper: helper}
+		// router_expires_at_unix is the connectivity profile's expires_at_unix,
+		// which host nftables can no longer enforce for this traffic.
+		now := time.Now()
+		expires := time.Unix(wire.RouterExpiresAtUnix, 0)
+		if wire.RouterExpiresAtUnix <= 0 || !expires.After(now) || expires.After(now.Add(maxRouterAuthority)) {
+			return nil, ErrConfig
+		}
+		if h.Deadline.Before(expires) {
+			expires = h.Deadline
+		}
+		router = &rootlessRouter{address: routerAddress, helper: helper, expires: expires}
 	default:
 		return nil, ErrConfig
 	}

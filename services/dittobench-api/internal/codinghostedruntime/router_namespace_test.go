@@ -1,17 +1,24 @@
 package codinghostedruntime
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ditto-assistant/dittobench-api/internal/codingcertifier"
+	"github.com/ditto-assistant/dittobench-api/internal/codingsource"
 	"github.com/ditto-assistant/dittobench-api/internal/rootlessnetns"
 )
 
@@ -23,6 +30,10 @@ func rootlessHelper(t *testing.T) string {
 	}
 	return filepath.Join(filepath.Dir(worker), rootlessnetns.HelperExecutableName)
 }
+
+// routerAuthority is a valid connectivity expiry before the fixture's
+// twenty-minute attempt deadline.
+func routerAuthority() int64 { return time.Now().Add(10 * time.Minute).Unix() }
 
 func rootlessExecutable(helper string) func(string) bool {
 	return func(path string) bool {
@@ -62,6 +73,7 @@ func TestRootlessRouterNamespaceBindsGatewayHelperAndNsenter(t *testing.T) {
 	wire, path := fixture(t)
 	wire.RouterNamespace = routerNamespaceRootless
 	wire.RouterListen = "172.17.0.1:18080"
+	wire.RouterExpiresAtUnix = routerAuthority()
 	writeConfig(t, path, wire)
 	config, err := loadConfigChecked(path, rootlessExecutable(helper))
 	if err != nil {
@@ -106,7 +118,7 @@ func TestRootlessRouterNamespaceRejectsDriftBeforeConsumingAttempt(t *testing.T)
 	} {
 		t.Run(name, func(t *testing.T) {
 			wire, path := fixture(t)
-			wire.RouterNamespace, wire.RouterListen = tc.mode, tc.listen
+			wire.RouterNamespace, wire.RouterListen, wire.RouterExpiresAtUnix = tc.mode, tc.listen, routerAuthority()
 			writeConfig(t, path, wire)
 			if _, err := loadConfigChecked(path, tc.executable); err != ErrConfig {
 				t.Fatal("rootless router drift accepted")
@@ -147,6 +159,9 @@ func TestRouterListenUsesOneAddressPolicyInBothNamespaces(t *testing.T) {
 		} {
 			wire, path := fixture(t)
 			wire.RouterNamespace, wire.RouterListen = mode, listen
+			if mode == routerNamespaceRootless {
+				wire.RouterExpiresAtUnix = routerAuthority()
+			}
 			writeConfig(t, path, wire)
 			config, err := loadConfigChecked(path, rootlessExecutable(helper))
 			if (err == nil) != accepted {
@@ -203,6 +218,7 @@ func TestRootlessRouterNeverFallsBackToHostListener(t *testing.T) {
 	helper := rootlessHelper(t)
 	wire, path := fixture(t)
 	wire.RouterNamespace, wire.RouterListen = routerNamespaceRootless, address.String()
+	wire.RouterExpiresAtUnix = routerAuthority()
 	writeConfig(t, path, wire)
 	config, err := loadConfigChecked(path, rootlessExecutable(helper))
 	if err != nil {
@@ -246,6 +262,7 @@ func TestRootlessRouterRequiresDaemonGatewayBeforeNamespaceListener(t *testing.T
 	helper := rootlessHelper(t)
 	wire, path := fixture(t)
 	wire.RouterNamespace, wire.RouterListen = routerNamespaceRootless, "172.17.0.1:18080"
+	wire.RouterExpiresAtUnix = routerAuthority()
 	writeConfig(t, path, wire)
 	config, err := loadConfigChecked(path, rootlessExecutable(helper))
 	if err != nil {
@@ -274,14 +291,21 @@ func TestRootlessRouterRequiresDaemonGatewayBeforeNamespaceListener(t *testing.T
 	}
 	fakeDocker(t, "172.17.0.1")
 	listener, err := listenRouter(t.Context(), config)
-	if err != nil || listener != sentinel {
-		t.Fatalf("matching gateway refused: %v", err)
+	if err != nil || listener == sentinel || listener.Addr() != sentinel.Addr() {
+		t.Fatalf("matching gateway refused or served without its authority bound: %v", err)
+	}
+	if listener.Close() != nil {
+		t.Fatal("authority listener close")
+	}
+	if _, err := sentinel.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatal("closing the router listener left the namespace listener open")
 	}
 	want := rootlessnetns.Config{Address: netip.MustParseAddrPort("172.17.0.1:18080"), DockerSocket: wire.DockerSocket, HelperExecutable: helper}
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("namespace listener config drift: %+v", calls)
 	}
 	rootlessListen = func(context.Context, rootlessnetns.Config) (net.Listener, error) { return nil, errors.New("refused") }
+	calls = nil
 	if listener, err := listenRouter(t.Context(), config); err == nil || listener != nil {
 		t.Fatal("namespace refusal became a listener")
 	}
@@ -324,6 +348,7 @@ func rootlessFixture(t *testing.T) (configWire, string) {
 	t.Helper()
 	wire, path := fixture(t)
 	wire.RouterNamespace, wire.RouterListen = routerNamespaceRootless, "172.17.0.1:18080"
+	wire.RouterExpiresAtUnix = routerAuthority()
 	writeConfig(t, path, wire)
 	return wire, path
 }
@@ -397,4 +422,149 @@ func TestRunRefusesRootlessRouterPrecheckBeforeConsumingAttempt(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRootlessRouterAuthorityIsBoundedByExpiryAndDeadline(t *testing.T) {
+	helper := rootlessHelper(t)
+	load := func(t *testing.T, mode string, expires int64) (*runtimeConfig, configWire, error) {
+		wire, path := fixture(t)
+		wire.RouterNamespace, wire.RouterExpiresAtUnix = mode, expires
+		if mode == routerNamespaceRootless {
+			wire.RouterListen = "172.17.0.1:18080"
+		}
+		writeConfig(t, path, wire)
+		config, err := loadConfigChecked(path, rootlessExecutable(helper))
+		return config, wire, err
+	}
+	early := time.Now().Add(5 * time.Minute).Unix()
+	config, _, err := load(t, routerNamespaceRootless, early)
+	if err != nil || !config.router.expires.Equal(time.Unix(early, 0)) {
+		t.Fatalf("connectivity expiry before the deadline not used: %v", err)
+	}
+	config, wire, err := load(t, routerNamespaceRootless, time.Now().Add(2*time.Hour).Unix())
+	if err != nil || !config.router.expires.Equal(wire.Harness.Deadline) {
+		t.Fatalf("attempt deadline before the connectivity expiry not used: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		mode    string
+		expires int64
+	}{
+		"rootless_missing":    {routerNamespaceRootless, 0},
+		"rootless_negative":   {routerNamespaceRootless, -1},
+		"rootless_expired":    {routerNamespaceRootless, time.Now().Add(-time.Second).Unix()},
+		"rootless_unbounded":  {routerNamespaceRootless, time.Now().Add(maxRouterAuthority + time.Hour).Unix()},
+		"host_with_expiry":    {routerNamespaceHost, early},
+		"default_with_expiry": {"", early},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, wire, err := load(t, tc.mode, tc.expires); err != ErrConfig {
+				t.Fatalf("router expiry %d accepted in mode %q", tc.expires, tc.mode)
+			} else if _, err := os.Stat(filepath.Join(wire.StateRoot, "consumed")); !os.IsNotExist(err) {
+				t.Fatal("invalid router expiry consumed attempt")
+			}
+		})
+	}
+}
+
+// End to end on the real source router: the listener that listenRouter returns
+// admits the registered source before the window ends, then closes established
+// connections, makes the kernel refuse new ones, and still shuts down cleanly.
+func TestRootlessRouterAuthorityEndsCandidateAccessAndClosesCleanly(t *testing.T) {
+	local := localPrivateAddress(t)
+	probe, err := net.Listen("tcp4", netip.AddrPortFrom(local, 0).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := netip.MustParseAddrPort(probe.Addr().String())
+	helper := rootlessHelper(t)
+	wire, path := fixture(t)
+	wire.RouterNamespace, wire.RouterListen, wire.RouterExpiresAtUnix = routerNamespaceRootless, address.String(), routerAuthority()
+	writeConfig(t, path, wire)
+	config, err := loadConfigChecked(path, rootlessExecutable(helper))
+	if err != nil {
+		_ = probe.Close()
+		t.Fatalf("fixture rejected: %v", err)
+	}
+	fakeDocker(t, local.String())
+	previous := rootlessListen
+	t.Cleanup(func() { rootlessListen = previous })
+	// Stand in for the verified namespace listener with a real bound socket.
+	rootlessListen = func(context.Context, rootlessnetns.Config) (net.Listener, error) { return probe, nil }
+	config.router.expires = time.Now().Add(1500 * time.Millisecond)
+	listener, err := listenRouter(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := codingsource.NewRegistry(nil)
+	router, err := codingsource.NewRouter(codingsource.RouterConfig{Listener: listener, PublicBaseURL: config.publicBase, Registry: registry, MaxRoutes: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := codingsource.HarnessBinding{HarnessInstanceID: "authority", AgentArtifactSHA256: strings.Repeat("a", 64), TicketID: "33333333-3333-4333-8333-333333333333", CaseID: "authority", ProfileCapabilityID: "authority", Deadline: time.Now().Add(time.Hour)}
+	lease, err := registry.Register(binding, local.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := router.WorkspacePublisher().Publish(t.Context(), codingcertifier.CapabilityBinding{HarnessInstanceID: binding.HarnessInstanceID, AgentArtifactSHA256: binding.AgentArtifactSHA256, TicketID: binding.TicketID, CaseID: binding.CaseID, ProfileCapabilityID: binding.ProfileCapabilityID},
+		http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := strings.Replace(route.URL(), "host.docker.internal", local.String(), 1)
+	request := func(conn net.Conn) (int, error) {
+		parsed, _ := url.Parse(target)
+		if _, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: host.docker.internal:%d\r\nContent-Length: 0\r\n\r\n", parsed.Path, address.Port()); err != nil {
+			return 0, err
+		}
+		response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			return 0, err
+		}
+		_ = response.Body.Close()
+		return response.StatusCode, nil
+	}
+	established, err := net.DialTimeout("tcp4", address.String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer established.Close()
+	if code, err := request(established); err != nil || code != http.StatusOK {
+		t.Fatalf("registered source refused before the window ended: %d %v", code, err)
+	}
+	if established.SetReadDeadline(time.Now().Add(10*time.Second)) != nil {
+		t.Fatal("deadline")
+	}
+	_, err = established.Read(make([]byte, 1))
+	var timeout net.Error
+	if err == nil || errors.As(err, &timeout) && timeout.Timeout() || time.Now().Before(config.router.expires) {
+		t.Fatalf("keep-alive connection not closed at the window end: %v", err)
+	}
+	if conn, err := net.DialTimeout("tcp4", address.String(), time.Second); err == nil {
+		_ = conn.Close()
+		t.Fatal("router accepted a connection after the window ended")
+	}
+	if route.Revoke(t.Context()) != nil || route.Close() != nil || lease.Close() != nil {
+		t.Fatal("route cleanup")
+	}
+	closing, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := router.Close(closing); err != nil {
+		t.Fatalf("router did not shut down cleanly after the window ended: %v", err)
+	}
+}
+
+func localPrivateAddress(t *testing.T) netip.Addr {
+	t.Helper()
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range addresses {
+		prefix, err := netip.ParsePrefix(address.String())
+		if err == nil && prefix.Addr().Is4() && prefix.Addr().IsPrivate() && !prefix.Addr().IsLoopback() {
+			return prefix.Addr()
+		}
+	}
+	t.Skip("no local private IPv4 address")
+	return netip.Addr{}
 }

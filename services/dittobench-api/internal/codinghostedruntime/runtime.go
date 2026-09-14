@@ -148,7 +148,14 @@ func listenRouter(ctx context.Context, config *runtimeConfig) (net.Listener, err
 	if err != nil || gateway != config.router.address.Addr() {
 		return nil, ErrExecution
 	}
-	return rootlessListen(ctx, config.rootlessConfig())
+	listener, err := rootlessListen(ctx, config.rootlessConfig())
+	if err != nil {
+		return nil, ErrExecution
+	}
+	// Host nftables never see this traffic, so the worker ends candidate access
+	// itself at min(connectivity expiry, attempt deadline) or when Run's context
+	// ends (SIGTERM, including systemd stopping the unit with its egress guard).
+	return rootlessnetns.WithAuthority(ctx, listener, config.router.expires)
 }
 
 func installEnvironment(config *runtimeConfig) error {

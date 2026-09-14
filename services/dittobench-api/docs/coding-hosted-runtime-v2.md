@@ -50,6 +50,7 @@ same-UID/root compromise is outside these file-permission checks.
 | `docker_executable`, `docker_socket` | Protected absolute executable named `docker`; explicit owner-only local Unix socket in a private directory |
 | `router_listen` | Explicit private IPv4 address and port 1024–65535; wildcard, loopback and public binds fail. It is a host address in `host` mode and the rootless daemon's default bridge gateway in `rootless-netns` mode |
 | `router_namespace` | Optional. Omitted or `host` keeps the existing listener in the worker's network namespace; `rootless-netns` creates it inside the rootless daemon's RootlessKit namespace (below). Any other value fails |
+| `router_expires_at_unix` | Required only with `rootless-netns`, and must be omitted, null or 0 otherwise: the connectivity profile's `expires_at_unix`, in the future and at most 24 hours away. The worker ends candidate router access at this time or the assignment deadline, whichever is earlier (below) |
 | `egress_network`, `egress_proxy` | Provisioned restricted Docker network and credential-free `http://<private-IP>:<port>` allowlisting proxy |
 | `executor_repository` | Approved repository used with each profile's immutable image digest |
 | `candidate_uid`, `candidate_gid` | Explicit nonzero executor identity |
@@ -164,13 +165,47 @@ scripts default `DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS` to true; a local
 Docker 29.8.0 / RootlessKit 3.1.0 rehearsal was refused this way. A Docker
 upgrade must set it to false or wait for reviewed support.
 
+### Router authority window
+
+In `host` mode, host nftables bound candidate-to-router traffic. The rules
+accept it only before the profile's `meta time < expires`, only from the timed
+daemon cgroup, and replies need the timed UID lease. In `rootless-netns` mode
+that traffic stays inside RootlessKit's network namespace, so none of those
+kernel checks apply to it. The worker replaces them for the router listener:
+
+- The listener ends at `min(router_expires_at_unix, assignment deadline)`, or
+  as soon as the worker's run context ends. That happens on SIGTERM, which is how
+  the worker learns that authority is being revoked: an operator stop, or systemd
+  stopping the unit because the `ditto-coding-hosted-egress.service` guard it is
+  `BindsTo=` stopped. `ExecStopPost` removes the nft grants only after the worker
+  exits, so the worker has already closed the router by then.
+- When the window ends, the worker closes the listening socket, so the kernel
+  refuses new connections to the gateway port, and closes every accepted
+  connection, including requests still in flight. Accepts that race the end are
+  closed at once. The router then still shuts down cleanly.
+- The source registry still refuses any request after its binding deadline.
+
+What remains different from `host` mode:
+
+- This is enforced by the worker process, not the kernel. A stopped or wedged
+  worker cannot close the listener, whereas nft timeouts expire on their own. The
+  worker cgroup is still killed by the unit's stop timeout.
+- Within the window, anything that can route to the bridge gateway inside
+  RootlessKit's namespace can open a TCP connection to the router: other
+  containers of the same daemon, and daemon-UID processes in that namespace such
+  as dockerd and containerd. Host nftables cannot restrict this. What still
+  protects every route is unchanged: a request is served only if its socket
+  source is the registered harness container's own address, and its path carries
+  the unguessable route token. All other requests get 404.
+
 Operational consequences:
 
 - Candidate-to-router traffic stays inside RootlessKit's network namespace and
   never crosses host nftables. The restricted proxy is still reached through
-  slirp4netns. A connectivity profile for this mode therefore needs only the
-  proxy in `candidate_tcp`; keeping a host router endpoint there would grant
-  daemon-UID traffic to a host port with no router behind it.
+  slirp4netns. A connectivity profile for this mode therefore lists only the
+  proxy in `candidate_tcp`. Platform's bounded rollout and the connectivity role
+  refuse a profile that also lists `router_listen`: that entry would grant
+  daemon-UID traffic to a host address with no router behind it.
 - The worker unit hides `/run/user`. The connectivity role's
   `coding_hosted_router_namespace: rootless-netns` switches to `ProtectHome=tmpfs`
   and bind-mounts only the `child_pid` file read-only. The default keeps
@@ -228,7 +263,8 @@ single-use consumption, partial markers, environment replacement in a subprocess
 bounded finalization retries, cancellation, cleanup failure and command-output
 redaction. The rootless-netns listener has unit tests for descriptor passing and
 socket verification over real socketpairs, child-pid and namespace refusals,
-mode validation, and the precheck refusing before consumption. The `coding-rootless-router.yml` workflow starts a real rootless
+mode validation, the precheck refusing before consumption, and the authority
+window closing established and new connections at expiry or cancellation. The `coding-rootless-router.yml` workflow starts a real rootless
 Docker 29.1.3 daemon on a disposable runner and proves both the in-namespace
 admission and the host-address failure mode. Existing native worker/input/grader and Go/Python control tests remain
 the composition tests; the new launcher tests do not claim real Docker/private
