@@ -131,6 +131,7 @@ const (
 	BenchVersionV10     = 10
 	BenchVersionV11     = 11
 	BenchVersionV12     = 12
+	BenchVersionV13     = 13
 	CurrentBenchVersion = BenchVersionV8
 
 	// BenchVersion is retained as a source-compatible alias for consumers that
