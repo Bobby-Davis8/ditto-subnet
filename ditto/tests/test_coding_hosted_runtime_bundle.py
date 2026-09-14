@@ -35,6 +35,10 @@ def bundle(tmp_path, monkeypatch):
         + bytes(12)
         + b"\x3e\x00"
         + b"synthetic",
+        "bin/dittobench-coding-router-listener": b"\x7fELF\x02\x01"
+        + bytes(12)
+        + b"\x3e\x00"
+        + b"synthetic helper",
         "apps/platform/ditto/coding_hosted_worker.py": b"# synthetic source\n",
         "apps/platform/uv.lock": b"synthetic lock\n",
     }
@@ -42,7 +46,8 @@ def bundle(tmp_path, monkeypatch):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
-    (source / "bin/dittobench-coding-hosted-worker").chmod(0o755)
+    for name in BUNDLE.EXECUTABLES:
+        (source / name).chmod(0o755)
     python = source / "apps/platform/.venv/bin/python"
     python.parent.mkdir(parents=True)
     python.symlink_to(BUNDLE.PYTHON)
@@ -163,6 +168,22 @@ def test_untrusted_archive_structure_refused(bundle, change):
         format=tarfile.PAX_FORMAT if change == "pax" else tarfile.USTAR_FORMAT,
     )
     with pytest.raises((ValueError, tarfile.TarError)):
+        inspect(archive)
+
+
+@pytest.mark.parametrize("change", ["missing", "not_executable", "not_elf"])
+def test_router_listener_helper_is_a_required_executable_elf(bundle, tmp_path, change):
+    source, _ = bundle
+    helper = source / "bin/dittobench-coding-router-listener"
+    if change == "missing":
+        helper.unlink()
+    elif change == "not_executable":
+        helper.chmod(0o644)
+    else:
+        helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+    archive = tmp_path / "changed.tar"
+    with pytest.raises(ValueError):
+        BUNDLE.pack(source, archive, REVISION)
         inspect(archive)
 
 

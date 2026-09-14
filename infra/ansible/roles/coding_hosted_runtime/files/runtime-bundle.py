@@ -29,6 +29,12 @@ PACKAGES = (
     "libc6",
 )
 ROOTS = ("bin/", "apps/platform/", "packages/ditto-screening-protocol/")
+# Static amd64 ELF executables. The listener helper is started only by the
+# worker, from the worker's own installed bundle directory.
+EXECUTABLES = (
+    "bin/dittobench-coding-hosted-worker",
+    "bin/dittobench-coding-router-listener",
+)
 
 
 class Parser(argparse.ArgumentParser):
@@ -132,13 +138,13 @@ def metadata(value, revision):
             require(type(item["executable"]) is bool)
             require(re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is not None)
     required = {
-        "bin/dittobench-coding-hosted-worker",
+        *EXECUTABLES,
         "apps/platform/ditto/coding_hosted_worker.py",
         "apps/platform/.venv/bin/python",
         "apps/platform/uv.lock",
     }
     require(required <= entries.keys())
-    require(entries["bin/dittobench-coding-hosted-worker"].get("executable") is True)
+    require(all(entries[name].get("executable") is True for name in EXECUTABLES))
     return value
 
 
@@ -304,7 +310,7 @@ def inspect(stream, expected_sha, revision):
                 )
                 require(header.mode == (0o555 if item["executable"] else 0o444))
                 offset = stream.tell()
-                if name == "bin/dittobench-coding-hosted-worker":
+                if name in EXECUTABLES:
                     elf = stream.read(20)
                     require(
                         elf[:6] == b"\x7fELF\x02\x01"

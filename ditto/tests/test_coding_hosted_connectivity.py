@@ -287,6 +287,21 @@ def test_role_and_service_are_manual_default_off_and_nondelegated():
     assert "ExecStopPost=+" in unit and "connectivity-policy.py revoke" in unit
     assert "--private-shadow-once" in unit and "Restart=no" in unit
     assert "ProtectControlGroups=yes" in unit and "TimeoutStopSec=35min" in unit
+    # The rootless-netns router listener is opt-in; the default keeps homes and
+    # every /run/user directory inaccessible.
+    assert defaults["coding_hosted_router_namespace"] == "host"
+    assert (
+        "{% if coding_hosted_router_namespace == 'rootless-netns' %}\n" in unit
+        and "{% else %}\nProtectHome=yes\n{% endif %}\n" in unit
+    )
+    assert unit.count("BindReadOnlyPaths=") == 1 and (
+        "BindReadOnlyPaths=/run/user/{{ coding_hosted_uid }}"
+        "/dockerd-rootless/child_pid\n" in unit
+    )
+    assert (
+        "coding_hosted_router_namespace in ['host', 'rootless-netns']"
+        in (ROLE / "tasks/main.yml").read_text()
+    )
     assert "[Install]" not in unit
     assert (
         "playbooks/gcp-coding-hosted-connectivity.yml"

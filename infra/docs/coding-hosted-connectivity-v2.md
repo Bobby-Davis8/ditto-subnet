@@ -62,7 +62,13 @@ exception or candidate DNS exception exists.
 at least 1024: the native source router and, if needed, its restricted proxy.
 These must match the actual runtime configuration and independently qualified
 authenticated source-route/proxy policy. An arbitrary forwarding proxy is not
-acceptable. The worker can reply from only those listeners; the daemon can reply
+acceptable. With the runtime's `router_namespace: rootless-netns`, the router
+listens on the daemon's bridge gateway inside RootlessKit's network namespace,
+so candidate router traffic never reaches these host rules. List only the proxy
+then, and set `coding_hosted_router_namespace: rootless-netns` so the worker
+unit exposes RootlessKit's `child_pid` read-only (`ProtectHome=tmpfs` plus one
+`BindReadOnlyPaths=` file) instead of hiding all of `/run/user`. See the
+[runtime launcher](../../services/dittobench-api/docs/coding-hosted-runtime-v2.md#rootless-netns-router-listener). The worker can reply from only those listeners; the daemon can reply
 to trusted loopback harness connections. Those narrowly scoped reply rules still
 require the same unexpired cgroup authority. Image pull access, public internet,
 database, provider and Hippius authority are not granted to the daemon.

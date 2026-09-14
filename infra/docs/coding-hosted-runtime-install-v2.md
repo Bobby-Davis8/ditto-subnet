@@ -25,7 +25,9 @@ monorepo revision. Wheel files are copied, not hard-linked to builder caches.
 The environment is built at its final
 `/opt/ditto-coding-hosted/<revision>/apps/platform` prefix, preserving editable
 source references. The archive contains Platform source, its environment and
-lock, the shared protocol source, and a static linux/amd64 Go worker. Python
+lock, the shared protocol source, a static linux/amd64 Go worker and its
+one-shot rootless-netns router listener helper (`bin/dittobench-coding-router-listener`,
+required by the manifest and started only by the worker through nsenter). Python
 points to `/usr/bin/python3.13`; the manifest pins that interpreter hash and
 the Debian Python/glibc package versions. The target must be Debian 13 amd64
 with that baseline already installed. The installer will not update it for you.

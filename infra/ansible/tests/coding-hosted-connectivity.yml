@@ -23,6 +23,24 @@
           - "'--private-shadow-once' in rendered_unit"
           - "'--bounded-shadow-once' not in rendered_unit"
           - "'KillMode=control-group' in rendered_unit"
+          - coding_hosted_router_namespace == 'host'
+          - "'ProtectHome=yes' in rendered_unit"
+          - "'ProtectHome=tmpfs' not in rendered_unit"
+          - "'BindReadOnlyPaths' not in rendered_unit"
+    - name: Check rootless-netns router unit exposes only the RootlessKit child pid
+      vars:
+        coding_hosted_uid: 1001
+        coding_hosted_router_namespace: rootless-netns
+        coding_hosted_worker_python: /opt/ditto-coding-hosted/public/python
+        coding_hosted_worker_config: /var/lib/ditto-coding-hosted/private/single.json
+        rendered_unit: "{{ lookup('template', '../roles/coding_hosted_connectivity/templates/worker.service.j2') }}"
+      ansible.builtin.assert:
+        that:
+          - "'ProtectHome=tmpfs' in rendered_unit"
+          - "'ProtectHome=yes' not in rendered_unit"
+          - "rendered_unit | regex_findall('BindReadOnlyPaths=.*') == ['BindReadOnlyPaths=/run/user/1001/dockerd-rootless/child_pid']"
+          - "'BindPaths' not in rendered_unit"
+          - "'NoNewPrivileges=yes' in rendered_unit"
 
 - name: Verify rollout mode alone cannot install or start anything
   hosts: localhost
