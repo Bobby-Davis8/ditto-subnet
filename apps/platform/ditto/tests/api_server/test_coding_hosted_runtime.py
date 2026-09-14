@@ -18,8 +18,10 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from pydantic import ValidationError
 from sqlalchemy import update
 
+from ditto.api_models.coding_hosted_runtime import HostedRuntimeHostSettings
 from ditto.api_models.coding_hosted_start import HostedStartRequest
 from ditto.api_server import coding_hosted_runtime as runtime
 from ditto.api_server.coding_hippius_custody import RsaOaepHippiusEvidenceKeyWrapper
@@ -452,6 +454,8 @@ async def test_factory_and_generated_go_config_complete_native_flow(
         )
         path = runtime.write_worker_config(f.config, services, expected, harness)
         serialized = read_private(path, 65536)
+        # The default remains the existing host-namespace router listener.
+        assert b'"router_namespace":"host"' in serialized
         for secret in (
             b"synthetic-provider-key",
             b"synthetic-reader-secret",
@@ -676,6 +680,31 @@ async def test_runtime_configuration_rejects_invalid_known_fields(
     with pytest.raises(ValueError):
         load_runtime_config(f.path)
     assert not (f.root / "platform-consumed").exists()
+
+
+def test_router_namespace_defaults_to_host_and_accepts_only_known_modes():
+    host = {
+        "docker_executable": "/usr/bin/docker",
+        "docker_socket": "/run/ditto-coding-hosted/docker.sock",
+        "router_listen": "172.17.0.1:18080",
+        "egress_network": "ditto-coding-restricted",
+        "egress_proxy": "http://10.33.0.2:18090",
+        "executor_repository": "example.invalid/native",
+        "candidate_uid": 10001,
+        "candidate_gid": 10001,
+    }
+    default = HostedRuntimeHostSettings.model_validate(host)
+    assert default.router_namespace == "host"
+    assert default.model_dump()["router_namespace"] == "host"
+    rootless = HostedRuntimeHostSettings.model_validate(
+        {**host, "router_namespace": "rootless-netns"}
+    )
+    assert rootless.model_dump()["router_namespace"] == "rootless-netns"
+    for value in ("", "Host", "rootless", "slirp4netns", " rootless-netns", 1, None):
+        with pytest.raises(ValidationError):
+            HostedRuntimeHostSettings.model_validate(
+                {**host, "router_namespace": value}
+            )
 
 
 async def test_runtime_rejects_stale_probe_without_start(

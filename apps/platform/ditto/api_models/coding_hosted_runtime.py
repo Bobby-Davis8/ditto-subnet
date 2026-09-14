@@ -19,6 +19,9 @@ class HostedRuntimeHostSettings(BaseModel):
     docker_executable: PrivatePath
     docker_socket: PrivatePath
     router_listen: Name
+    # "host" keeps the listener in the worker's network namespace. The Go worker
+    # treats "rootless-netns" as the RootlessKit bridge-gateway listener.
+    router_namespace: Literal["host", "rootless-netns"] = "host"
     egress_network: Name
     egress_proxy: Name
     executor_repository: Name
