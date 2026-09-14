@@ -6,6 +6,21 @@
 
 - name: Materialize the custody-owned and worker-owned PostgreSQL environment copies
   when: coding_hosted_postgres_environment_enabled | bool
+  vars:
+    # Fixed principal and database: the reviewed HBA admits only these. The
+    # password is looked up lazily from the controller environment, never a var.
+    coding_hosted_postgres_environment_entries:
+      - "POSTGRES_HOST={{ coding_hosted_postgres_environment_host }}"
+      - "POSTGRES_PORT=5432"
+      - "POSTGRES_USER=ditto"
+      - "POSTGRES_DB=ditto_platform_prod"
+      - "POSTGRES_COMMAND_TIMEOUT=30"
+      - "POSTGRES_POOL_MIN_SIZE=1"
+      - "POSTGRES_POOL_MAX_SIZE=4"
+    coding_hosted_postgres_environment_document: >-
+      {{ (coding_hosted_postgres_environment_entries
+      + ['POSTGRES_PASSWORD=' ~ lookup('env', 'DITTO_CODING_PG_PASSWORD')])
+      | to_json }}
   block:
     - name: Require the exact host, source, database address and confirmation
       ansible.builtin.assert:
@@ -22,17 +37,25 @@
         fail_msg: Require the reviewed source, dedicated host, exact PostgreSQL private IP and confirmation.
         quiet: true
 
-    - name: Require one bounded single-line password from the protected boundary
+    - name: Refuse a password supplied as an Ansible variable
       ansible.builtin.assert:
         that:
-          - coding_hosted_postgres_environment_password is string
-          - coding_hosted_postgres_environment_password | length > 0
-          - coding_hosted_postgres_environment_password | length <= 1024
-          - coding_hosted_postgres_environment_password == coding_hosted_postgres_environment_password | trim
-          - coding_hosted_postgres_environment_password is not search('[\x00-\x1f\x7f]')
+          - coding_hosted_postgres_environment_password is not defined
         fail_msg: >-
-          Export DITTO_CODING_PG_PASSWORD from the platform-db-password secret at the
-          protected boundary and re-run. The value is never printed.
+          Never pass the PostgreSQL password with -e, inventory or vars files. Export
+          DITTO_CODING_PG_PASSWORD in the controller's local environment instead.
+        quiet: true
+
+    - name: Require one bounded single-line password from the controller environment
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'DITTO_CODING_PG_PASSWORD') | length > 0
+          - lookup('env', 'DITTO_CODING_PG_PASSWORD') | length <= 1024
+          - lookup('env', 'DITTO_CODING_PG_PASSWORD') == lookup('env', 'DITTO_CODING_PG_PASSWORD') | trim
+          - lookup('env', 'DITTO_CODING_PG_PASSWORD') is not search('[\x00-\x1f\x7f]')
+        fail_msg: >-
+          Export DITTO_CODING_PG_PASSWORD from the platform-db-password secret in the
+          controller's local environment and re-run. The value is never printed.
         quiet: true
       no_log: true
 
@@ -83,7 +106,7 @@
     - name: Write each reader's own PostgreSQL environment copy without printing it
       ansible.builtin.copy:
         dest: "{{ item.path }}"
-        content: "{{ coding_hosted_postgres_environment_entries | to_json }}\n"
+        content: "{{ coding_hosted_postgres_environment_document }}"
         owner: "{{ item.owner }}"
         group: "{{ item.owner }}"
         mode: "0600"
@@ -92,30 +115,21 @@
         - {path: /var/lib/ditto-coding-hosted/private/postgres-environment.json, owner: ditto-coding-hosted}
       loop_control:
         label: "{{ item.path }}"
-      vars:
-        # Fixed principal and database: the reviewed HBA admits only these.
-        coding_hosted_postgres_environment_entries:
-          - "POSTGRES_HOST={{ coding_hosted_postgres_environment_host }}"
-          - "POSTGRES_PORT=5432"
-          - "POSTGRES_USER=ditto"
-          - "POSTGRES_PASSWORD={{ coding_hosted_postgres_environment_password }}"
-          - "POSTGRES_DB=ditto_platform_prod"
-          - "POSTGRES_COMMAND_TIMEOUT=30"
-          - "POSTGRES_POOL_MIN_SIZE=1"
-          - "POSTGRES_POOL_MAX_SIZE=4"
       no_log: true
       diff: false
 
-    - name: Reinspect both copies as metadata only
+    - name: Reinspect both copies as ownership, mode and digest metadata only
       ansible.builtin.stat:
         path: "{{ item }}"
         follow: false
-        get_checksum: false
+        get_checksum: true
+        checksum_algorithm: sha256
         get_mime: false
       loop:
         - /var/lib/ditto-coding-custody/private/postgres-environment.json
         - /var/lib/ditto-coding-hosted/private/postgres-environment.json
       register: coding_hosted_postgres_environment_files
+      no_log: true
 
     - name: Require owner-only regular single-link copies
       ansible.builtin.assert:
@@ -132,9 +146,20 @@
       loop_control:
         label: "{{ item.item }}"
 
+    - name: Require both copies to hold exactly the rendered document
+      ansible.builtin.assert:
+        that:
+          - item.stat.checksum == coding_hosted_postgres_environment_document | hash('sha256')
+        fail_msg: A PostgreSQL environment copy does not match the rendered document.
+        quiet: true
+      loop: "{{ coding_hosted_postgres_environment_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+
     - name: Report only that the copies exist
       ansible.builtin.debug:
         msg: >-
           Native Coding PostgreSQL environment materialized for the custodian and
-          worker; values not shown; shadow_only=true; weight_eligible=false;
-          services_started=false.
+          worker; owner, mode and digest verified; values and digest not shown;
+          shadow_only=true; weight_eligible=false; services_started=false.

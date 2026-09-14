@@ -122,7 +122,10 @@ accepts:
 - **Fixed fields:** user `ditto`, database `ditto_platform_prod`, port `5432`,
   pool 1–4 and a 30-second command timeout.
 - **Host:** the exact Platform private IP.
-- **Password:** read only from `DITTO_CODING_PG_PASSWORD`.
+- **Password:** read only from `DITTO_CODING_PG_PASSWORD` in the controller's
+  local environment. It is not an Ansible variable, so inventory, Git and `-e`
+  cannot carry it, and a `coding_hosted_postgres_environment_password` variable
+  is refused.
 
 This is a separate protected convergence. It uses the same pattern as the first
 provisioning of `gcp-platform-pg.yml`: an operator who already holds
@@ -135,8 +138,9 @@ The role behaves as follows:
 - It validates a bounded, single-line password without logging it.
 - It refuses while the worker or any custody instance is live.
 - It writes each copy with `no_log` and without a diff.
-- It checks the result by metadata only, and never reads the bytes back or
-  prints them.
+- It verifies ownership, mode, single link and the SHA-256 of each copy against
+  the rendered document, with `no_log`. It never reads the bytes back to the
+  controller and never prints the values or the digest.
 - It starts nothing. Admission still depends on the separately reviewed HBA and
   firewall rules above.
 
