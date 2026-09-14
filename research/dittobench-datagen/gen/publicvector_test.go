@@ -438,6 +438,54 @@ func TestV12KnownVector(t *testing.T) {
 	}
 }
 
+// TestV13KnownVector pins the private, pre-activation tool-bench contract
+// (issues #1843, #1842, #1580, #1840) without changing the currently advertised
+// benchmark version. It is the byte-identity guard for v13: any change to a
+// frozen v13 bank moves this hash and must be a deliberate, reviewed
+// new-contract decision. The frozen banks are:
+//
+//   - catalog/v13.go: v13DescriptionBanks (per-tool paraphrases), decoyShapes
+//     (the 23 near-miss shapes and their prompts), coined brand cadences and
+//     nouns, the seeded splice positions;
+//   - catalog/inventory.go: colourCorpus, fontCorpus, the near-miss pairs, the
+//     bounded-alias projector;
+//   - toolexec/v13.go: coined workflow/schedule/job/registry/sandbox content;
+//   - datagen/v13.go: v13ArgIntents, the discovery/near-miss/unexpected prompt
+//     banks, v13RecipeTemplates, the quota table, and the conversion order.
+//
+// v2..v12 vectors above are untouched — every lever is gated on
+// bench_version >= 13.
+func TestV13KnownVector(t *testing.T) {
+	const (
+		seed = int64(123456789)
+		want = "140cd326792b22668f92ff4d21fc310fece7afa326e603c9a7274a8049ced68f"
+	)
+	prof, _ := ProfileForVersion("full", protocol.BenchVersionV13)
+	artifact, err := GenerateDataset(seed, prof, protocol.BenchVersionV13)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if got, want := len(artifact.ToolCases), 100; got != want {
+		t.Fatalf("v13 full tool cases=%d, want %d", got, want)
+	}
+	if got, want := len(artifact.MemoryCases), 251; got != want {
+		t.Fatalf("v13 full memory cases=%d, want %d", got, want)
+	}
+	if got, want := len(artifact.MemoryWaves), 6; got != want {
+		t.Fatalf("v13 full memory waves=%d, want %d", got, want)
+	}
+	if got, want := len(artifact.Catalog), 35; got != want {
+		t.Fatalf("v13 pinned catalog tools=%d, want %d (30 production + this seed's decoys)", got, want)
+	}
+	got, _, err := artifact.SHA256Hex()
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if got != want {
+		t.Fatalf("v13 known-vector hash drift for seed %d full:\n got %s\nwant %s", seed, got, want)
+	}
+}
+
 func TestUnsupportedVersionRejected(t *testing.T) {
 	prof, _ := ProfileFor("small")
 	if _, err := GenerateDataset(42, prof, protocol.BenchVersionV13+1); err == nil {
