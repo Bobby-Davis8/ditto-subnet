@@ -169,6 +169,45 @@ def test_only_the_two_exact_copies_are_ever_removed() -> None:
         assert forbidden not in PARSED, forbidden
 
 
+def _only(tasks: list[dict], module: str) -> dict:
+    (task,) = [task for task in tasks if module in task]
+    return task
+
+
+def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
+    # The cleanup literals are copied from coding_hosted_postgres_environment;
+    # parse that role so any drift in a path, owner or home fails here.
+    written = _only(MATERIALIZE, "ansible.builtin.copy")["loop"]
+    created = _only(MATERIALIZE, "ansible.builtin.file")["loop"]
+    asserted = " ".join(
+        line
+        for task in MATERIALIZE
+        if "ansible.builtin.assert" in task
+        for line in task["ansible.builtin.assert"]["that"]
+    )
+    homes = dict(re.findall(r"getent_passwd\['([^']+)'\]\[4\] == '([^']+)'", asserted))
+    assert set(homes) == set(OWNERS)
+    assert [item["owner"] for item in written] == list(OWNERS)
+    assert [item["path"] for item in written] == COPIES
+
+    assert _task(COPY_STAT)["loop"] == written
+    assert _task(UNLINK)["loop"] == [item["path"] for item in written]
+    assert _task(AFTER_STAT)["loop"] == [item["path"] for item in written]
+
+    parents: list[str] = []
+    for item in written:
+        (directory,) = [
+            entry
+            for entry in created
+            if entry["path"] == str(Path(item["path"]).parent)
+        ]
+        assert directory["owner"] == item["owner"]
+        assert str(Path(directory["path"]).parent) == homes[item["owner"]]
+        parents += [homes[item["owner"]], directory["path"]]
+    assert _task(PARENT_STAT)["loop"] == parents == PARENTS
+    assert set(re.findall(r"/var/lib/[^\s'\",\]}]*", TASKS)) == {*parents, *COPIES}
+
+
 def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
     names = [task["name"] for task in _block()]
     assert names == [
