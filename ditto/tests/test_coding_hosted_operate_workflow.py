@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -124,17 +125,16 @@ def test_operate_key_is_short_lived_and_always_removed() -> None:
 
 def _verifier_calls() -> list[list[object]]:
     tree = ast.parse(VERIFIER.read_text())
-    argvs = []
+    argvs: list[list[object]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "run":
             argument = node.args[0]
             assert isinstance(argument, ast.List)
-            argvs.append(
-                [
-                    element.value if isinstance(element, ast.Constant) else None
-                    for element in argument.elts
-                ]
-            )
+            argv: list[object] = [
+                element.value if isinstance(element, ast.Constant) else None
+                for element in argument.elts
+            ]
+            argvs.append(argv)
     return argvs
 
 
@@ -237,6 +237,10 @@ def test_workflow_identity_is_pinned_to_this_main_workflow() -> None:
     assert "default     = false" in text
     wiring = WIRING.read_text()
     assert "var.enable_coding_hosted_operate_workflow" in wiring
+    prod = (ROOT / "infra/terraform/stacks/gcp-platform/prod.auto.tfvars").read_text()
+    assert re.search(
+        r"(?m)^enable_coding_hosted_operate_workflow\s*=\s*false\s*$", prod
+    )
     assert (
         '"serviceAccount:${google_service_account.coding_hosted_operate.email}"'
         in wiring
