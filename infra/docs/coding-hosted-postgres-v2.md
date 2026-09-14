@@ -292,3 +292,58 @@ exactly. The infra CI Ansible job runs it.
 The `role_coding_hosted` group connects through IAP only
 (`group_vars/role_coding_hosted.yml`). Every native host role therefore reaches
 the private address the same way the Platform PostgreSQL VM is reached.
+
+## Removal and rotation
+
+The default-off `coding_hosted_postgres_environment_cleanup` role is the removal
+rollback for the two copies above. Run
+`playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml` with a 40-hex
+source revision and the exact confirmation
+`REMOVE NATIVE CODING POSTGRES ENVIRONMENT`. It uses the same host checks as
+materialization, needs no secret and never reads `DITTO_CODING_PG_PASSWORD`.
+
+It unlinks only the two literal file paths. It never removes, creates or
+changes a directory, sibling file, custody key, receipt or evidence record, and
+has no path input, glob or recursion. `unlink(2)` cannot remove a directory.
+Before removing anything it refuses when:
+- the worker or any custody instance is `active`, `activating`,
+  `deactivating` or `reloading`. This uses the same listing as
+  materialization; the role stops nothing;
+- a reader home or `private` directory is a symlink or not a directory;
+- a copy path, inspected without following links, is anything except absent
+  or a regular, single-link file owned by its reader. A symlink, directory,
+  hard link or another account's file needs manual reconciliation.
+
+It inspects metadata only: no checksum, slurp or fetch. It then verifies that
+both paths are absent. A re-run reports both as already absent. The report
+lists only paths. `--check` lists what would be removed.
+
+Removal does not revoke database access. The `ditto` password stays valid, and
+the HBA, UFW and network rules follow the rollback steps above. Anything
+configured to read these copies, such as the worker or custody service, fails
+closed until the files are materialized again.
+
+To rotate the copies:
+1. Stop the worker and every custody instance through their own reviewed
+   procedure, after reconciling unfinished attempts and evidence. Nothing here
+   stops or starts them.
+2. Run the cleanup playbook without exporting a password.
+3. Export the new value only in the controller environment, run the
+   materialization playbook and unset the value.
+4. Start services through their own reviewed procedure.
+
+The cleanup role does not rotate the shared `ditto` PostgreSQL role password.
+That is a separate protected Platform database and application change, and it
+changes credentials for both Platform databases. Holders in this repository
+include:
+- the Terraform-managed Secret Manager secret `platform-db-password`
+  (`infra/terraform/stacks/gcp-platform`, `var.db_password`);
+- the protected `/opt/ditto/secrets/postgres-ditto.password` and role password
+  applied by `gcp-platform-pg.yml` and `roles/postgres`. A converge without
+  `DITTO_PG_PASSWORD` keeps the existing password; exporting a new value there
+  changes it;
+- the Platform app `.env` that `roles/platform_app` renders from the secret for
+  both Platform environments;
+- these two Coding copies, which are removed and materialized again as above.
+
+No automated database password rotation exists for this path.

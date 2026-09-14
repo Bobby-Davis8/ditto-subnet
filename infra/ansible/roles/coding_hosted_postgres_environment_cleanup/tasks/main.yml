@@ -1,0 +1,143 @@
+---
+- name: Explain dormant native PostgreSQL environment removal
+  ansible.builtin.debug:
+    msg: Native Coding PostgreSQL environment removal is disabled; no credential file is removed.
+  when: not (coding_hosted_postgres_environment_cleanup_enabled | bool)
+
+- name: Remove only the custody-owned and worker-owned PostgreSQL environment copies
+  when: coding_hosted_postgres_environment_cleanup_enabled | bool
+  block:
+    - name: Require the exact host, source and removal confirmation
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in groups.get('role_coding_hosted', [])
+          - ansible_facts['hostname'] == 'ditto-coding-hosted-v2'
+          - ansible_facts['architecture'] == 'x86_64'
+          - ansible_facts['distribution'] == 'Debian'
+          - ansible_facts['distribution_major_version'] == '13'
+          - coding_hosted_postgres_environment_cleanup_source_revision is match('^[0-9a-f]{40}$')
+          - coding_hosted_postgres_environment_cleanup_confirmation == 'REMOVE NATIVE CODING POSTGRES ENVIRONMENT'
+        fail_msg: Require the reviewed source, dedicated host and exact removal confirmation.
+        quiet: true
+
+    # Same listing and live-state pattern as coding_hosted_postgres_environment.
+    # This role stops nothing; the operator stops the services first.
+    - name: List live worker and custody units
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, list-units, --all, --plain, --no-legend, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
+      register: coding_hosted_postgres_environment_cleanup_units
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse to remove credentials under a live worker or custody instance
+      ansible.builtin.assert:
+        that:
+          - >-
+            coding_hosted_postgres_environment_cleanup_units.stdout is not
+            search('^\\S+\\s+\\S+\\s+(active|activating|deactivating|reloading)\\s', multiline=True)
+        fail_msg: Stop the hosted worker and every custody instance before removing credentials; this role stops nothing.
+        quiet: true
+
+    # Path resolution follows links in parent components even when the final
+    # component is inspected with follow=false, so each parent must be real.
+    - name: Inspect the reader directories without following links
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      loop:
+        - /var/lib/ditto-coding-custody
+        - /var/lib/ditto-coding-custody/private
+        - /var/lib/ditto-coding-hosted
+        - /var/lib/ditto-coding-hosted/private
+      register: coding_hosted_postgres_environment_cleanup_directories
+
+    - name: Refuse a linked or non-directory parent
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+        fail_msg: A PostgreSQL environment parent is not a real directory; reconcile it by hand. Nothing was removed.
+        quiet: true
+      loop: "{{ coding_hosted_postgres_environment_cleanup_directories.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Inspect both exact copies as link metadata only
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        follow: false
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      loop:
+        - {path: /var/lib/ditto-coding-custody/private/postgres-environment.json, owner: ditto-coding-custody}
+        - {path: /var/lib/ditto-coding-hosted/private/postgres-environment.json, owner: ditto-coding-hosted}
+      loop_control:
+        label: "{{ item.path }}"
+      register: coding_hosted_postgres_environment_cleanup_copies
+
+    - name: Refuse anything but an absent copy or a regular single-link copy owned by its reader
+      ansible.builtin.assert:
+        that:
+          - >-
+            not item.stat.exists or
+            (item.stat.isreg and not item.stat.islnk and item.stat.nlink == 1 and
+             item.stat.pw_name | default('') == item.item.owner)
+        fail_msg: >-
+          A PostgreSQL environment path is a link, directory, hard link or another
+          account's file; reconcile it by hand. Nothing was removed.
+        quiet: true
+      loop: "{{ coding_hosted_postgres_environment_cleanup_copies.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+
+    # unlink(2) removes one directory entry and fails on a directory, so this
+    # task cannot recurse even if a path changes after inspection.
+    - name: Unlink each exact copy that exists and nothing else
+      ansible.builtin.command:
+        argv: [/usr/bin/unlink, "{{ item }}"]
+      loop:
+        - /var/lib/ditto-coding-custody/private/postgres-environment.json
+        - /var/lib/ditto-coding-hosted/private/postgres-environment.json
+      when: >-
+        item in (coding_hosted_postgres_environment_cleanup_copies.results
+        | selectattr('stat.exists') | map(attribute='item.path') | list)
+      changed_when: true
+
+    - name: Reinspect both exact paths without following links
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      loop:
+        - /var/lib/ditto-coding-custody/private/postgres-environment.json
+        - /var/lib/ditto-coding-hosted/private/postgres-environment.json
+      register: coding_hosted_postgres_environment_cleanup_after
+      when: not ansible_check_mode
+
+    - name: Require both exact copies to be absent
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists
+        fail_msg: A PostgreSQL environment copy is still present after removal.
+        quiet: true
+      loop: "{{ coding_hosted_postgres_environment_cleanup_after.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not ansible_check_mode
+
+    - name: Report only the exact paths removed or already absent
+      ansible.builtin.debug:
+        msg: >-
+          Native Coding PostgreSQL environment cleanup;
+          {{ 'would_remove' if ansible_check_mode else 'removed' }}={{
+          coding_hosted_postgres_environment_cleanup_copies.results
+          | selectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+          already_absent={{
+          coding_hosted_postgres_environment_cleanup_copies.results
+          | rejectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+          directories_kept=true; services_stopped=false; password_read=false.
