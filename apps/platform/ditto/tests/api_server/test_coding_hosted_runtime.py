@@ -683,6 +683,41 @@ async def test_runtime_configuration_rejects_invalid_known_fields(
     assert not (f.root / "platform-consumed").exists()
 
 
+async def test_rootless_router_requires_the_installed_v3_router_listener(
+    runtime_fixture, monkeypatch
+):
+    from ditto.api_server import coding_hosted_runtime_config as loader
+
+    f = runtime_fixture
+    body = {
+        **f.wire,
+        "host": {
+            **f.wire["host"],
+            "router_namespace": "rootless-netns",
+            "router_expires_at_unix": int(time.time()) + 600,
+        },
+    }
+    f.path.write_bytes(canonical(body, 65536))
+    # The fixture's private worker is not an installed bundle, so it has no
+    # receipt-pinned helper and cannot serve the in-namespace router.
+    with pytest.raises(HostedRuntimeError, match="router listener"):
+        load_runtime_config(f.path)
+    calls = []
+
+    def installed(path, *, router_listener=False):
+        calls.append((path, router_listener))
+
+    monkeypatch.setattr(loader, "require_installed_worker", installed)
+    config = load_runtime_config(f.path)
+    assert config.wire.host.router_namespace == "rootless-netns"
+    assert calls == [(Path(f.wire["worker_executable"]), True)]
+    f.path.write_bytes(canonical(f.wire, 65536))
+    calls.clear()
+    load_runtime_config(f.path)
+    assert calls == []
+    assert not (f.root / "platform-consumed").exists()
+
+
 def test_router_namespace_defaults_to_host_and_accepts_only_known_modes():
     host = {
         "docker_executable": "/usr/bin/docker",

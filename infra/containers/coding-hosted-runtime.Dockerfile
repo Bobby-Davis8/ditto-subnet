@@ -61,6 +61,19 @@ RUN --network=none setpriv --reuid=10001 --regid=10001 --clear-groups env -i PAT
     /opt/ditto-coding-hosted/${SOURCE_REVISION}/apps/platform/.venv/bin/python -I -B \
     -c 'import subprocess,sys; p=subprocess.run([sys.argv[1]],capture_output=True); assert p.returncode == 64 and not p.stdout and not p.stderr' \
     /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-router-listener
+# The v3 receipt pins the helper too: changed helper bytes refuse the worker.
+RUN --network=none cp /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-router-listener /tmp/router-listener && \
+    printf X >> /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-router-listener && \
+    if setpriv --reuid=10001 --regid=10001 --clear-groups env -i PATH=/usr/bin:/bin \
+      /opt/ditto-coding-hosted/${SOURCE_REVISION}/apps/platform/.venv/bin/python -I -B \
+      -c 'import sys; from pathlib import Path; from ditto.api_server.coding_hosted_runtime_io import protected_helper; protected_helper(Path(sys.argv[1]))' \
+      /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-hosted-worker 2>/dev/null; then exit 1; fi && \
+    cat /tmp/router-listener > /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-router-listener && \
+    rm /tmp/router-listener && \
+    setpriv --reuid=10001 --regid=10001 --clear-groups env -i PATH=/usr/bin:/bin \
+      /opt/ditto-coding-hosted/${SOURCE_REVISION}/apps/platform/.venv/bin/python -I -B \
+      -c 'import sys; from pathlib import Path; from ditto.api_server.coding_hosted_installed_worker import require_installed_worker; require_installed_worker(Path(sys.argv[1]), router_listener=True)' \
+      /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-hosted-worker
 RUN --network=none printf X >> /opt/ditto-coding-hosted/${SOURCE_REVISION}/bin/dittobench-coding-hosted-worker && \
     if setpriv --reuid=10001 --regid=10001 --clear-groups env -i PATH=/usr/bin:/bin \
       /opt/ditto-coding-hosted/${SOURCE_REVISION}/apps/platform/.venv/bin/python -I -B \
