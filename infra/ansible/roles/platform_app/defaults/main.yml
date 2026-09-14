@@ -194,6 +194,15 @@ platform_coding_hippius_evidence_spool_root: /var/lib/ditto-platform/coding-evid
 secret_coding_hippius_evidence_access_key: platform-coding-hippius-evidence-access-key
 secret_coding_hippius_evidence_secret_key: platform-coding-hippius-evidence-secret-key
 
+# --- Deploy access narrowing (reviewed activation, default off) ---------------
+# The docker group is root-equivalent, and the deploy user is in it only so
+# scripts/update.sh can run `docker compose up -d --wait pylon`. True installs
+# a root-owned ditto-platform-pylon.service with root-owned compose inputs,
+# renders DITTO_PLATFORM_PYLON_UNIT so update.sh restarts that unit through one
+# exact sudoers rule, and removes deploy from the docker group
+# (tasks/pylon_root_unit.yml). False keeps today's behaviour.
+platform_pylon_root_unit_enabled: false
+
 # Hosted-v2 native control signer: a dedicated ONLINE SR25519 operational key
 # that signs only canonical native-v2 status/result envelopes in the Python API
 # process. It is distinct from the offline curator Ed25519 key, every validator
