@@ -295,28 +295,43 @@ the private address the same way the Platform PostgreSQL VM is reached.
 
 ## Removal and rotation
 
-The default-off `coding_hosted_postgres_environment_cleanup` role is the removal
-rollback for the two copies above. Run
+The default-off `coding_hosted_postgres_environment_cleanup` role removes the
+two copies above. Run
 `playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml` with a 40-hex
 source revision and the exact confirmation
-`REMOVE NATIVE CODING POSTGRES ENVIRONMENT`. It uses the same host checks as
-materialization, needs no secret and never reads `DITTO_CODING_PG_PASSWORD`.
+`REMOVE NATIVE CODING POSTGRES ENVIRONMENT`. It needs no secret and never reads
+`DITTO_CODING_PG_PASSWORD`.
 
 It unlinks only the two literal file paths. It never removes, creates or
 changes a directory, sibling file, custody key, receipt or evidence record, and
 has no path input, glob or recursion. `unlink(2)` cannot remove a directory.
 Before removing anything it refuses when:
-- the worker or any custody instance is `active`, `activating`,
-  `deactivating` or `reloading`. This uses the same listing as
-  materialization; the role stops nothing;
+- any variable named `coding_hosted_postgres_environment_cleanup_*` other than
+  the `enabled`, `confirmation` and `source_revision` inputs is set, from extra
+  vars, inventory or vars files. Extra vars outrank registered results, so a
+  preset result name such as `coding_hosted_postgres_environment_cleanup_units`
+  would otherwise replace the unit listing and disable its guard;
+- the machine is not the dedicated Debian 13 x86_64 host
+  `ditto-coding-hosted-v2` in `role_coding_hosted`. The playbook gathers no
+  facts: identity comes from a registered `setup` probe, because an
+  `ansible_facts` extra var replaces gathered facts;
+- any worker or custody unit in the materialization listing has an ACTIVE state
+  other than `inactive` or `failed`. This is an allow-list, so `active`,
+  `activating`, `deactivating`, `reloading`, `refreshing` (systemd 256 and
+  later), `maintenance`, a future state or an unparseable line all refuse. An
+  empty listing means no such unit is loaded and is allowed. The role stops
+  nothing;
 - a reader home or `private` directory is a symlink or not a directory;
 - a copy path, inspected without following links, is anything except absent
   or a regular, single-link file owned by its reader. A symlink, directory,
   hard link or another account's file needs manual reconciliation.
 
-It inspects metadata only: no checksum, slurp or fetch. It then verifies that
-both paths are absent. A re-run reports both as already absent. The report
-lists only paths. `--check` lists what would be removed.
+It inspects metadata only: no checksum, slurp or fetch. It attempts both
+unlinks; if either fails, it fails with the source revision and the exact paths
+removed and not removed, so a partial removal is never silent. It then verifies
+that both paths are absent. A re-run reports both as already absent. The report
+and every refusal carry the source revision and paths only. `--check` lists what
+would be removed.
 
 Removal does not revoke database access. The `ditto` password stays valid, and
 the HBA, UFW and network rules follow the rollback steps above. Anything
