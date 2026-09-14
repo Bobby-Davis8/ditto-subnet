@@ -65,24 +65,37 @@ mismatch, unknown or missing fields, duplicate keys, symlinks, or
 
 ```text
 docker compose run --rm --no-deps \
+  -e VALIDATOR_CODING_HOSTED_CONTROL_ENABLED \
+  -e VALIDATOR_CODING_HOSTED_PLATFORM_HOTKEY \
   -v /var/lib/ditto-validator-hosted-control:/hosted \
   ditto-subnet uv run --no-sync python -m ditto.validator.coding_hosted_control \
   evaluate --validator-hotkey <pinned> \
   --assignment /hosted/assignment.json --assignment-sha256 <digest>
 ```
 
-The host directory is root-owned mode `0700`.
+`docker compose run` passes only the service's declared environment, so both
+variables need `-e` until the service environment declares them. The host
+directory is root-owned mode `0700`.
 
-- `evaluate` signs one 60-second admission request. It refuses an expired
-  assignment before signing. Admission is idempotent on Platform, so a repeat
-  returns the current signed status and never re-rolls the evaluation.
-- `status --result-out /hosted/result.json [--wait-seconds N]` signs a fresh
-  status request per poll. It sleeps 20 s between polls and stops at N seconds,
-  at most 3600. A verified terminal result is written to a new `0600` file in a
-  `0700` directory owned by the caller. Transport or verification failures stop
+Clocks: requests are backdated 30 s and expire 60 s after signing, keeping the
+signed window within Platform's 120 s bound. The validator accepts Platform
+receipts within 30 s of clock skew in either direction; larger skew is refused.
+
+- `evaluate [--result-out …]` signs one admission request and refuses an expired
+  assignment before signing. Admission is idempotent on Platform: a repeat
+  returns the current signed status, or the signed terminal result once the
+  attempt has finished. That result is saved only if `--result-out` is given.
+- `status --result-out /hosted/result.json [--wait-seconds N]` checks the output
+  path first (absolute, absent, in a caller-owned `0700` directory), then signs a
+  fresh status request per poll. It sleeps 20 s between polls and stops at N
+  seconds (at most 3600), or as soon as an attempt that never started passes its
+  deadline. A verified terminal result is written to a new `0600` file; a failed
+  write leaves no partial file. Transport or verification failures stop
   immediately.
 - `acknowledge --result /hosted/result.json` re-verifies that exact result file
-  and acknowledges its digest. Only an empty `no-store` HTTP 204 counts.
+  and acknowledges its digest. Only an empty `no-store` HTTP 204 counts. A result
+  is signed for one hour; after that, fetch a fresh result with `status` and
+  acknowledge that one instead.
 
 Output is one JSON line with operation, state or outcome, digests,
 `shadow_only=true` and `weight_eligible=false`. Refusals print a fixed message

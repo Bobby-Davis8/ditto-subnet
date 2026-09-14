@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections.abc import Callable, Mapping
 from types import TracebackType
@@ -20,12 +19,15 @@ from ditto.validator.coding_hosted import (
     MAX_HOSTED_RESULT_BYTES,
     HostedResultExpectation,
     SignatureVerifier,
+    hosted_canonical_bytes,
     verify_hosted_result,
     verify_hosted_status,
 )
 
 HOSTED_CONTROL_PATH = "/api/v1/validator/coding-hosted/control"
 HOSTED_CONTROL_TIMEOUT_SECONDS = 30
+# Whole-second clocks on two hosts; receipts are accepted within this bound.
+HOSTED_CLOCK_SKEW_SECONDS = 30
 
 
 class HostedCodingTransportError(RuntimeError):
@@ -115,6 +117,7 @@ class HostedCodingTransport:
                 expected=expected,
                 trusted_verifiers=self._verifiers,
                 now_unix=self._clock(),
+                clock_skew_seconds=HOSTED_CLOCK_SKEW_SECONDS,
             )
         except Exception:
             raise HostedCodingTransportError(
@@ -130,26 +133,20 @@ class HostedCodingTransport:
     ) -> None:
         """Acknowledge one exact verified terminal result; only HTTP 204 succeeds.
 
-        ``expected`` describes ``result``, so its request digest is the status
-        request that produced the result, not this acknowledgement.
+        ``expected`` binds the assignment, attempt, profiles and trusted signer.
+        Its ``request_sha256`` must be the digest recorded in ``result``: the
+        Platform signature already binds that status request, and an
+        acknowledgement names the result digest rather than a new request.
+        The result is re-verified, including its signed lifetime.
         """
         try:
             request, payload, now = self._checked(request, expected)
-            body = (
-                json.dumps(
-                    result.model_dump(mode="json", by_alias=True),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                + "\n"
-            ).encode()
             verify_hosted_result(
-                body=body,
+                body=hosted_canonical_bytes(result),
                 expected=expected,
                 trusted_verifiers=self._verifiers,
                 now_unix=now,
+                clock_skew_seconds=HOSTED_CLOCK_SKEW_SECONDS,
             )
             if (
                 request.operation != "acknowledge"
@@ -190,16 +187,7 @@ class HostedCodingTransport:
             )
         ):
             raise ValueError("request authority")
-        payload = (
-            json.dumps(
-                request.model_dump(mode="json", by_alias=True),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode()
+        payload = hosted_canonical_bytes(request)
         if len(payload) > MAX_HOSTED_RESULT_BYTES:
             raise ValueError("request bounds")
         return request, payload, now

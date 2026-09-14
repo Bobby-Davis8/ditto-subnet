@@ -31,8 +31,10 @@ from pathlib import Path
 from typing import Any, NoReturn
 from uuid import UUID, uuid4
 
+import bittensor
 import httpx
 
+from ditto.api_models.coding import _canonical_json_bytes
 from ditto.api_models.coding_hosted import (
     HostedCodingRequest,
     HostedCodingResult,
@@ -44,12 +46,21 @@ from ditto.validator.coding_hosted import (
     MAX_HOSTED_RESULT_BYTES,
     HostedResultExpectation,
     SignatureVerifier,
+    hosted_canonical_bytes,
 )
-from ditto.validator.coding_hosted_transport import HostedCodingTransport
+from ditto.validator.coding_hosted_transport import (
+    HOSTED_CLOCK_SKEW_SECONDS,
+    HostedCodingTransport,
+)
+from ditto.validator.config import parse_validator_config_from_env
+from ditto.validator.signing import load_validator_keypair
 
 ENABLED_ENV = "VALIDATOR_CODING_HOSTED_CONTROL_ENABLED"
 PLATFORM_HOTKEY_ENV = "VALIDATOR_CODING_HOSTED_PLATFORM_HOTKEY"
 ASSIGNMENT_SCHEMA = "dittobench-coding-hosted-assignment-v2"
+# Requests are backdated so a validator clock up to this far ahead of Platform
+# still satisfies issued_at <= now; the signed window stays within 120 s.
+REQUEST_BACKDATE_SECONDS = HOSTED_CLOCK_SKEW_SECONDS
 REQUEST_LIFETIME_SECONDS = 60
 POLL_INTERVAL_SECONDS = 20
 MAX_WAIT_SECONDS = 3600
@@ -59,6 +70,7 @@ EXIT_REFUSED = 70
 _HOTKEY = re.compile(r"[1-9A-HJ-NP-Za-km-z]{47,48}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TRUTHY = {"1", "true", "yes"}
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 # The exact Platform assignment projection (``HostedAssignmentAuthority``).
 _ASSIGNMENT_FIELDS = {
     "schema": str,
@@ -100,21 +112,7 @@ class HostedAssignment:
 
 def assignment_sha256(projection: dict[str, Any]) -> str:
     """Hash the projection exactly as Platform's ``coding_canonical_sha256``."""
-    body = (
-        (
-            json.dumps(
-                projection,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            + "\n"
-        )
-        .replace("\u2028", "\\u2028")
-        .replace("\u2029", "\\u2029")
-        .encode()
-    )
+    body = _canonical_json_bytes(projection)
     if len(body) > MAX_ASSIGNMENT_BYTES:
         raise HostedControlCommandError("hosted assignment is invalid")
     return hashlib.sha256(body).hexdigest()
@@ -133,16 +131,27 @@ def _reject_constant(_: str) -> NoReturn:
     raise ValueError("non-finite number")
 
 
+def _read_regular(path: Path, maximum: int) -> tuple[os.stat_result, bytes]:
+    """Read one regular file through a single no-follow, non-blocking descriptor."""
+    descriptor = os.open(path, _READ_FLAGS)
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= maximum:
+            raise ValueError("file")
+        body = handle.read(maximum + 1)
+    if len(body) != info.st_size:
+        raise ValueError("file changed")
+    return info, body
+
+
 def load_assignment(path: Path, pinned_sha256: str) -> HostedAssignment:
     """Load the operator-copied assignment projection and bind it to its digest."""
     try:
         if not _SHA256.fullmatch(pinned_sha256):
             raise ValueError("pin")
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ASSIGNMENT_BYTES:
-            raise ValueError("file")
+        _, body = _read_regular(path, MAX_ASSIGNMENT_BYTES)
         projection: Any = json.loads(
-            path.read_bytes(),
+            body,
             object_pairs_hook=_reject_duplicates,
             parse_constant=_reject_constant,
         )
@@ -173,8 +182,6 @@ def load_assignment(path: Path, pinned_sha256: str) -> HostedAssignment:
             or assignment_sha256(projection) != pinned_sha256
         ):
             raise ValueError("authority")
-    except HostedControlCommandError:
-        raise
     except Exception:
         raise HostedControlCommandError("hosted assignment is invalid") from None
     return HostedAssignment(
@@ -266,7 +273,7 @@ def signed_request(
             "operation": operation,
             "result_sha256": result_sha256,
             "nonce": uuid4(),
-            "issued_at_unix": now,
+            "issued_at_unix": now - REQUEST_BACKDATE_SECONDS,
             "expires_at_unix": now + REQUEST_LIFETIME_SECONDS,
             "signature": "0" * 128,
         }
@@ -297,60 +304,77 @@ def expectation(
     )
 
 
-def _canonical(value: HostedCodingResult) -> bytes:
-    return (
-        json.dumps(
-            value.model_dump(mode="json", by_alias=True),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode()
-
-
-def _write_result(path: Path, result: HostedCodingResult) -> None:
+def validate_result_out(path: Path) -> None:
+    """Refuse an unusable result path before any request is signed or sent."""
     try:
         parent = path.parent.lstat()
         if (
             not path.is_absolute()
+            or path.name in {"", ".", ".."}
             or not stat.S_ISDIR(parent.st_mode)
             or parent.st_uid != os.geteuid()
             or stat.S_IMODE(parent.st_mode) & 0o077
         ):
             raise ValueError("result directory")
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        raise ValueError("result exists")
+    except Exception:
+        raise HostedControlCommandError("result output path is invalid") from None
+
+
+def _write_result(path: Path, result: HostedCodingResult) -> None:
+    validate_result_out(path)
+    try:
         descriptor = os.open(
             path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
         )
     except Exception:
         raise HostedControlCommandError("result output path is invalid") from None
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(_canonical(result))
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(hosted_canonical_bytes(result))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        # This process created the file with O_EXCL; never leave a partial
+        # result that would block a retry or fail acknowledgement later.
+        path.unlink(missing_ok=True)
+        raise HostedControlCommandError("result could not be written") from None
 
 
 def _read_result(path: Path) -> HostedCodingResult:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(descriptor, "rb") as handle:
-            info = os.fstat(handle.fileno())
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.geteuid()
-                or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_nlink != 1
-                or not 0 < info.st_size <= MAX_HOSTED_RESULT_BYTES
-            ):
-                raise ValueError("result file")
-            body = handle.read(MAX_HOSTED_RESULT_BYTES + 1)
+        info, body = _read_regular(path, MAX_HOSTED_RESULT_BYTES)
+        if (
+            info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise ValueError("result file")
         result = HostedCodingResult.model_validate_json(body)
-        if _canonical(result) != body:
+        if hosted_canonical_bytes(result) != body:
             raise ValueError("noncanonical")
     except Exception:
         raise HostedControlCommandError("result file is invalid") from None
     return result
+
+
+def _terminal_summary(
+    operation: str, result: HostedCodingResult, *, saved: bool
+) -> dict[str, Any]:
+    return {
+        "operation": operation,
+        "terminal": True,
+        "result_saved": saved,
+        "outcome": result.outcome,
+        "result_sha256": hosted_message_digest(result),
+        "evidence_sha256": result.evidence_sha256,
+        "shadow_only": True,
+        "weight_eligible": False,
+    }
 
 
 async def run_command(
@@ -366,39 +390,44 @@ async def run_command(
         raise HostedControlCommandError(
             "hosted assignment belongs to another validator"
         )
+    result_out: Path | None = getattr(args, "result_out", None)
+    if result_out is not None:
+        validate_result_out(result_out)
+    stored: HostedCodingResult | None = None
+    if args.operation == "acknowledge":
+        stored = _read_result(args.result)
+        if clock() - HOSTED_CLOCK_SKEW_SECONDS >= stored.expires_at_unix:
+            raise HostedControlCommandError(
+                "result has expired; fetch a fresh result with status"
+            )
+    elif args.operation == "evaluate" and clock() >= assignment.deadline_unix:
+        raise HostedControlCommandError("hosted assignment has expired")
+
     async with HostedCodingTransport(
         platform_origin=context.platform_origin,
         trusted_verifiers={context.platform_hotkey: context.verifier},
         clock=clock,
         transport=transport,
     ) as client:
-        if args.operation == "acknowledge":
-            result = _read_result(args.result)
+        if stored is not None:
+            digest = hosted_message_digest(stored)
             request = signed_request(
-                context,
-                assignment,
-                "acknowledge",
-                now=clock(),
-                result_sha256=hosted_message_digest(result),
+                context, assignment, "acknowledge", now=clock(), result_sha256=digest
             )
             await client.acknowledge(
                 request=request,
-                result=result,
-                expected=expectation(context, assignment, result.request_sha256),
+                result=stored,
+                expected=expectation(context, assignment, stored.request_sha256),
             )
             return {
                 "operation": "acknowledge",
                 "acknowledged": True,
-                "result_sha256": hosted_message_digest(result),
+                "result_sha256": digest,
                 "shadow_only": True,
                 "weight_eligible": False,
             }
 
-        if args.operation == "evaluate" and clock() >= assignment.deadline_unix:
-            raise HostedControlCommandError("hosted assignment has expired")
-        if args.operation == "status" and args.result_out is None:
-            raise HostedControlCommandError("result output path is required")
-        wait_until = clock() + (args.wait_seconds if args.operation == "status" else 0)
+        wait_until = clock() + getattr(args, "wait_seconds", 0)
         while True:
             request = signed_request(context, assignment, args.operation, now=clock())
             received = await client.exchange(
@@ -408,24 +437,21 @@ async def run_command(
                 ),
             )
             if isinstance(received, HostedCodingResult):
-                if args.result_out is None:
-                    raise HostedControlCommandError("result output path is required")
-                _write_result(args.result_out, received)
-                return {
-                    "operation": args.operation,
-                    "terminal": True,
-                    "outcome": received.outcome,
-                    "result_sha256": hosted_message_digest(received),
-                    "evidence_sha256": received.evidence_sha256,
-                    "shadow_only": True,
-                    "weight_eligible": False,
-                }
+                if result_out is not None:
+                    _write_result(result_out, received)
+                return _terminal_summary(
+                    args.operation, received, saved=result_out is not None
+                )
             assert isinstance(received, HostedCodingStatus)
-            if clock() + POLL_INTERVAL_SECONDS > wait_until:
+            now = clock()
+            # An attempt that never started cannot start after its deadline.
+            expired = received.state != "started" and now >= assignment.deadline_unix
+            if expired or now + POLL_INTERVAL_SECONDS > wait_until:
                 return {
                     "operation": args.operation,
                     "terminal": False,
                     "state": received.state,
+                    "assignment_expired": now >= assignment.deadline_unix,
                     "shadow_only": True,
                     "weight_eligible": False,
                 }
@@ -446,10 +472,12 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--validator-hotkey", required=True)
         command.add_argument("--assignment", type=Path, required=True)
         command.add_argument("--assignment-sha256", required=True)
-        if name == "status":
+        if name == "evaluate":
+            command.add_argument("--result-out", type=Path)
+        elif name == "status":
             command.add_argument("--result-out", type=Path, required=True)
             command.add_argument("--wait-seconds", type=int, default=0)
-        elif name == "acknowledge":
+        else:
             command.add_argument("--result", type=Path, required=True)
     return root
 
@@ -457,17 +485,11 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        args.result_out = getattr(args, "result_out", None)
         if (
             args.operation == "status"
             and not 0 <= args.wait_seconds <= MAX_WAIT_SECONDS
         ):
             raise HostedControlCommandError("hosted control arguments are invalid")
-        import bittensor
-
-        from ditto.validator.config import parse_validator_config_from_env
-        from ditto.validator.signing import load_validator_keypair
-
         context = load_context(
             os.environ,
             pinned_validator_hotkey=args.validator_hotkey,

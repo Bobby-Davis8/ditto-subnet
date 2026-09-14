@@ -391,6 +391,8 @@ async def test_acknowledgement_is_bound_to_the_verified_result_before_network() 
 
 async def test_exchange_never_sends_an_acknowledgement() -> None:
     request, _, expected, key = _acknowledgement_case()
+    # Bind the expectation to this request so only the operation guard can refuse.
+    expected = replace(expected, request_sha256=hosted_message_digest(request))
     async with HostedCodingTransport(
         platform_origin="https://platform.example",
         trusted_verifiers={key.ss58_address: key},

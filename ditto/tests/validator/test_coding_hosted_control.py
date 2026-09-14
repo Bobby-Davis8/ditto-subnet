@@ -26,7 +26,7 @@ from ditto.validator.coding_hosted_transport import HostedCodingTransportError
 NOW = 1788590000
 PLATFORM = bittensor.Keypair.create_from_uri("//Alice")
 VALIDATOR = bittensor.Keypair.create_from_uri("//Bob")
-# Pinned in apps/platform/ditto/tests/api_server/test_coding_hosted_assignment_vector.py
+# Pinned in apps/platform/ditto/tests/db/queries/test_coding_hosted_assignment_vector.py
 # against HostedAssignmentAuthority.digest(); both sides must agree.
 GOLDEN_SHA256 = "3dbb4daee1b6563f57aece30bfcf54a5a146a9d641fc6c6f263d4f4d1ef5ec8e"
 
@@ -330,11 +330,15 @@ async def test_evaluate_signs_once_with_the_in_place_key(tmp_path: Path) -> None
         "operation": "evaluate",
         "terminal": False,
         "state": "started",
+        "assignment_expired": False,
         "shadow_only": True,
         "weight_eligible": False,
     }
     assert [r.operation for r in sent] == ["evaluate"] and signer.signed == 1
-    assert sent[0].expires_at_unix - sent[0].issued_at_unix == 60
+    # Backdated for clock skew; the signed window stays within Platform's 120 s.
+    assert sent[0].issued_at_unix == NOW - control.REQUEST_BACKDATE_SECONDS
+    assert sent[0].expires_at_unix == NOW + control.REQUEST_LIFETIME_SECONDS
+    assert 0 < sent[0].expires_at_unix - sent[0].issued_at_unix <= 120
 
 
 async def test_evaluate_refuses_an_expired_assignment_before_signing(
@@ -406,7 +410,8 @@ async def test_status_refuses_an_existing_or_shared_result_path(
     tmp_path: Path,
 ) -> None:
     shared = tmp_path / "shared"
-    shared.mkdir(mode=0o755)
+    shared.mkdir()
+    shared.chmod(0o755)
     existing = tmp_path / "private"
     existing.mkdir(mode=0o700)
     (existing / "result.json").write_text("{}")
@@ -415,14 +420,21 @@ async def test_status_refuses_an_existing_or_shared_result_path(
         request = HostedCodingRequest.model_validate_json(outgoing.content)
         return _respond(_receipt(request, terminal=True), 200)
 
-    for path in (shared / "result.json", existing / "result.json"):
+    for path in (
+        shared / "result.json",
+        existing / "result.json",
+        Path("relative-result.json"),
+    ):
+        signer = Signer()
         with pytest.raises(control.HostedControlCommandError):
             await control.run_command(
-                _args(tmp_path, "status", result_out=path, wait_seconds=0),
-                context(),
+                _args(tmp_path, "status", result_out=path, wait_seconds=3600),
+                context(signer),
                 clock=lambda: NOW,
-                transport=httpx.MockTransport(respond),
+                transport=httpx.MockTransport(lambda _: pytest.fail("network used")),
             )
+        # Refused before any request is signed or sent.
+        assert signer.signed == 0
 
 
 async def test_acknowledge_binds_the_exact_verified_result(tmp_path: Path) -> None:
@@ -548,3 +560,155 @@ def test_worker_never_imports_the_command() -> None:
         if path.name in {"coding_hosted_control.py"}:
             continue
         assert "coding_hosted_control" not in path.read_text(), path
+
+
+async def test_evaluate_reports_an_already_finished_attempt_without_refusing(
+    tmp_path: Path,
+) -> None:
+    def respond(outgoing: httpx.Request) -> httpx.Response:
+        request = HostedCodingRequest.model_validate_json(outgoing.content)
+        return _respond(_receipt(request, terminal=True), 200)
+
+    summary = await control.run_command(
+        _args(tmp_path, "evaluate"),
+        context(),
+        clock=lambda: NOW,
+        transport=httpx.MockTransport(respond),
+    )
+    assert summary["terminal"] is True and summary["result_saved"] is False
+    assert summary["outcome"] == "completed"
+
+
+async def test_receipts_are_accepted_within_bounded_clock_skew(tmp_path: Path) -> None:
+    for platform_ahead, accepted in (
+        (20, True),
+        (control.HOSTED_CLOCK_SKEW_SECONDS + 5, False),
+    ):
+
+        def respond(
+            outgoing: httpx.Request, ahead: int = platform_ahead
+        ) -> httpx.Response:
+            request = HostedCodingRequest.model_validate_json(outgoing.content)
+            status = HostedCodingStatus.model_validate_json(
+                _receipt(request, terminal=False)
+            )
+            shifted = status.model_copy(
+                update={
+                    "issued_at_unix": NOW + ahead,
+                    "expires_at_unix": NOW + ahead + 120,
+                }
+            )
+            return _respond(_signed(shifted), 202)
+
+        call = control.run_command(
+            _args(tmp_path, "evaluate"),
+            context(),
+            clock=lambda: NOW,
+            transport=httpx.MockTransport(respond),
+        )
+        if accepted:
+            assert (await call)["state"] == "started"
+        else:
+            with pytest.raises(HostedCodingTransportError):
+                await call
+
+
+async def test_status_stops_polling_an_unstarted_attempt_after_its_deadline(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def respond(outgoing: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        request = HostedCodingRequest.model_validate_json(outgoing.content)
+        status = HostedCodingStatus.model_validate_json(
+            _receipt(request, terminal=False)
+        ).model_copy(
+            update={
+                "state": "admitted",
+                "issued_at_unix": NOW + 1800,
+                "expires_at_unix": NOW + 1920,
+            }
+        )
+        return _respond(_signed(status), 202)
+
+    output = tmp_path / "out"
+    output.mkdir(mode=0o700)
+    summary = await control.run_command(
+        _args(tmp_path, "status", result_out=output / "r.json", wait_seconds=3600),
+        context(),
+        clock=lambda: NOW + 1800,
+        sleep=lambda _: pytest.fail("kept polling"),
+        transport=httpx.MockTransport(respond),
+    )
+    assert calls == 1
+    assert summary["terminal"] is False and summary["assignment_expired"] is True
+
+
+async def test_failed_result_write_leaves_no_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "out"
+    output.mkdir(mode=0o700)
+
+    def respond(outgoing: httpx.Request) -> httpx.Response:
+        request = HostedCodingRequest.model_validate_json(outgoing.content)
+        return _respond(_receipt(request, terminal=True), 200)
+
+    def failing_fsync(_: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(control.os, "fsync", failing_fsync)
+    with pytest.raises(control.HostedControlCommandError):
+        await control.run_command(
+            _args(
+                tmp_path, "status", result_out=output / "result.json", wait_seconds=0
+            ),
+            context(),
+            clock=lambda: NOW,
+            transport=httpx.MockTransport(respond),
+        )
+    assert not (output / "result.json").exists()
+
+
+async def test_acknowledge_refuses_an_expired_result_before_network(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "out"
+    output.mkdir(mode=0o700)
+
+    def terminal(outgoing: httpx.Request) -> httpx.Response:
+        request = HostedCodingRequest.model_validate_json(outgoing.content)
+        return _respond(_receipt(request, terminal=True), 200)
+
+    written = output / "result.json"
+    await control.run_command(
+        _args(tmp_path, "status", result_out=written, wait_seconds=0),
+        context(),
+        clock=lambda: NOW,
+        transport=httpx.MockTransport(terminal),
+    )
+    signer = Signer()
+    with pytest.raises(control.HostedControlCommandError) as caught:
+        await control.run_command(
+            _args(tmp_path, "acknowledge", result=written),
+            context(signer),
+            clock=lambda: NOW + 3600 + control.HOSTED_CLOCK_SKEW_SECONDS,
+            transport=httpx.MockTransport(lambda _: pytest.fail("network used")),
+        )
+    assert "expired" in str(caught.value) and signer.signed == 0
+
+
+async def test_fifo_inputs_are_refused_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    with pytest.raises(control.HostedControlCommandError):
+        control.load_assignment(fifo, control.assignment_sha256(projection()))
+    with pytest.raises(control.HostedControlCommandError):
+        await control.run_command(
+            _args(tmp_path, "acknowledge", result=fifo),
+            context(),
+            clock=lambda: NOW,
+            transport=httpx.MockTransport(lambda _: pytest.fail("network used")),
+        )
