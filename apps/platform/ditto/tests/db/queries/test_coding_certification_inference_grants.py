@@ -108,6 +108,13 @@ async def _create(
         "authorize_coding_certification_harness_delivery",
         _async_ok,
     )
+    # The operator allowlist is exercised against real Postgres in
+    # test_coding_certification_leases.py; this fake session has no bind.
+    monkeypatch.setattr(
+        coding_certification_inference_grants,
+        "require_coding_certification_allowlisted",
+        _async_ok,
+    )
     session = _Session(fixture, scalars=[_NOW, None])
     result = await ensure_coding_certification_inference_grant(
         session,  # type: ignore[arg-type]

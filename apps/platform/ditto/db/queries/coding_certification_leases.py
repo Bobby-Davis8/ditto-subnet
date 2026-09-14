@@ -17,7 +17,15 @@ from ditto.api_server.coding_certification_canary import (
     CodingCertificationCanaryUnavailableError,
     public_certification_canary,
 )
-from ditto.db.models import Agent, CodingCertificationLease
+from ditto.db.models import (
+    Agent,
+    CodingCapabilityCertification,
+    CodingCertificationInferenceGrant,
+    CodingCertificationLease,
+)
+from ditto.db.queries.coding_certification_allowlist import (
+    require_coding_certification_allowlisted,
+)
 from ditto.db.queries.core_qualification import (
     latest_complete_core_qualification_observation,
     latest_core_qualification_policy,
@@ -29,6 +37,11 @@ _INFLIGHT = (
     CodingCertificationLeaseStatus.ISSUED.value,
     CodingCertificationLeaseStatus.CLAIMED.value,
 )
+# A claimed lease that passes its deadline now releases its identity, so bound
+# how often one exact identity can be re-run (and re-granted Platform-paid
+# inference) inside a rolling window.
+MAX_CLAIMED_ATTEMPTS_PER_IDENTITY = 3
+CLAIMED_ATTEMPT_WINDOW = timedelta(hours=24)
 
 
 class CodingCertificationLeaseNotAvailableError(RuntimeError):
@@ -48,6 +61,13 @@ class CodingCertificationLeaseResult:
     row: CodingCertificationLease
     authority: CodingCertificationLeaseAuthority
     idempotent: bool
+
+
+@dataclass(frozen=True)
+class CodingCertificationLeaseAuditRow:
+    lease: CodingCertificationLease
+    inference_grant_status: str | None
+    receipt_status: str | None
 
 
 @dataclass(frozen=True)
@@ -133,12 +153,73 @@ async def _expire_due_leases(
         )
     ).all()
     for row in rows:
-        if (
-            _aware(row.deadline) <= now
-            and row.status == CodingCertificationLeaseStatus.ISSUED.value
-        ):
-            row.status = CodingCertificationLeaseStatus.EXPIRED.value
+        await _expire_if_due(session, row, now=now)
     await session.flush()
+
+
+def mark_certification_inference_grant_revoked(
+    grant: CodingCertificationInferenceGrant, *, now: datetime
+) -> None:
+    """Terminal revocation: clears every bearer binding, keeps the accounting."""
+
+    grant.status = "revoked"
+    grant.bearer_digest = None
+    grant.revoke_bearer_digest = None
+    grant.broker_public_key = None
+    grant.active_requests = 0
+    grant.revoked_at = now
+    grant.updated_at = now
+
+
+async def _expire_if_due(
+    session: AsyncSession,
+    row: CodingCertificationLease,
+    *,
+    now: datetime,
+) -> bool:
+    """Expire one locked in-flight lease past its deadline and revoke its grant.
+
+    ``claimed_at`` is kept, so an expired row still shows whether the attempt
+    was claimed. Nothing is deleted.
+    """
+
+    if row.status not in _INFLIGHT or _aware(row.deadline) > now:
+        return False
+    row.status = CodingCertificationLeaseStatus.EXPIRED.value
+    grants = (
+        await session.scalars(
+            select(CodingCertificationInferenceGrant)
+            .where(
+                CodingCertificationInferenceGrant.lease_id == row.lease_id,
+                CodingCertificationInferenceGrant.status.in_(("pending", "active")),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    for grant in grants:
+        mark_certification_inference_grant_revoked(grant, now=now)
+    await session.flush()
+    return True
+
+
+async def expire_coding_certification_lease_if_due(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+) -> bool:
+    """Commit-side helper for callers that must refuse a lease past its deadline."""
+
+    now = await _database_now(session)
+    row = await session.get(
+        CodingCertificationLease,
+        lease_id,
+        with_for_update=True,
+        populate_existing=True,
+    )
+    if row is None:
+        return False
+    return await _expire_if_due(session, row, now=now)
 
 
 async def issue_coding_certification_lease(
@@ -164,6 +245,12 @@ async def issue_coding_certification_lease(
     assert agent.screened_image_id is not None
     assert agent.screened_image_ref is not None
     assert agent.screened_image_upload_id is not None
+    await require_coding_certification_allowlisted(
+        session,
+        agent_id=agent.agent_id,
+        artifact_sha256=agent.sha256,
+        validator_hotkey=validator_hotkey,
+    )
     await lock_core_qualification_bench(session, bench_version=bench_version)
     policy = await latest_core_qualification_policy(
         session, bench_version=bench_version
@@ -221,6 +308,28 @@ async def issue_coding_certification_lease(
             return result_from_row(inflight, idempotent=True)
         raise CodingCertificationLeaseConflictError(
             "coding certification lease already exists for this artifact"
+        )
+    recent_claims = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(CodingCertificationLease)
+            .where(
+                CodingCertificationLease.agent_id == agent.agent_id,
+                CodingCertificationLease.artifact_sha256 == agent.sha256,
+                CodingCertificationLease.screened_image_sha256
+                == agent.screened_image_sha256,
+                CodingCertificationLease.bench_version == bench_version,
+                CodingCertificationLease.coding_contract_version
+                == coding_contract_version,
+                CodingCertificationLease.claimed_at.is_not(None),
+                CodingCertificationLease.claimed_at > now - CLAIMED_ATTEMPT_WINDOW,
+            )
+        )
+        or 0
+    )
+    if recent_claims >= MAX_CLAIMED_ATTEMPTS_PER_IDENTITY:
+        raise CodingCertificationLeaseNotAvailableError(
+            "coding certification attempt budget is exhausted"
         )
     try:
         canary = public_certification_canary()
@@ -291,12 +400,7 @@ async def claim_coding_certification_lease(
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease is not available"
         )
-    if (
-        row.status == CodingCertificationLeaseStatus.ISSUED.value
-        and _aware(row.deadline) <= now
-    ):
-        row.status = CodingCertificationLeaseStatus.EXPIRED.value
-        await session.flush()
+    if await _expire_if_due(session, row, now=now):
         return result_from_row(row, idempotent=False)
     if row.status == CodingCertificationLeaseStatus.CLAIMED.value:
         return result_from_row(row, idempotent=True)
@@ -316,7 +420,11 @@ async def abort_coding_certification_lease(
     validator_hotkey: str,
     lease_id: UUID,
 ) -> CodingCertificationLeaseResult:
-    """Abort an unclaimed issued lease. Claimed leases cannot clean-rerun."""
+    """Abort an unclaimed issued lease.
+
+    A claimed lease cannot be aborted before its deadline, so a restart cannot
+    create an immediate clean rerun; after the deadline it only expires.
+    """
 
     now = await _database_now(session)
     row = await session.get(CodingCertificationLease, lease_id, with_for_update=True)
@@ -326,17 +434,12 @@ async def abort_coding_certification_lease(
         )
     if row.status == CodingCertificationLeaseStatus.ABORTED.value:
         return result_from_row(row, idempotent=True)
+    if await _expire_if_due(session, row, now=now):
+        return result_from_row(row, idempotent=False)
     if row.status == CodingCertificationLeaseStatus.CLAIMED.value:
         raise CodingCertificationLeaseConflictError(
             "claimed coding certification lease cannot be aborted"
         )
-    if (
-        row.status == CodingCertificationLeaseStatus.ISSUED.value
-        and _aware(row.deadline) <= now
-    ):
-        row.status = CodingCertificationLeaseStatus.EXPIRED.value
-        await session.flush()
-        return result_from_row(row, idempotent=False)
     if row.status != CodingCertificationLeaseStatus.ISSUED.value:
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease is not available"
@@ -353,6 +456,69 @@ async def get_coding_certification_lease(
     lease_id: UUID,
 ) -> CodingCertificationLease | None:
     return await session.get(CodingCertificationLease, lease_id)
+
+
+async def list_coding_certification_leases(
+    session: AsyncSession,
+    *,
+    agent_id: UUID | None,
+    validator_hotkey: str | None,
+    status: CodingCertificationLeaseStatus | None,
+    limit: int,
+    offset: int,
+) -> tuple[list[CodingCertificationLeaseAuditRow], int]:
+    """Read-only, newest-first lease audit page. Never transitions a row."""
+
+    filters = []
+    if agent_id is not None:
+        filters.append(CodingCertificationLease.agent_id == agent_id)
+    if validator_hotkey is not None:
+        filters.append(CodingCertificationLease.validator_hotkey == validator_hotkey)
+    if status is not None:
+        filters.append(CodingCertificationLease.status == status.value)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(CodingCertificationLease).where(*filters)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(
+                CodingCertificationLease,
+                CodingCertificationInferenceGrant.status,
+                CodingCapabilityCertification.status,
+            )
+            .outerjoin(
+                CodingCertificationInferenceGrant,
+                CodingCertificationInferenceGrant.lease_id
+                == CodingCertificationLease.lease_id,
+            )
+            .outerjoin(
+                CodingCapabilityCertification,
+                CodingCapabilityCertification.lease_id
+                == CodingCertificationLease.lease_id,
+            )
+            .where(*filters)
+            .order_by(
+                CodingCertificationLease.issued_at.desc(),
+                CodingCertificationLease.lease_id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return (
+        [
+            CodingCertificationLeaseAuditRow(
+                lease=lease,
+                inference_grant_status=grant_status,
+                receipt_status=receipt_status,
+            )
+            for lease, grant_status, receipt_status in rows
+        ],
+        total,
+    )
 
 
 async def authorize_coding_certification_harness_delivery(

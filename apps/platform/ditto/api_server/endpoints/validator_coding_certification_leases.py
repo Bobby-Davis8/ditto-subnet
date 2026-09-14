@@ -56,6 +56,10 @@ from ditto.db.queries.artifact_fetch_audit import (
     ENDPOINT_VALIDATOR_CODING_CERTIFICATION_HARNESS,
     record_artifact_fetch,
 )
+from ditto.db.queries.coding_certification_allowlist import (
+    CODING_CERTIFICATION_NOT_ALLOWLISTED,
+    CodingCertificationAllowlistRefusedError,
+)
 from ditto.db.queries.coding_certification_inference_grants import (
     activate_coding_certification_inference_grant,
     ensure_coding_certification_inference_grant,
@@ -94,6 +98,7 @@ _NO_STORE = {"Cache-Control": "no-store"}
     response_model=CodingCertificationLeaseResponse,
     responses={
         401: {"description": "Signature invalid or validator not permitted."},
+        403: {"description": "The enabled certification allowlist refuses it."},
         404: {"description": "Agent is not currently eligible."},
         409: {"description": "Replay or in-flight lease conflict."},
         503: {"description": "Public canary identity unavailable."},
@@ -522,10 +527,14 @@ async def request_coding_certification_inference_grant(
                 detail="coding certification lease request replayed",
                 headers=_NO_STORE,
             ) from None
+        except CodingCertificationAllowlistRefusedError as error:
+            grant_error = error
         except CodingInferenceGrantNotAvailableError as error:
             grant_error = error
         except CodingInferenceGrantIntegrityError as error:
             grant_error = error
+    if isinstance(grant_error, CodingCertificationAllowlistRefusedError):
+        raise _not_allowlisted()
     if isinstance(grant_error, CodingInferenceGrantNotAvailableError):
         raise HTTPException(
             status_code=404,
@@ -616,10 +625,13 @@ async def exchange_coding_certification_inference_grant(
                 headers=_NO_STORE,
             ) from None
         except (
+            CodingCertificationAllowlistRefusedError,
             CodingInferenceGrantNotAvailableError,
             CodingInferenceGrantIntegrityError,
         ) as error:
             grant_error = error
+    if isinstance(grant_error, CodingCertificationAllowlistRefusedError):
+        raise _not_allowlisted()
     if grant_error is not None:
         raise HTTPException(
             status_code=409,
@@ -741,6 +753,14 @@ async def revoke_coding_certification_inference_grant_endpoint(
     )
 
 
+def _not_allowlisted() -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail=CODING_CERTIFICATION_NOT_ALLOWLISTED,
+        headers=_NO_STORE,
+    )
+
+
 def _response(
     result: CodingCertificationLeaseResult,
 ) -> CodingCertificationLeaseResponse:
@@ -824,6 +844,7 @@ async def _run_signed_lease_mutation(
             headers=_NO_STORE,
         ) from error
     except (
+        CodingCertificationAllowlistRefusedError,
         CodingCertificationLeaseNotAvailableError,
         CodingCertificationLeaseConflictError,
         CodingCertificationLeaseUnavailableError,
@@ -834,6 +855,8 @@ async def _run_signed_lease_mutation(
             nonce=nonce,
             now=now,
         )
+        if isinstance(error, CodingCertificationAllowlistRefusedError):
+            raise _not_allowlisted() from None
         if isinstance(error, CodingCertificationLeaseNotAvailableError):
             raise HTTPException(
                 status_code=404,

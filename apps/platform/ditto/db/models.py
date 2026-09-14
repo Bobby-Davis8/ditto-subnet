@@ -1358,7 +1358,9 @@ class CodingCertificationLease(Base):
             "AND aborted_at IS NULL) "
             "OR (status = 'aborted' AND aborted_at IS NOT NULL "
             "AND aborted_at >= issued_at AND claimed_at IS NULL) "
-            "OR (status = 'expired' AND claimed_at IS NULL AND aborted_at IS NULL)",
+            "OR (status = 'expired' AND aborted_at IS NULL "
+            "AND (claimed_at IS NULL "
+            "OR (claimed_at >= issued_at AND claimed_at < deadline)))",
             name="coding_certification_leases_lifecycle_check",
         ),
         Index(
@@ -1375,6 +1377,58 @@ class CodingCertificationLease(Base):
             "coding_certification_leases_validator_deadline_idx",
             "validator_hotkey",
             "deadline",
+        ),
+    )
+
+
+class CodingCertificationAllowlistRevision(Base):
+    """Append-only operator restriction on who may start coding certification.
+
+    No row means the restriction is disabled. An enabled revision admits only
+    its exact ``(agent_id, artifact_sha256, validator_hotkey)`` tuples; an
+    enabled revision with no entries refuses every certification lease and
+    certification inference grant.
+    """
+
+    __tablename__ = "coding_certification_allowlist_revisions"
+
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    entries: Mapped[list] = mapped_column(_JSON_VARIANT, nullable=False)
+    checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "parent_revision >= 0 AND parent_revision < revision",
+            name="coding_certification_allowlist_parent_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(entries) = 'array' "
+            "AND jsonb_array_length(entries) <= 16 "
+            "AND (enabled OR jsonb_array_length(entries) = 0)",
+            name="coding_certification_allowlist_entries_check",
+        ),
+        CheckConstraint(
+            "checksum ~ '^[0-9a-f]{64}$'",
+            name="coding_certification_allowlist_checksum_check",
+        ),
+        CheckConstraint(
+            "length(trim(reason)) >= 8",
+            name="coding_certification_allowlist_reason_check",
+        ),
+        CheckConstraint(
+            "length(trim(actor)) BETWEEN 1 AND 120",
+            name="coding_certification_allowlist_actor_check",
+        ),
+        UniqueConstraint(
+            "parent_revision",
+            name="coding_certification_allowlist_parent_key",
         ),
     )
 
