@@ -51,3 +51,22 @@ replays them to verify unchanged paired metrics. Costs use the existing
 receipts, excluding private receipt IDs from the committed summary.
 
 Results and exact execution identities will be appended after completion.
+
+## Failure-only resume decision (before retry)
+
+Control first invocation saved500 rows but only496 judged: three reader TLS
+`bad record MAC` failures (`gpt4_e414231e`, `2ebe6c92`, `gpt4_68e94287`), and
+one judge TLS failure (`gpt4_7ca326fa`). Native graph/hydration and unchanged
+prepared snapshot gates passed. Progress counters/logs did not expose these
+case failures until the final report; they are not500 valid scores.
+
+Apply the preregistered single failure-only native resume. The wrapper pins the
+exact original report/checkpoint/journal hashes, source and binary; copies all
+496 judged rows unchanged, including wrong answers; and claims retry4 once.
+It refuses any different failure, retry complement, altered result or dirty
+source. The native harness re-prepares all500 contexts but queries only four.
+For the one judge-failed case, native resume regenerates its answer as well as
+retrying judging: it is an unjudged case, not a known-wrong answer retry. Its
+original answer is retained, the final outcome is not cherry-picked, and all
+original/new costs are counted. This is a protocol limitation relative to a
+judge-only retry, explicitly preserved in the record. No third attempt allowed.

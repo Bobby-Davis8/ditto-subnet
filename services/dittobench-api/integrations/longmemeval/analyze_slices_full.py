@@ -41,6 +41,8 @@ def main():
     inputs = [args.control, args.treatment, args.launch_spec, args.pilot_evidence]
     hashes = {str(p): digest(p) for p in inputs}
     a, b, spec, pilot = (json.loads(p.read_text()) for p in inputs)
+    require(a["git_sha"] == b["git_sha"] == spec["source_sha"], "native reports differ from source freeze")
+    require(a["meta"]["lme_manifest_sha256"] == "a232c2b7ee77f06597535416682c00187f9c44bb2a324de7ccd5dce3fa13ccef", "prepared manifest differs")
     result = full_analysis(a, b, spec["case_ids"], pilot["case_ids"])
     clean_a, clean_b = public_report(a), public_report(b)
     require(full_analysis(clean_a, clean_b, spec["case_ids"], pilot["case_ids"]) == result, "export changed audit")
