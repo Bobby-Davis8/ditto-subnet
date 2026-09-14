@@ -85,6 +85,25 @@ phrases, idempotent database authority and permanent `weight_eligible=false`.
 The MCP calls carry the signed-in operator email in `X-Admin-Actor`; no shared
 operator identity is used.
 
+The contract-v1 public-canary certification path has three canary-safety tools:
+
+- `get_coding_certification_allowlist` reads Platform's append-only allowlist.
+  Revision 0 is the built-in default and means disabled.
+- `set_coding_certification_allowlist` (write) appends one complete revision
+  with `expectedRevision`, `enabled`, up to 16 exact
+  `{agent_id, artifact_sha256, validator_hotkey}` entries, a reason, and
+  `APPLY CODING CERTIFICATION ALLOWLIST ENABLED <count>` or
+  `APPLY CODING CERTIFICATION ALLOWLIST DISABLED`. When enabled, Platform
+  refuses every unlisted lease issue, grant offer, and grant exchange with a
+  fixed 403 and revokes live grants for unlisted tuples. It can only narrow
+  access; there is no certification bypass.
+- `list_coding_certification_leases` pages lease rows newest first with status,
+  timestamps, `deadline_passed`, and grant/receipt status. It never returns
+  grant ids, bearer digests, broker keys, or image locators.
+
+See `apps/platform/docs/coding-certification-lease.md` for deadline expiry of
+claimed leases and the claimed-attempt budget.
+
 Shadow admission score floors remain the existing append-only
 `get_core_qualification_policy` / `set_core_qualification_policy` controls.
 They determine qualification only; they never rewrite validator scores. Coding

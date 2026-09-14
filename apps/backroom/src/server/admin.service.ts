@@ -127,6 +127,11 @@ import {
   agentCodingShadowEvaluationStatusSchema,
   agentCoreQualificationInputSchema,
   agentCoreQualificationStatusSchema,
+  codingCertificationAllowlistApplySchema,
+  codingCertificationAllowlistControlSchema,
+  codingCertificationLeaseListSchema,
+  listCodingCertificationLeasesInputSchema,
+  setCodingCertificationAllowlistInputSchema,
   coreQualificationPolicyControlSchema,
   getCoreQualificationPolicyInputSchema,
   refreshAgentCoreQualificationInputSchema,
@@ -2383,6 +2388,47 @@ export async function setCoreQualificationPolicy(rawInput: unknown, actor: strin
     },
   })
   return coreQualificationPolicyControlSchema.parse(payload)
+}
+
+const CODING_CERTIFICATION_ALLOWLIST_PATH = '/api/v1/admin/coding-certification-allowlist'
+
+export async function fetchCodingCertificationAllowlist() {
+  // The platform caps history at 200; the MCP tool pages that window locally.
+  const payload = await platformAdminRequest(
+    `${CODING_CERTIFICATION_ALLOWLIST_PATH}?history_limit=200`,
+  )
+  return codingCertificationAllowlistControlSchema.parse(payload)
+}
+
+export async function setCodingCertificationAllowlist(rawInput: unknown, actor: string) {
+  const input = setCodingCertificationAllowlistInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(CODING_CERTIFICATION_ALLOWLIST_PATH, {
+    method: 'POST',
+    actor,
+    body: {
+      expected_revision: input.expectedRevision,
+      enabled: input.enabled,
+      entries: input.entries,
+      reason: input.reason,
+      actor,
+      confirmation: input.confirmation,
+    },
+  })
+  return codingCertificationAllowlistApplySchema.parse(payload)
+}
+
+export async function fetchCodingCertificationLeases(rawInput: unknown) {
+  const input = listCodingCertificationLeasesInputSchema.parse(rawInput)
+  const query = new URLSearchParams()
+  if (input.agentId) query.set('agent_id', input.agentId)
+  if (input.validatorHotkey) query.set('validator_hotkey', input.validatorHotkey)
+  if (input.status) query.set('status', input.status)
+  query.set('limit', String(input.limit))
+  query.set('offset', String(input.offset))
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/coding-certification-leases?${query}`,
+  )
+  return codingCertificationLeaseListSchema.parse(payload)
 }
 
 export async function fetchAgentCoreQualification(rawInput: unknown) {

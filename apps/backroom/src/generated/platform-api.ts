@@ -494,6 +494,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/coding-certification-allowlist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Coding Certification Allowlist
+         * @description Current restriction (revision 0 = built-in disabled) and newest-first history.
+         */
+        get: operations["get_coding_certification_allowlist_api_v1_admin_coding_certification_allowlist_get"];
+        put?: never;
+        /**
+         * Set Coding Certification Allowlist
+         * @description Append one complete revision; enabling also revokes unlisted live grants.
+         */
+        post: operations["set_coding_certification_allowlist_api_v1_admin_coding_certification_allowlist_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/coding-certification-leases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Coding Certification Lease Audit
+         * @description Newest-first certification lease rows without grant ids or bearer data.
+         */
+        get: operations["list_coding_certification_lease_audit_api_v1_admin_coding_certification_leases_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/coding-control-plane": {
         parameters: {
             query?: never;
@@ -7135,6 +7179,133 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** AdminCodingCertificationAllowlistApplyResponse */
+        AdminCodingCertificationAllowlistApplyResponse: {
+            current: components["schemas"]["CodingCertificationAllowlistRevision"];
+            /** Enabled */
+            enabled: boolean;
+            /** History */
+            history: components["schemas"]["CodingCertificationAllowlistRevision"][];
+            /**
+             * Max Entries
+             * @default 16
+             */
+            max_entries: number;
+            /** Revoked Inference Grant Count */
+            revoked_inference_grant_count: number;
+            /**
+             * Weight Eligible
+             * @default false
+             * @constant
+             */
+            weight_eligible: false;
+        };
+        /** AdminCodingCertificationAllowlistRequest */
+        AdminCodingCertificationAllowlistRequest: {
+            /**
+             * Actor
+             * @default admin_api
+             */
+            actor: string;
+            /** Confirmation */
+            confirmation: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Entries */
+            entries: components["schemas"]["CodingCertificationAllowlistEntry"][];
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
+        };
+        /** AdminCodingCertificationAllowlistResponse */
+        AdminCodingCertificationAllowlistResponse: {
+            current: components["schemas"]["CodingCertificationAllowlistRevision"];
+            /** Enabled */
+            enabled: boolean;
+            /** History */
+            history: components["schemas"]["CodingCertificationAllowlistRevision"][];
+            /**
+             * Max Entries
+             * @default 16
+             */
+            max_entries: number;
+            /**
+             * Weight Eligible
+             * @default false
+             * @constant
+             */
+            weight_eligible: false;
+        };
+        /** AdminCodingCertificationLeaseList */
+        AdminCodingCertificationLeaseList: {
+            /** Leases */
+            leases: components["schemas"]["AdminCodingCertificationLeaseRecord"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+            /**
+             * Weight Eligible
+             * @default false
+             * @constant
+             */
+            weight_eligible: false;
+        };
+        /**
+         * AdminCodingCertificationLeaseRecord
+         * @description One lease row. Grant ids, bearer digests, and image locators are omitted.
+         */
+        AdminCodingCertificationLeaseRecord: {
+            /** Aborted At */
+            aborted_at: string | null;
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Bench Version */
+            bench_version: number;
+            /** Claimed At */
+            claimed_at: string | null;
+            /** Coding Contract Version */
+            coding_contract_version: number;
+            /**
+             * Deadline
+             * Format: date-time
+             */
+            deadline: string;
+            /** Deadline Passed */
+            deadline_passed: boolean;
+            /** Inference Grant Status */
+            inference_grant_status: ("pending" | "active" | "revoked" | "exhausted") | null;
+            /**
+             * Issued At
+             * Format: date-time
+             */
+            issued_at: string;
+            /**
+             * Lease Id
+             * Format: uuid
+             */
+            lease_id: string;
+            receipt_status: components["schemas"]["CodingCertificationStatus"] | null;
+            /** Screened Image Sha256 */
+            screened_image_sha256: string;
+            status: components["schemas"]["CodingCertificationLeaseStatus"];
+            /** Validator Hotkey */
+            validator_hotkey: string;
+            /**
+             * Weight Eligible
+             * @default false
+             * @constant
+             */
+            weight_eligible: false;
+        };
         /** AdminCodingControlPlaneResponse */
         AdminCodingControlPlaneResponse: {
             /** Contract V1 Reconciliation Enabled */
@@ -12518,6 +12689,40 @@ export interface components {
             editable_paths: string[];
             /** Test Command Ids */
             test_command_ids: string[];
+        };
+        /**
+         * CodingCertificationAllowlistEntry
+         * @description One exact certifiable tuple. Every field must match; nothing is a wildcard.
+         */
+        CodingCertificationAllowlistEntry: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Validator Hotkey */
+            validator_hotkey: string;
+        };
+        /** CodingCertificationAllowlistRevision */
+        CodingCertificationAllowlistRevision: {
+            /** Actor */
+            actor: string;
+            /** Checksum */
+            checksum: string;
+            /** Created At */
+            created_at: string | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Entries */
+            entries: components["schemas"]["CodingCertificationAllowlistEntry"][];
+            /** Parent Revision */
+            parent_revision: number;
+            /** Reason */
+            reason: string;
+            /** Revision */
+            revision: number;
         };
         /** CodingCertificationHarnessLaunchRequest */
         CodingCertificationHarnessLaunchRequest: {
@@ -28726,6 +28931,116 @@ export interface operations {
             };
         };
     };
+    get_coding_certification_allowlist_api_v1_admin_coding_certification_allowlist_get: {
+        parameters: {
+            query?: {
+                history_limit?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminCodingCertificationAllowlistResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_coding_certification_allowlist_api_v1_admin_coding_certification_allowlist_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminCodingCertificationAllowlistRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminCodingCertificationAllowlistApplyResponse"];
+                };
+            };
+            /** @description Stale expected_revision or concurrent write. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Confirmation or entry shape is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_coding_certification_lease_audit_api_v1_admin_coding_certification_leases_get: {
+        parameters: {
+            query?: {
+                agent_id?: string | null;
+                validator_hotkey?: string | null;
+                status?: components["schemas"]["CodingCertificationLeaseStatus"] | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminCodingCertificationLeaseList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_coding_control_plane_api_v1_admin_coding_control_plane_get: {
         parameters: {
             query?: {
@@ -37927,6 +38242,13 @@ export interface operations {
             };
             /** @description Signature invalid or validator not permitted. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The enabled certification allowlist refuses it. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

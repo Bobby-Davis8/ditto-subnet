@@ -30,6 +30,18 @@ type GeneratedAdminHotkeyBanControl = PlatformComponents['schemas']['AdminHotkey
 type GeneratedAdminHotkeyBanList = PlatformComponents['schemas']['AdminHotkeyBanList']
 type GeneratedAdminHotkeyUnbanResponse =
   PlatformComponents['schemas']['AdminHotkeyUnbanResponse']
+type GeneratedCodingCertificationAllowlistEntry =
+  PlatformComponents['schemas']['CodingCertificationAllowlistEntry']
+type GeneratedCodingCertificationAllowlistRevision =
+  PlatformComponents['schemas']['CodingCertificationAllowlistRevision']
+type GeneratedCodingCertificationAllowlistControl =
+  PlatformComponents['schemas']['AdminCodingCertificationAllowlistResponse']
+type GeneratedCodingCertificationAllowlistApply =
+  PlatformComponents['schemas']['AdminCodingCertificationAllowlistApplyResponse']
+type GeneratedCodingCertificationLeaseRecord =
+  PlatformComponents['schemas']['AdminCodingCertificationLeaseRecord']
+type GeneratedCodingCertificationLeaseList =
+  PlatformComponents['schemas']['AdminCodingCertificationLeaseList']
 type GeneratedScoredPolicyRescreenView =
   PlatformComponents['schemas']['ScoredPolicyRescreenView']
 type GeneratedCopyCourtSettingsResponse =
@@ -5843,6 +5855,152 @@ export const agentCoreQualificationStatusSchema = z.object({
   observations: z.array(coreQualificationObservationSchema),
   shadow_only: z.literal(true),
 })
+
+// Shadow coding-certification canary controls. The allowlist is an
+// append-only Platform restriction that can only narrow who may start the
+// contract-v1 certification path; the lease audit never transitions a row.
+const CODING_SHA256 = /^[0-9a-f]{64}$/
+const CODING_SS58_HOTKEY = /^[1-9A-HJ-NP-Za-km-z]{47,48}$/
+export const CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES = 16
+
+export function codingCertificationAllowlistConfirmation(enabled: boolean, entryCount: number) {
+  return enabled
+    ? `APPLY CODING CERTIFICATION ALLOWLIST ENABLED ${entryCount}`
+    : 'APPLY CODING CERTIFICATION ALLOWLIST DISABLED'
+}
+
+export const codingCertificationAllowlistEntrySchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(CODING_SHA256),
+  validator_hotkey: z.string().regex(CODING_SS58_HOTKEY),
+} satisfies PlatformResponseShape<GeneratedCodingCertificationAllowlistEntry>)
+
+export const codingCertificationAllowlistRevisionSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  parent_revision: z.number().int().nonnegative(),
+  enabled: z.boolean(),
+  entries: z
+    .array(codingCertificationAllowlistEntrySchema)
+    .max(CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES),
+  checksum: z.string().regex(CODING_SHA256),
+  reason: z.string(),
+  actor: z.string(),
+  created_at: z.string().nullable(),
+} satisfies PlatformResponseShape<GeneratedCodingCertificationAllowlistRevision>)
+
+const codingCertificationAllowlistControlShape = {
+  enabled: z.boolean(),
+  current: codingCertificationAllowlistRevisionSchema,
+  history: z.array(codingCertificationAllowlistRevisionSchema).max(200),
+  max_entries: z.number().int().positive(),
+  weight_eligible: z.literal(false),
+} satisfies PlatformResponseShape<GeneratedCodingCertificationAllowlistControl>
+
+export const codingCertificationAllowlistControlSchema = z.object(
+  codingCertificationAllowlistControlShape,
+)
+
+export const codingCertificationAllowlistApplySchema = z.object({
+  ...codingCertificationAllowlistControlShape,
+  revoked_inference_grant_count: z.number().int().nonnegative(),
+} satisfies PlatformResponseShape<GeneratedCodingCertificationAllowlistApply>)
+
+// Entries use the Platform's snake_case tuple so an operator can paste the
+// exact identity straight from list_coding_certification_leases. The MCP
+// catalog carries every tool schema in every session, so it publishes compact
+// envelopes; the service parses the exact schemas below before any Platform
+// call.
+export const setCodingCertificationAllowlistMcpInputSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  enabled: z.boolean(),
+  entries: z
+    .array(z.record(z.string(), z.string()))
+    .max(CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES)
+    .default([]),
+  reason: auditReasonSchema(8),
+  confirmation: z.string(),
+})
+
+export const setCodingCertificationAllowlistInputSchema = z
+  .object({
+    expectedRevision: z.number().int().nonnegative(),
+    enabled: z.boolean(),
+    entries: z
+      .array(codingCertificationAllowlistEntrySchema)
+      .max(CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES)
+      .default([]),
+    reason: auditReasonSchema(8),
+    confirmation: z.string(),
+  })
+  .superRefine((value, context) => {
+    if (!value.enabled && value.entries.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['entries'],
+        message: 'a disabled allowlist must not carry entries',
+      })
+    }
+    const keys = value.entries.map(
+      (entry) => `${entry.agent_id}|${entry.artifact_sha256}|${entry.validator_hotkey}`,
+    )
+    if (new Set(keys).size !== keys.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['entries'],
+        message: 'allowlist entries must be unique',
+      })
+    }
+  })
+
+const codingCertificationLeaseFilterShape = {
+  status: z.enum(['issued', 'claimed', 'aborted', 'expired']).optional(),
+  limit: z.number().int().min(1).max(200).default(50),
+  offset: z.number().int().min(0).default(0),
+}
+
+export const listCodingCertificationLeasesMcpInputSchema = z.object({
+  agentId: z.string().optional(),
+  validatorHotkey: z.string().optional(),
+  ...codingCertificationLeaseFilterShape,
+})
+
+export const listCodingCertificationLeasesInputSchema = z.object({
+  agentId: z.string().uuid().optional(),
+  validatorHotkey: z.string().regex(CODING_SS58_HOTKEY).optional(),
+  ...codingCertificationLeaseFilterShape,
+})
+
+export const codingCertificationLeaseRecordSchema = z.object({
+  lease_id: z.string().uuid(),
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(CODING_SHA256),
+  screened_image_sha256: z.string().regex(CODING_SHA256),
+  bench_version: z.number().int().positive(),
+  coding_contract_version: z.number().int().positive(),
+  validator_hotkey: z.string(),
+  status: z.enum(['issued', 'claimed', 'aborted', 'expired']),
+  issued_at: z.string(),
+  claimed_at: z.string().nullable(),
+  aborted_at: z.string().nullable(),
+  deadline: z.string(),
+  deadline_passed: z.boolean(),
+  inference_grant_status: z.enum(['pending', 'active', 'revoked', 'exhausted']).nullable(),
+  receipt_status: z.enum(['unsupported', 'failed', 'certified']).nullable(),
+  weight_eligible: z.literal(false),
+} satisfies PlatformResponseShape<GeneratedCodingCertificationLeaseRecord>)
+
+export const codingCertificationLeaseListSchema = z.object({
+  total: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+  leases: z.array(codingCertificationLeaseRecordSchema).max(200),
+  weight_eligible: z.literal(false),
+} satisfies PlatformResponseShape<GeneratedCodingCertificationLeaseList>)
+
+export type CodingCertificationAllowlistControl = z.infer<
+  typeof codingCertificationAllowlistControlSchema
+>
+export type CodingCertificationLeaseList = z.infer<typeof codingCertificationLeaseListSchema>
 
 export const validatorScoreReplacementLookupInputSchema = z.object({
   agentId: z.string().uuid(),
