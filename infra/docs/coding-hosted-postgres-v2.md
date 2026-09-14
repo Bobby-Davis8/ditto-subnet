@@ -135,8 +135,27 @@ confirmation `MATERIALIZE NATIVE CODING POSTGRES ENVIRONMENT`, and unsets it. No
 workflow identity gets Secret Manager access.
 
 The role behaves as follows:
+- Before it inspects anything, it refuses a password variable and any other
+  variable named `coding_hosted_postgres_environment_*` except the `enabled`,
+  `confirmation`, `source_revision` and `host` inputs, whether set by extra
+  vars, inventory or vars files. Extra vars outrank registered results and
+  block variables. Without this check, a preset result such as
+  `coding_hosted_postgres_environment_units` would disable the live-unit guard,
+  and a preset `coding_hosted_postgres_environment_document` would replace both
+  the file and the digest used to verify it. The check runs outside the block
+  that defines the document variables.
+- The playbook gathers no facts. Host identity and the worker and custodian
+  accounts come from registered `setup` and `getent` probes, because an
+  `ansible_facts` extra var replaces gathered facts.
+- It requires a source revision of exactly 40 lowercase hex characters and a
+  host address that trimming leaves unchanged. A `$` anchor alone would accept
+  a trailing newline.
 - It validates a bounded, single-line password without logging it.
-- It refuses while the worker or any custody instance is live.
+- It refuses unless every listed worker or custody unit is `inactive` or
+  `failed`. This is an allow-list, so `active`, `activating`, `deactivating`,
+  `reloading`, `refreshing` (systemd 256 and later), `maintenance`, a future
+  state or an unparseable line all refuse. An empty listing means no such unit
+  is loaded and is allowed. The role stops nothing.
 - It writes each copy with `no_log` and without a diff.
 - It verifies ownership, mode, single link and the SHA-256 of each copy against
   the rendered document, with `no_log`. It never reads the bytes back to the

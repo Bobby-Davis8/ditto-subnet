@@ -13,6 +13,8 @@
 - name: Materialize native Coding PostgreSQL environment copies without starting a service
   hosts: role_coding_hosted
   become: true
-  gather_facts: true
+  # Identity comes from the role's registered probes, which extra vars cannot
+  # preset; gathered facts would be replaced by a -e ansible_facts value.
+  gather_facts: false
   roles:
     - coding_hosted_postgres_environment
