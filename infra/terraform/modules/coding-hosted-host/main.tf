@@ -194,7 +194,8 @@ resource "google_service_account_iam_member" "actas" {
 }
 
 # A protected main-only workflow identity: root-capable on this host only, with the
-# same destination-scoped IAP condition as custodians and no project roles.
+# same destination-scoped IAP condition as custodians. Its only project-level
+# permission is compute.projects.get, below.
 resource "google_compute_instance_iam_member" "workflow_osadmin" {
   for_each      = local.workflow_operators
   project       = var.project
@@ -215,6 +216,25 @@ resource "google_project_iam_member" "workflow_ssh" {
     description = "Protected workflow IAP SSH only to the qualification host's private destination IP."
     expression  = "destination.ip == '${module.host[0].internal_ip}' && destination.port == 22"
   }
+}
+
+# gcloud compute ssh reads the project resource before connecting, and
+# instance-scoped OS Login cannot satisfy that. Grant exactly that one read
+# permission, never compute.viewer, and only while a workflow identity is set.
+resource "google_project_iam_custom_role" "workflow_project_get" {
+  count       = length(local.workflow_operators)
+  project     = var.project
+  role_id     = "codingHostedWorkflowProjectGet"
+  title       = "Coding host workflow project read"
+  description = "Only compute.projects.get, required by gcloud compute ssh with instance-scoped OS Login."
+  permissions = ["compute.projects.get"]
+}
+
+resource "google_project_iam_member" "workflow_project_get" {
+  for_each = local.workflow_operators
+  project  = var.project
+  role     = google_project_iam_custom_role.workflow_project_get[0].name
+  member   = each.value
 }
 
 resource "google_service_account_iam_member" "workflow_actas" {

@@ -1,8 +1,10 @@
 # Protected main-only coding-host workflow identity. Root-capable on the native
 # qualification host only, through the coding-hosted-host module's
-# destination-scoped workflow grant. It has no project roles, Secret Manager
-# access, Terraform state access, or actAs beyond the host service account. A
-# separate pool prevents principals from the broad CI pool impersonating it.
+# destination-scoped workflow grant. Its only project-level permission is the
+# module's compute.projects.get custom role, which gcloud compute ssh requires.
+# It has no Secret Manager access, Terraform state access, or actAs beyond the
+# host service account. A separate pool prevents principals from the broad CI
+# pool impersonating it.
 locals {
   coding_hosted_operate_subject = "repo:ditto-assistant/ditto-subnet:environment:coding-hosted-operate"
 }

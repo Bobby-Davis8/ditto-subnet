@@ -152,11 +152,15 @@ operations (runtime install, custody convergence, PostgreSQL environment
 materialization) are separate reviewed changes and are not in this workflow.
 
 The `gcp-platform` root owns `coding-hosted-operate.tf`: a separate federation
-pool, provider and service account. The account has no project roles, Secret
-Manager, storage, or Terraform state access. Its only grants come from the
-`coding-hosted-host` module's `workflow_operator` input: instance OS Login admin,
-IAP tunnel access conditioned on the host's private IP and port 22, and actAs on
-the host's telemetry-only service account. Federation requires the exact repo and
+pool, provider and service account. The account has no Secret Manager, storage,
+or Terraform state access. Its only grants come from the `coding-hosted-host`
+module's `workflow_operator` input: instance OS Login admin, IAP tunnel access
+conditioned on the host's private IP and port 22, actAs on the host's
+telemetry-only service account, and the custom project role
+`codingHostedWorkflowProjectGet`. That role holds only `compute.projects.get`.
+Google requires that permission at project level for `gcloud compute ssh` when
+OS Login is granted per instance. It is not `roles/compute.viewer`, and it reads
+project metadata only: no instance listing, start/stop, or SSH to other hosts. Federation requires the exact repo and
 owner IDs, workflow path, main branch, manual event, environment subject, and
 Peyton or ai-mountain's immutable actor ID.
 
@@ -179,5 +183,7 @@ Activation order:
    approves. The job summary publishes only pass/fail, counts and path
    metadata, never host identity records, revisions or approvals.
 
-To revoke, set the flag back to false and apply (removing the host grants),
+To revoke, set the flag back to false and apply (removing the host grants and
+the project-read role; GCP soft-deletes the role and Terraform undeletes it on
+re-enable),
 disable the provider, or remove the reviewer from the environment.

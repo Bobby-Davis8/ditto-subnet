@@ -57,7 +57,7 @@ variable "boot_disk_gb" {
 }
 
 variable "workflow_operator" {
-  description = "Optional single protected-workflow service account granted root-capable IAP SSH to this host only. Kept separate from human custodians and granted no project roles."
+  description = "Optional single protected-workflow service account granted root-capable IAP SSH to this host only. Kept separate from human custodians; its only project-level grant is a custom role holding compute.projects.get."
   type        = string
   default     = ""
 

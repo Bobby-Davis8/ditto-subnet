@@ -39,12 +39,13 @@ def test_production_intent_names_one_custodian_with_database_path() -> None:
 
 def test_all_native_resources_are_conditional() -> None:
     blocks = re.split(r'\n(?:resource|module) "', SOURCE)[1:]
-    assert len(blocks) == 17
+    assert len(blocks) == 19
     for block in blocks:
         assert re.search(
             r"(?:count\s*= var.enabled \? 1 : 0|"
             r"for_each\s*= var.enabled \? toset\(|"
-            r"for_each\s*= local.(?:workflow_)?operators\n)",
+            r"for_each\s*= local.(?:workflow_)?operators\n|"
+            r"count\s*= length\(local.workflow_operators\)\n)",
             block,
         ), block.splitlines()[0]
 
@@ -114,7 +115,12 @@ def test_workflow_operator_is_one_service_account_and_never_a_custodian() -> Non
         'var.enabled && var.workflow_operator != "" '
         "? toset([var.workflow_operator]) : toset([])" in SOURCE
     )
-    for resource in ("workflow_osadmin", "workflow_ssh", "workflow_actas"):
+    for resource in (
+        'google_compute_instance_iam_member" "workflow_osadmin',
+        'google_project_iam_member" "workflow_ssh',
+        'google_project_iam_member" "workflow_project_get',
+        'google_service_account_iam_member" "workflow_actas',
+    ):
         block = SOURCE.split(f'"{resource}" {{', 1)[1].split("\n}", 1)[0]
         assert re.search(r"for_each\s*= local.workflow_operators\n", block)
     ssh = SOURCE.split('"workflow_ssh" {', 1)[1].split("\n}", 1)[0]
@@ -122,6 +128,21 @@ def test_workflow_operator_is_one_service_account_and_never_a_custodian() -> Non
         "expression  = \"destination.ip == '${module.host[0].internal_ip}' "
         '&& destination.port == 22"' in ssh
     )
+    # gcloud compute ssh needs compute.projects.get; grant only that, never viewer.
+    role = SOURCE.split(
+        'resource "google_project_iam_custom_role" "workflow_project_get" {', 1
+    )[1].split("\n}", 1)[0]
+    assert re.search(r"count\s*= length\(local.workflow_operators\)\n", role)
+    assert re.findall(r"permissions\s*= (\[.*\])", role) == ['["compute.projects.get"]']
+    assert SOURCE.count("google_project_iam_custom_role") == 2
+    assert SOURCE.count("permissions") == 1
+    binding = SOURCE.split('"google_project_iam_member" "workflow_project_get" {', 1)[
+        1
+    ].split("\n}", 1)[0]
+    assert "role     = google_project_iam_custom_role.workflow_project_get[0].name" in (
+        binding
+    )
+    assert "condition" not in binding
     # Service accounts still cannot become human custodians.
     assert "not public, group, domain, or service-account principals" in VARIABLES
 
@@ -129,14 +150,16 @@ def test_workflow_operator_is_one_service_account_and_never_a_custodian() -> Non
 def test_tests_are_mocked_plan_only_and_run_in_ci() -> None:
     tests = (MODULE / "tests/host.tftest.hcl").read_text()
     assert 'mock_provider "google" {}' in tests
-    assert len(re.findall(r'^run "', tests, re.MULTILINE)) == 18
-    assert len(re.findall(r"command\s*= plan", tests)) == 18
+    assert len(re.findall(r'^run "', tests, re.MULTILINE)) == 20
+    assert len(re.findall(r"command\s*= plan", tests)) == 20
     assert "command = apply" not in tests
     assert "expect_failures = [var.operators]" in tests
     assert "expect_failures = [var.workflow_operator]" in tests
     assert (
         'run "workflow_operator_is_destination_scoped_and_never_a_custodian"' in tests
     )
+    assert 'run "workflow_project_read_is_one_custom_permission"' in tests
+    assert 'run "custodians_do_not_receive_workflow_project_read"' in tests
     assert "expect_failures = [var.boot_disk_gb]" in tests
     assert 'run "iap_follows_resolved_private_address"' in tests
     workflow = (ROOT / ".github/workflows/infra-ci.yml").read_text()
