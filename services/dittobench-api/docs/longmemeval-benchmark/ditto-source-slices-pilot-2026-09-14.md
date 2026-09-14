@@ -88,3 +88,133 @@ captured; disclose that the total covers captured reader/judge calls only.
 
 No experimental merge, production activation/deployment or fixture mutation.
 Results will be appended with exact run IDs and hashes after both arms finish.
+
+## Completed results (2026-09-14, 15:22–15:23 UTC)
+
+**Summary 45/60 (75%) → source slices 48/60 (80%).** Seven paired wins, four
+losses; net +3. Both arms completed all 60, first attempt, no answer retries or
+regrading. This is promising exploratory evidence, not a statistically
+established improvement or a replacement for the existing 336/500 (67.2%)
+full graph-on result. The full-500 source-slices run has **not** been performed.
+
+| Metric | Summary | Source slices |
+| --- | ---: | ---: |
+| Correct / 60 | 45 | 48 |
+| Knowledge update / 10 | 7 | 7 |
+| Multi-session / 10 | 6 | 6 |
+| Single-session assistant / 10 | 7 | 10 |
+| Single-session preference / 10 | 7 | 6 |
+| Single-session user / 10 | 10 | 10 |
+| Temporal reasoning / 10 | 8 | 9 |
+| Mean initial context bytes | 3,872.4 | 14,985.6 |
+| Mean cumulative prompt tokens | 22,091.6 | 18,420.4 |
+| Questions with no follow-up tools | 35 | 43 |
+| Captured reader generations | 132 | 99 |
+| Captured judge generations | 60 | 60 |
+| Graph discovery calls / failures | 405 / 0 | 351 / 0 |
+
+All **60/60 ordered seed-ID lists match**. All **60/60 baseline serialized
+memory fields are preserved verbatim** in the treatment payload. Source,
+prompt, tools, weights, model and case identities match. Native hydration checks
+all 60 isolated users; both session-recall means are 1.0. The same prepared
+snapshot hash `79d25fa454decc85f4aade958f956732dcfe68deecccf500a2d149b932802b2e`
+is unchanged before/after both arms. Both logs have zero matches for
+`ERR|failed|error`; native failure-reason counters also independently pass.
+
+### What improved, and what did not
+
+Three particularly clear assistant-memory wins needed no follow-up tools with
+slices; each corresponding summary omitted the exact answer or relation:
+
+- `7161e7e2`: the raw shift table maps Sunday/Admon to **8am–4pm**; summary only
+  describes a seven-agent shift schedule. Control answered a week rotation.
+- `e9327a54`: the source names **Sugar Factory at Icon Park** and giant
+  milkshakes; summary only describes Orlando dessert destinations. Control
+  guessed a different venue even after searching/fetching.
+- `7e00a6cb`: the source ties **International Budget Hostel** to the Red Light
+  District; summary lists five hostels without that relation. Control picked
+  The Bulldog. This is relational-detail preservation, not just name recall.
+
+These traces support the summary-loss diagnosis. They do not show that query
+windows are optimal or that stored subject-span annotations are unnecessary.
+The prototype does not yet apply slices to search-tool results or production.
+
+Losses remain: plant counting loses a succulent; clothing counting differs on
+items versus pickup/return actions; preference advice misses the intended
+yogurt personalization. The temporal loss `9a707b81` also exposes judge noise:
+control says **25 days**, gold allows **21 or 22**, but the judge accepts 25 as
+close enough; treatment's 26 is rejected. Scores are retained as judged, not
+manually repaired. A larger matched run and judge-sensitivity audit are needed
+before claiming a durable net gain.
+
+### Measured cost (captured calls, not full lifecycle)
+
+| Cost in USD | Summary | Source slices |
+| --- | ---: | ---: |
+| Reader BYOK upstream estimate | 0.17592414 | 0.18977514 |
+| OpenRouter judge charges | 0.00668500 | 0.00655400 |
+| Captured reader + judge estimate | **0.18260914** | **0.19632914** |
+| Mean per question | 0.00304349 | 0.00327215 |
+| Median per question | 0.00232666 | 0.00269630 |
+| p95 per question (nearest rank) | 0.00703155 | 0.00585212 |
+
+Combined experiment estimate: **$0.37893828**. Treatment is **7.51%** more
+expensive in captured calls despite fewer cumulative prompt tokens/calls;
+token counts alone are not a cost measure. All 351 captured generations have
+final reconciled receipts, no missing route/upstream estimates. Luna resolved
+to `openai/gpt-5.6-luna-20260709`, judge to
+`google/gemini-3.1-flash-lite-20260507`. Reader OpenRouter account charge is zero
+because BYOK; that does **not** make Luna free. The reader amount is a
+provider-reported upstream estimate, not a vendor invoice.
+
+Original seed/dream preparation and query-embedding costs remain unknown.
+New seed/dream calls for this pilot: **0**, because the fixture was reused.
+Per-question costs and complete attribution boundaries are in the
+[control cost audit](results/2026-09-14-slices-summary-cost.json) and
+[treatment cost audit](results/2026-09-14-slices-source-slices-v1-cost.json).
+
+### Reproducibility and artifact collision
+
+- Backend experiment PR: [#2736](https://github.com/ditto-assistant/backend/pull/2736),
+  clean executed SHA `1cd1cf15245ea39123ea421e9bb2b7bf51d204c1`.
+- Binary SHA256: `60b62d7bbbad289c2b2e56d7701f8568267be0818aea270276b53cda138db459`.
+- Protocol committed before inference at subnet
+  `bde3a8a1ef95231a1721701da3dfee5fdf59164b`,
+  [PR1905](https://github.com/ditto-assistant/ditto-subnet/pull/1905).
+- Launches: control `15:22:06.989579Z`, treatment `15:22:08.286573Z`.
+- Both native run IDs are
+  `20260914-152212-1cd1cf15245ea39123ea421e9bb2b7bf51d204c1` because bootstrap
+  completed in the same second. **Run ID alone is ambiguous.** The inherited
+  B2 upload path collided; do not use that common remote URL as both artifacts.
+- Separate arm-local native files are intact and hash-pinned:
+  control `894db237c6bae4f23971548ee55cb396e68768744cfd7d7d7eecdce3d886644e`;
+  treatment `a7ee18bea5b041152222c92187a3d1e83a06057b7c18bb163af44e3e49c49c2d`.
+- [Paired audit](results/2026-09-14-slices-pilot.json) includes exact original
+  paths/hashes. [Replayable public evidence](results/2026-09-14-slices-public-evidence.json)
+  preserves all 60 questions, answers, verdicts, actual seed payloads and
+  necessary audit metadata for both arms, plus selected IDs and binary/source
+  identity. It is a whitelist-derived artifact, not the original reports;
+  excludes provider generation IDs, private receipts, raw tool traces and
+  reasoning. Export reruns the paired audit and verifies identical results.
+
+Workspace: `workspaces/lme-memory-slices-experiment-20260914-110740-99ab9c`,
+clones `backend` and `ditto-subnet`, both branch
+`codex/lme-memory-slices-experiment`. Native inputs/logs/specs/checkpoints are
+retained in `backend/.tmp/lme-slices`; private receipts in
+`ditto-subnet/.tmp/slices-cost`. No cleanup or fixture writes performed.
+
+Reproduce the paid invocation with the committed launcher and a new reviewed
+spec/output path per arm (the stored specs are exclusive-use and refuse reuse):
+
+```sh
+go build -o .tmp/lme-slices/dittobench ./cmd/dittobench
+python3 scripts/benchmarks/lme_slices_pilot.py --spec <arm-spec.json>
+python3 scripts/benchmarks/lme_slices_pilot.py --spec <arm-spec.json> --execute
+```
+
+For offline replay, load `2026-09-14-slices-public-evidence.json` and call
+`analyze_slices_pilot.analyze(bundle['control'], bundle['treatment'], bundle['case_ids'])`.
+Tests: backend `go test ./pkg/dittobench/... ./cmd/dittobench -count=1`;
+Python launch tests; subnet `python3 -m unittest discover -s
+services/dittobench-api/integrations/longmemeval -p 'test_*.py'`.
+Both experiment PRs remain drafts, unmerged and inactive in production.

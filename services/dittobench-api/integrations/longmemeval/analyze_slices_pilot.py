@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import statistics
+from audit_backend_run import validate_hydration_preflight
 
 
 def require(ok, message):
@@ -28,6 +29,7 @@ def index(report, mode, case_ids):
     rows = {row["case_id"]: row for row in report["per_case"]}
     require(len(rows) == len(report["per_case"]) == len(case_ids) == 60 and set(rows) == set(case_ids), "cohort mismatch")
     require(sorted(Counter(row["category"] for row in rows.values()).values()) == [10] * 6, "category imbalance")
+    validate_hydration_preflight(report, list(rows.values()), 60, True)
     for row in rows.values():
         require(type(row["lme_correct"]) is bool, "missing verdict")
         require(row["model"] == "openai/gpt-5.6-luna", "reader differs")
@@ -82,6 +84,7 @@ def analyze(control, treatment, case_ids):
                                    mean_prompt_tokens=statistics.mean(r["data"]["prompt_tokens"] for r in rows.values()),
                                    mean_session_recall=statistics.mean(r["data"]["session_recall"] for r in rows.values()),
                                    no_tool_cases=sum(not r["data"].get("tools_called") for r in rows.values()))
+        result["arms"][name]["hydration_and_graph"] = validate_hydration_preflight(report, list(rows.values()), 60, True)
     result["scope"] = "Exploratory balanced 60-case paired pilot; not a full-500 score, held-out result or graph ablation. No regrading. Costs and graph SQL logs audited separately."
     return result
 
