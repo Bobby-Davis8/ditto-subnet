@@ -96,7 +96,8 @@ No new paid full evaluation has measured the retry savings yet.
 Reproducible audit:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/ditto-assistant/ditto-subnet/2fcd1e140b637c17c713a949d2b93828ec4b4adf/services/dittobench-api/docs/longmemeval-benchmark/results/2026-09-14-slices-full-public-evidence.json -o /tmp/lme-public-evidence.json
+# Requires an authenticated gh session with repository read access.
+gh api -H 'Accept: application/vnd.github.raw+json' 'repos/ditto-assistant/ditto-subnet/contents/services/dittobench-api/docs/longmemeval-benchmark/results/2026-09-14-slices-full-public-evidence.json?ref=2fcd1e140b637c17c713a949d2b93828ec4b4adf' > /tmp/lme-public-evidence.json
 python3 services/dittobench-api/docs/longmemeval-benchmark/analyze_source_slice_weakpoints.py /tmp/lme-public-evidence.json
 ```
 
@@ -171,3 +172,17 @@ Validation included:
 focused prompt/source-slice, checkpoint and run-ID tests;
 six Python slice benchmark tests; full backend CI; authenticated preview evidence.
 The next experiment is a proposal only, with no new accuracy claim.
+
+Production activation was checked from the orchestration checkout with:
+
+```sh
+set -euo pipefail
+bash .agents/skills/logs/logs.sh prod --since -20m --lines 20000 \
+  --grep 'packed memory source slices' --json --limit 100 |
+  jq -s '{observed_requests:length,
+    requests_with_excerpts:([.[]|select(.source_slice_memories>0)]|length),
+    max_added_bytes:([.[].source_slice_added_bytes]|max)}'
+```
+
+The rolling time window is not a durable traffic census; the observation above
+records only the bounded sample seen during delivery.
