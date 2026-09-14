@@ -12,6 +12,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/codinghostedworker"
 	"github.com/ditto-assistant/dittobench-api/internal/codingrunner"
 	"github.com/ditto-assistant/dittobench-api/internal/codingsource"
+	"github.com/ditto-assistant/dittobench-api/internal/rootlessnetns"
 )
 
 // Validate checks private startup files without consuming a directory, changing
@@ -48,7 +49,7 @@ func Run(ctx context.Context, path string) (string, error) {
 		return "", ErrExecution
 	}
 	registry := codingsource.NewRegistry(nil)
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", config.wire.RouterListen)
+	listener, err := listenRouter(ctx, config)
 	if err != nil {
 		return "", ErrExecution
 	}
@@ -85,6 +86,27 @@ func Run(ctx context.Context, path string) (string, error) {
 		return "", ErrCleanup
 	}
 	return result, runErr
+}
+
+// rootlessListen is a private test seam; production always uses the verified
+// RootlessKit listener.
+var rootlessListen = rootlessnetns.Listen
+
+// listenRouter never falls back between namespaces. In rootless-netns mode the
+// configured address must be the daemon's default bridge gateway, and the
+// listener must come from the pinned RootlessKit network namespace.
+func listenRouter(ctx context.Context, config *runtimeConfig) (net.Listener, error) {
+	if config.router == nil {
+		return (&net.ListenConfig{}).Listen(ctx, "tcp4", config.wire.RouterListen)
+	}
+	gateway, err := config.docker.DefaultBridgeGateway(ctx)
+	// loadConfig binds HostGatewayIP (host.docker.internal) to this same address.
+	if err != nil || gateway != config.router.address.Addr() {
+		return nil, ErrExecution
+	}
+	return rootlessListen(ctx, rootlessnetns.Config{
+		Address: config.router.address, DockerSocket: config.wire.DockerSocket, HelperExecutable: config.router.helper,
+	})
 }
 
 func installEnvironment(config *runtimeConfig) error {

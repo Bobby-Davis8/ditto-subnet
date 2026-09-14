@@ -578,3 +578,60 @@ func TestCredentialEnvValuesIgnoresShortPlaceholdersAndNonCredentialKeys(t *test
 		t.Fatalf("credential values = %v, want %v (longest first)", got, want)
 	}
 }
+
+func TestDefaultBridgeGatewayRequiresSinglePrivateIPv4DefaultBridge(t *testing.T) {
+	const valid = `{"Name":"bridge","Driver":"bridge","EnableIPv4":true,"EnableIPv6":false,"IPAM":{"Driver":"default","Options":null,"Config":[{"Subnet":"172.17.0.0/16","IPRange":"","Gateway":"172.17.0.1"}]},"Internal":false,"Options":{"com.docker.network.bridge.default_bridge":"true","com.docker.network.bridge.name":"docker0"}}`
+	d := NewLocalDocker()
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		if !reflect.DeepEqual(args, []string{"network", "inspect", "--format", "{{json .}}", "bridge"}) {
+			t.Fatalf("unexpected Docker probe: %v", args)
+		}
+		return []byte(valid + "\n"), nil
+	}
+	gateway, err := d.DefaultBridgeGateway(context.Background())
+	if err != nil || gateway.String() != "172.17.0.1" {
+		t.Fatalf("docker 29 default bridge rejected: %v %v", gateway, err)
+	}
+	for name, body := range map[string]string{
+		"user_network":   strings.Replace(valid, `"Name":"bridge"`, `"Name":"ditto-job-1"`, 1),
+		"not_default":    strings.Replace(valid, `default_bridge":"true"`, `default_bridge":"false"`, 1),
+		"macvlan":        strings.Replace(valid, `"Driver":"bridge"`, `"Driver":"macvlan"`, 1),
+		"internal":       strings.Replace(valid, `"Internal":false`, `"Internal":true`, 1),
+		"public":         strings.NewReplacer("172.17.0.0/16", "8.8.8.0/24", "172.17.0.1", "8.8.8.1").Replace(valid),
+		"outside_subnet": strings.Replace(valid, `"Gateway":"172.17.0.1"`, `"Gateway":"172.18.0.1"`, 1),
+		"network_addr":   strings.Replace(valid, `"Gateway":"172.17.0.1"`, `"Gateway":"172.17.0.0"`, 1),
+		"unmasked":       strings.Replace(valid, `"Subnet":"172.17.0.0/16"`, `"Subnet":"172.17.0.1/16"`, 1),
+		"no_gateway":     strings.Replace(valid, `"Gateway":"172.17.0.1"`, `"Gateway":""`, 1),
+		"ipv6_gateway":   strings.NewReplacer("172.17.0.0/16", "fd00::/64", "172.17.0.1", "fd00::1").Replace(valid),
+		"dual_stack":     strings.Replace(valid, `"Gateway":"172.17.0.1"}]`, `"Gateway":"172.17.0.1"},{"Subnet":"fd00::/64","Gateway":"fd00::1"}]`, 1),
+		"two_documents":  valid + valid,
+		"empty":          "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			d.dockerCommand = func(context.Context, ...string) ([]byte, error) { return []byte(body), nil }
+			if gateway, err := d.DefaultBridgeGateway(context.Background()); err == nil {
+				t.Fatalf("invalid default bridge accepted as %s", gateway)
+			}
+		})
+	}
+	d.dockerCommand = func(context.Context, ...string) ([]byte, error) { return nil, errors.New("daemon down") }
+	if _, err := d.DefaultBridgeGateway(context.Background()); err == nil {
+		t.Fatal("unavailable daemon produced a gateway")
+	}
+}
+
+// Hosted rootless-netns routing sets HostGatewayIP to the RootlessKit bridge
+// gateway. Candidates must resolve every broker name to it, not to eth0.
+func TestRunArgsRootlessNamespaceGatewayMapsHostDockerInternal(t *testing.T) {
+	d := NewLocalDocker()
+	d.RequireRootless = true
+	d.HostGatewayIP = "172.17.0.1"
+	d.EgressProxy = "http://10.33.0.2:18090"
+	args := d.runArgsForNetwork("operator-image:latest", nil, "ditto-job-test", "abc123")
+	if !hasFlagPair(args, "--add-host", "host.docker.internal:172.17.0.1") || hasFlagPair(args, "--add-host", "host.docker.internal:host-gateway") {
+		t.Fatalf("rootless namespace gateway not bound: %v", args)
+	}
+	if !hasFlagPair(args, "--network", "ditto-job-test") || !hasFlagPair(args, "-e", "NO_PROXY=host.docker.internal,localhost,127.0.0.1") {
+		t.Fatalf("router traffic is not direct on the per-run bridge: %v", args)
+	}
+}

@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -781,6 +782,51 @@ func (d *LocalDocker) sandboxHostGateway() (string, error) {
 	}
 	sort.Strings(candidates)
 	return candidates[0], nil
+}
+
+// DefaultBridgeGateway returns the IPv4 gateway of the selected daemon's
+// default bridge network. For a rootless daemon this address exists only inside
+// RootlessKit's network namespace; it is reachable from every per-run bridge
+// as a local address and preserves each container's source address.
+func (d *LocalDocker) DefaultBridgeGateway(ctx context.Context) (netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := d.dockerOutput(ctx, "network", "inspect", "--format", "{{json .}}", "bridge")
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("inspect default bridge network: %w", err)
+	}
+	return parseDefaultBridgeGateway(out)
+}
+
+func parseDefaultBridgeGateway(out []byte) (netip.Addr, error) {
+	var network struct {
+		Name     string `json:"Name"`
+		Driver   string `json:"Driver"`
+		Internal bool   `json:"Internal"`
+		IPAM     struct {
+			Config []struct {
+				Subnet  string `json:"Subnet"`
+				Gateway string `json:"Gateway"`
+			} `json:"Config"`
+		} `json:"IPAM"`
+		Options map[string]string `json:"Options"`
+	}
+	invalid := errors.New("default bridge network is not a single private IPv4 bridge")
+	decoder := json.NewDecoder(bytes.NewReader(out))
+	if decoder.Decode(&network) != nil || decoder.More() {
+		return netip.Addr{}, invalid
+	}
+	if network.Name != "bridge" || network.Driver != "bridge" || network.Internal ||
+		network.Options["com.docker.network.bridge.default_bridge"] != "true" || len(network.IPAM.Config) != 1 {
+		return netip.Addr{}, invalid
+	}
+	subnet, subnetErr := netip.ParsePrefix(network.IPAM.Config[0].Subnet)
+	gateway, gatewayErr := netip.ParseAddr(network.IPAM.Config[0].Gateway)
+	if subnetErr != nil || gatewayErr != nil || !subnet.Addr().Is4() || subnet.Masked() != subnet || !gateway.Is4() ||
+		!subnet.Contains(gateway) || gateway == subnet.Addr() || !gateway.IsPrivate() || gateway.IsLoopback() {
+		return netip.Addr{}, invalid
+	}
+	return gateway, nil
 }
 
 func isolatedIdentity() (string, error) {

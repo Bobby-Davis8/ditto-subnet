@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/codingharness"
 	"github.com/ditto-assistant/dittobench-api/internal/codinghostedinput"
 	"github.com/ditto-assistant/dittobench-api/internal/codinghostedworker"
+	"github.com/ditto-assistant/dittobench-api/internal/rootlessnetns"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 )
 
@@ -49,6 +51,7 @@ type configWire struct {
 	DockerExecutable        string                      `json:"docker_executable"`
 	DockerSocket            string                      `json:"docker_socket"`
 	RouterListen            string                      `json:"router_listen"`
+	RouterNamespace         string                      `json:"router_namespace"`
 	EgressNetwork           string                      `json:"egress_network"`
 	EgressProxy             string                      `json:"egress_proxy"`
 	ExecutorRepository      string                      `json:"executor_repository"`
@@ -58,6 +61,15 @@ type configWire struct {
 	AppArmorProfile         string                      `json:"apparmor_profile"`
 }
 
+const (
+	// routerNamespaceHost is the existing listener in the worker's own network
+	// namespace. An omitted router_namespace keeps this behavior.
+	routerNamespaceHost = "host"
+	// routerNamespaceRootless creates the listener on the rootless daemon's
+	// default bridge gateway inside RootlessKit's network namespace.
+	routerNamespaceRootless = "rootless-netns"
+)
+
 type runtimeConfig struct {
 	wire       configWire
 	control    *codinghostedworker.ControlClient
@@ -65,6 +77,13 @@ type runtimeConfig struct {
 	executors  *codingexecutor.PhaseFactory
 	docker     *sandbox.LocalDocker
 	publicBase string
+	// router is set only in rootless-netns mode.
+	router *rootlessRouter
+}
+
+type rootlessRouter struct {
+	address netip.AddrPort
+	helper  string
 }
 
 func privateJSON(path string, maximum int64, value any) ([]byte, error) {
@@ -171,6 +190,23 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 	if err != nil || ip == nil || ip.To4() == nil || !ip.IsPrivate() || ip.IsLoopback() || portErr != nil || portNumber < 1024 || portNumber > 65535 || strconv.Itoa(portNumber) != port {
 		return nil, ErrConfig
 	}
+	var router *rootlessRouter
+	switch wire.RouterNamespace {
+	case "", routerNamespaceHost:
+	case routerNamespaceRootless:
+		// The helper is bound to the installed worker's own bundle directory; no
+		// configured path can select another executable.
+		address, addressErr := netip.ParseAddrPort(wire.RouterListen)
+		worker, workerErr := os.Executable()
+		helper := filepath.Join(filepath.Dir(worker), rootlessnetns.HelperExecutableName)
+		if addressErr != nil || address.String() != wire.RouterListen || !rootlessnetns.ValidAddress(address) || workerErr != nil ||
+			!filepath.IsAbs(worker) || !executable(helper) || !executable(rootlessnetns.NsenterExecutable) {
+			return nil, ErrConfig
+		}
+		router = &rootlessRouter{address: address, helper: helper}
+	default:
+		return nil, ErrConfig
+	}
 	proxy, err := url.Parse(wire.EgressProxy)
 	if err != nil || proxy.Scheme != "http" || proxy.User != nil || proxy.RawQuery != "" || proxy.Fragment != "" || proxy.Path != "" || proxy.Port() == "" {
 		return nil, ErrConfig
@@ -194,7 +230,7 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 		CPULimit: fmt.Sprintf("%d.%03d", p.CPUQuotaMillis/1000, p.CPUQuotaMillis%1000), PidsLimit: int(p.PidsLimit), StartTimeout: 2 * time.Minute,
 		Harden: true, RequireRootless: true, RequireIsolatedDaemon: true, HostGatewayIP: ip.String(), EgressNetwork: wire.EgressNetwork, EgressProxy: wire.EgressProxy,
 		SeccompProfile: wire.SeccompProfile, AppArmorProfile: wire.AppArmorProfile}
-	return &runtimeConfig{wire: wire, control: control, starts: starts, executors: executors, docker: docker, publicBase: "http://host.docker.internal:" + port}, nil
+	return &runtimeConfig{wire: wire, control: control, starts: starts, executors: executors, docker: docker, publicBase: "http://host.docker.internal:" + port, router: router}, nil
 }
 
 func identifier(s string) bool {
