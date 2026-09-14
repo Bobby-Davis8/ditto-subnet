@@ -26,6 +26,7 @@ from ditto.api_server.coding_hosted_verification import (
 from ditto.db.models import (
     Agent,
     CodingHostedAssignment,
+    CodingHostedAssignmentCancellation,
     CodingHostedResultAcknowledgement,
     CodingHostedResultDelivery,
     CodingPrivateV2Release,
@@ -160,6 +161,11 @@ async def create_hosted_assignment(
         raise HostedAdmissionError(
             "hosted assignment conflicts with existing authority"
         )
+    if (
+        await session.get(CodingHostedAssignmentCancellation, row.evaluation_id)
+        is not None
+    ):
+        raise HostedAdmissionError("hosted assignment is cancelled")
     return row
 
 
@@ -286,6 +292,17 @@ async def _locked_assignment(
     )
     if row is None:
         raise HostedAdmissionError("hosted assignment is unavailable")
+    # Every admission, start, binding, object-grant, launch and inference
+    # authority path takes this lock. Cancellation holds the same row lock
+    # while it appends, so this read sees any committed cancellation.
+    if await session.scalar(
+        select(
+            exists().where(
+                CodingHostedAssignmentCancellation.evaluation_id == evaluation_id
+            )
+        )
+    ):
+        raise HostedAdmissionError("hosted assignment is cancelled")
     return row
 
 

@@ -39,6 +39,7 @@ def test_control_plane_expiry_precedes_nonterminal_durable_markers() -> None:
         SimpleNamespace(closed_at=now, close_reason="completed"),
     )
     assert _state(expired, closed, now=now) == "completed"
+    assert _state(expired, closed, now=now, cancelled=True) == "cancelled"
 
 
 def _install(app: FastAPI, maker: async_sessionmaker[AsyncSession]) -> None:

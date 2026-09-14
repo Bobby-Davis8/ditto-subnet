@@ -18,6 +18,7 @@ CodingHostedOperationState = Literal[
     "failed",
     "aborted",
     "expired",
+    "cancelled",
 ]
 
 
