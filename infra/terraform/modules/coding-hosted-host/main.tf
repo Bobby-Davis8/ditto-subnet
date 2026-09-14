@@ -3,6 +3,8 @@
 locals {
   name      = "ditto-coding-hosted-v2"
   operators = var.enabled ? var.operators : toset([])
+  # A protected workflow identity is never a custodian and never inherits one.
+  workflow_operators = var.enabled && var.workflow_operator != "" ? toset([var.workflow_operator]) : toset([])
 }
 
 # A separate VPC inherits no Platform DB firewall rules. By default there is no
@@ -186,6 +188,37 @@ resource "google_project_iam_member" "ssh" {
 
 resource "google_service_account_iam_member" "actas" {
   for_each           = local.operators
+  service_account_id = google_service_account.host[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = each.value
+}
+
+# A protected main-only workflow identity: root-capable on this host only, with the
+# same destination-scoped IAP condition as custodians and no project roles.
+resource "google_compute_instance_iam_member" "workflow_osadmin" {
+  for_each      = local.workflow_operators
+  project       = var.project
+  zone          = var.zone
+  instance_name = module.host[0].hostname
+  role          = "roles/compute.osAdminLogin"
+  member        = each.value
+}
+
+resource "google_project_iam_member" "workflow_ssh" {
+  for_each = local.workflow_operators
+  project  = var.project
+  role     = "roles/iap.tunnelResourceAccessor"
+  member   = each.value
+
+  condition {
+    title       = "only_${replace(local.name, "-", "_")}_workflow_ssh"
+    description = "Protected workflow IAP SSH only to the qualification host's private destination IP."
+    expression  = "destination.ip == '${module.host[0].internal_ip}' && destination.port == 22"
+  }
+}
+
+resource "google_service_account_iam_member" "workflow_actas" {
+  for_each           = local.workflow_operators
   service_account_id = google_service_account.host[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = each.value

@@ -130,3 +130,53 @@ To revoke delegated access, remove ai-mountain from the probe environment's
 reviewers and remove his actor ID from the reviewed provider condition. A
 provider disable revokes federation entirely. Neither action requires widening
 `infra-apply`.
+
+## `coding-hosted-operate`
+
+The manual native coding host workflow runs fixed, reviewed operations on
+`ditto-coding-hosted-v2` only. Its sole operation today is `verify`, a read-only
+check piped from the exact checked-out revision: host identity, egress unit,
+inactive rootful Docker, the rootless daemon through the preinstalled non-root
+`host-policy.py verify`, the custody public-key SPKI, and lstat-only metadata for
+the private key, key receipt, runtime install, image imports and the not yet
+provisioned PostgreSQL environment file. It never opens private material and has
+no command, path, host, project or revision inputs.
+
+The identity is root-capable on that one host (OS Login admin), so the job always
+uses the `coding-hosted-operate` environment with `prevent_self_review: true`:
+whoever dispatches cannot approve. The same identity must never serve an
+approval-free job. An approval-free verify would need a separate genuinely
+non-root identity calling a preinstalled bounded verifier. Mutating host
+operations (runtime install, custody convergence, PostgreSQL environment
+materialization) are separate reviewed changes and are not in this workflow.
+
+The `gcp-platform` root owns `coding-hosted-operate.tf`: a separate federation
+pool, provider and service account. The account has no project roles, Secret
+Manager, storage, or Terraform state access. Its only grants come from the
+`coding-hosted-host` module's `workflow_operator` input: instance OS Login admin,
+IAP tunnel access conditioned on the host's private IP and port 22, and actAs on
+the host's telemetry-only service account. Federation requires the exact repo and
+owner IDs, workflow path, main branch, manual event, environment subject, and
+Peyton or ai-mountain's immutable actor ID.
+
+Activation order:
+
+1. Install `infra/github/coding-hosted-operate-ruleset.json`. It requires one
+   `admin` team approval, from someone other than the last pusher, for the
+   workflow, verifier, delegation JSON, and the host module and stack files.
+2. Merge the reviewed change. Set `enable_coding_hosted_operate_workflow = true`
+   in a separate reviewed change, then create a protected exact-current-main
+   plan and inspect the IAM before applying through `infra-apply`. Never create
+   this IAM out of band.
+3. Create the environment from
+   `infra/github/coding-hosted-operate-environment.json` and add a deployment
+   branch policy with `name=main`, `type=branch`.
+4. Set environment variables `GCP_CODING_HOSTED_OPERATE_SA` and
+   `GCP_CODING_HOSTED_OPERATE_WIF_PROVIDER` to the Terraform outputs. They are
+   not secrets.
+5. Dispatch `verify` with `OPERATE CODING HOST verify`; the other reviewer
+   approves. The job summary publishes only pass/fail, counts and path
+   metadata, never host identity records, revisions or approvals.
+
+To revoke, set the flag back to false and apply (removing the host grants),
+disable the provider, or remove the reviewer from the environment.
