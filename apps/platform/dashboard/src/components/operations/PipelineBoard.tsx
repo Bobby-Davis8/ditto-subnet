@@ -7,8 +7,8 @@ import type { JSX } from "solid-js";
 
 import { reconciledList } from "../../data/reconciled";
 import { agentName, agentVersionLabel, fx, relTime } from "../../lib/format";
-import { dashboardHref, entityHref } from "../../lib/router";
-import { navigateToPage, pushEntityRoute } from "../../stores/routeStore";
+import { entityHref } from "../../lib/router";
+import { pushEntityRoute } from "../../stores/routeStore";
 import { HandleBadge } from "../ui/HandleBadge";
 import { MinerAvatar } from "../ui/MinerAvatar";
 import { policyScreeningLabel } from "../pipeline/status";

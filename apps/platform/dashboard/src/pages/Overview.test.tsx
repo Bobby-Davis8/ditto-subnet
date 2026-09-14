@@ -859,7 +859,7 @@ describe("dethrone floor source of truth", () => {
   });
 });
 
-describe("overview Coding shadow column and crown chain reading", () => {
+describe("overview Coding shadow column", () => {
   it("gives Coding its own column on the overview, right after Scores", async () => {
     renderOverview();
     await waitForBoard();
@@ -874,20 +874,6 @@ describe("overview Coding shadow column and crown chain reading", () => {
     expect(rows[0]?.querySelector("td.coding-status-cell")).toHaveTextContent("not evaluated");
     // Only the emissions header carries the fold-fed tip id.
     expect(document.querySelectorAll("#emissions-col-tip")).toHaveLength(1);
-  });
-
-  it("puts the revealed-weights reading on the crown card, outside its live region", async () => {
-    renderOverview();
-    await waitForBoard();
-    await waitFor(() => expect(document.querySelector(".champion-chain")).toBeTruthy());
-    const chain = document.querySelector(".champion-chain") as HTMLElement;
-    const vectors = /Revealed weights · (\d+) validator vectors/.exec(chain.textContent ?? "");
-    expect(vectors).toBeTruthy();
-    expect(chain.textContent).toMatch(/Top choice of \d+ of \d+ vectors/);
-    // Same vector count as the board's own on-chain weights toggle.
-    expect(el("chain-weights-toggle").textContent).toContain(vectors?.[1] + " validator vectors");
-    // The block number moves every poll; it must not sit in the polite region.
-    expect(el("champion-body").contains(chain)).toBe(false);
   });
 });
 

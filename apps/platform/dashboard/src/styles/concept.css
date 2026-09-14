@@ -931,70 +931,6 @@ header.top .pill {
   color: var(--text-dim);
 }
 
-/* Footer row: the Coding shadow rule beside the conditional review branch. */
-.pipeline-footer-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr);
-  gap: 22px;
-  margin-top: 24px;
-  align-items: start;
-}
-.coding-shadow-note {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 18px;
-  padding: 22px 24px;
-  border: 1px solid color-mix(in oklab, var(--c-wait) 42%, var(--c-line));
-  border-radius: var(--c-radius-card);
-  background:
-    radial-gradient(
-      500px 160px at 0% 0%,
-      color-mix(in oklab, var(--c-wait) 8%, transparent),
-      transparent 70%
-    ),
-    var(--c-card);
-}
-.coding-shadow-note-mark {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  color: var(--text);
-  font-size: 26px;
-}
-.coding-shadow-note-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-.coding-shadow-note-head strong {
-  font: 600 16px/1.2 var(--mono);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--c-wait);
-}
-.coding-shadow-note-pill {
-  padding: 4px 12px;
-  border: 1px solid color-mix(in oklab, var(--c-wait) 55%, transparent);
-  border-radius: var(--r-pill);
-  font: 400 13px/1.2 var(--sans);
-  color: var(--c-wait);
-}
-.coding-shadow-note p {
-  margin: 12px 0 6px;
-  font: 400 15px/1.5 var(--sans);
-  color: var(--text);
-}
-.coding-shadow-note-link {
-  font: 400 15px/1.5 var(--sans);
-  color: var(--c-wait);
-  text-decoration: none;
-}
-.coding-shadow-note-link:hover {
-  text-decoration: underline;
-}
-
 .pipeline-review-branch {
   margin: 0;
   padding: 0;
@@ -2053,7 +1989,6 @@ header.top .pill {
 
 /* ── Narrow screens: the concept's grids fold to one column ───────────── */
 @media (max-width: 1180px) {
-  .pipeline-footer-row,
   .account-sign-card,
   .ath-intro {
     grid-template-columns: minmax(0, 1fr);
@@ -2690,21 +2625,6 @@ table.fleet-table > thead > tr > th:last-child {
   color: var(--text);
   font-weight: 600;
 }
-.overview-side .champion-chain {
-  display: grid;
-  gap: 6px;
-  margin-top: auto;
-  padding-top: 14px;
-  font: 400 14px/1.45 var(--sans);
-  color: var(--text-dim);
-}
-.overview-side .champion-chain b {
-  color: var(--text);
-  font-weight: 600;
-}
-.overview-side .champion-chain-verdict b {
-  color: var(--c-gold);
-}
 .overview-side .champion-fold summary {
   font: 400 14px/1.4 var(--sans);
   color: var(--text-dim);
@@ -2852,84 +2772,6 @@ table.fleet-table > thead > tr > th:last-child {
   box-shadow: none;
 }
 
-/* Coding shadow coverage strip. */
-.coding-coverage {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1.4fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 18px;
-  margin: 18px 0 8px;
-  padding: 16px 20px;
-  border: 1px solid color-mix(in oklab, var(--c-wait) 45%, var(--c-line));
-  border-radius: 12px;
-  background:
-    radial-gradient(
-      500px 120px at 0% 0%,
-      color-mix(in oklab, var(--c-wait) 8%, transparent),
-      transparent 70%
-    ),
-    color-mix(in oklab, var(--c-raised) 40%, transparent);
-}
-.coding-coverage-mark {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  border: 1px solid var(--c-line);
-  border-radius: 10px;
-  background: var(--c-raised);
-  color: var(--text);
-  font-size: 22px;
-}
-.coding-coverage-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-.coding-coverage-head h3 {
-  margin: 0;
-  font: 600 18px/1.2 var(--sans);
-  color: var(--text);
-}
-.coding-coverage-pill {
-  padding: 3px 10px;
-  border: 1px solid color-mix(in oklab, var(--c-wait) 60%, transparent);
-  border-radius: 6px;
-  color: var(--c-wait);
-  font: 600 11px/1.3 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.coding-coverage p {
-  margin: 6px 0 0;
-  font: 400 14px/1.5 var(--sans);
-  color: var(--text-dim);
-}
-.coding-coverage-stats {
-  display: grid;
-  grid-template-columns: repeat(5, auto);
-  justify-content: end;
-  margin: 0;
-}
-.coding-coverage-stats > div {
-  padding: 2px 16px;
-  border-left: 1px solid var(--c-line-soft);
-}
-.coding-coverage-stats dt {
-  font: 500 11px/1.3 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-}
-.coding-coverage-stats dd {
-  margin: 6px 0 0;
-  font: 500 16px/1.2 var(--mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  white-space: nowrap;
-}
-
 /* Board rows on the overview. */
 .overview-main #board th[data-sort="rank"] {
   width: 36% !important;
@@ -2991,13 +2833,6 @@ table.fleet-table > thead > tr > th:last-child {
   }
   .overview-vitals .stat-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .coding-coverage {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-  .coding-coverage-stats {
-    grid-column: 1 / -1;
-    justify-content: start;
   }
 }
 
@@ -3847,4 +3682,981 @@ table.fleet-table > thead > tr > th:last-child {
   height: 14px;
   stroke-width: 1.8;
   vertical-align: -2px;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Surfaces shipped alongside the redesign (pin, Coding summary, crown
+   history, Coding filters, pipeline Coding lane)
+   ═════════════════════════════════════════════════════════════════════════ */
+/* Champion card: the pin lines are long; they take the full card width and
+   wrap instead of pushing the side column off the page. */
+.overview-side .champion-meta span {
+  white-space: normal;
+}
+.overview-side .champion-meta #champion-pin,
+.overview-side .champion-meta #champion-next-pin {
+  grid-column: 1 / -1;
+}
+.overview-side .champion-meta #champion-next-pin b {
+  color: var(--c-gold);
+}
+.overview-side {
+  min-width: 0;
+}
+.overview-side .champion-box,
+.overview-side .overview-clock {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.epoch-clock-pin {
+  font: 400 13px/1.45 var(--sans);
+  color: var(--text-dim);
+}
+.overview-side .overview-clock .epoch-clock-pin {
+  font-size: 14px;
+}
+
+/* Coding Bench coverage strip. */
+.coding-shadow-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) auto;
+  align-items: center;
+  gap: 18px 28px;
+  margin: 16px 0 10px;
+  padding: 16px 22px;
+  border: 1px solid color-mix(in oklab, var(--c-wait) 45%, var(--c-line));
+  border-radius: 12px;
+  background:
+    radial-gradient(
+      500px 120px at 0% 0%,
+      color-mix(in oklab, var(--c-wait) 8%, transparent),
+      transparent 70%
+    ),
+    color-mix(in oklab, var(--c-raised) 40%, transparent);
+}
+.coding-shadow-summary-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.coding-shadow-summary h3 {
+  margin: 0;
+  font: 600 17px/1.2 var(--sans);
+  color: var(--text);
+}
+.coding-shadow-summary .coding-shadow-mode {
+  padding: 3px 10px;
+  border: 1px solid color-mix(in oklab, var(--c-wait) 60%, transparent);
+  border-radius: 6px;
+  color: var(--c-wait);
+  font: 600 11px/1.3 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.coding-shadow-summary-copy p {
+  margin: 6px 0 0;
+  max-width: 70ch;
+  font: 400 14px/1.5 var(--sans);
+  color: var(--text-dim);
+}
+.coding-shadow-summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, auto);
+  margin: 0;
+}
+.coding-shadow-summary-metrics > div {
+  padding: 2px 16px;
+  border-left: 1px solid var(--c-line-soft);
+}
+.coding-shadow-summary-metrics dt {
+  font: 500 11px/1.3 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.coding-shadow-summary-metrics dd {
+  margin: 6px 0 0;
+  font: 500 16px/1.2 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+}
+@media (max-width: 1180px) {
+  .coding-shadow-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .coding-shadow-summary-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    row-gap: 12px;
+  }
+  .coding-shadow-summary-metrics > div:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+/* Leaderboard toolbar: view tabs and search on the first row, the Coding
+   filter as its own quieter row beneath. */
+.board-toolbar .board-tabs {
+  order: 0;
+}
+.board-toolbar .board-search {
+  order: 1;
+}
+.board-toolbar .coding-board-filters {
+  order: 2;
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+.coding-board-filter-label {
+  margin-right: 6px;
+  font: 500 13px/1 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.board-toolbar .coding-board-filters .activity-filter {
+  height: 34px;
+  padding: 0 14px;
+  gap: 8px;
+  font-size: 14px;
+}
+.board-toolbar .coding-board-filters .activity-filter-count {
+  padding: 2px 7px;
+  font-size: 12px;
+}
+.coding-shadow-details-toggle {
+  font: 500 13px/1 var(--sans);
+}
+.coding-shadow-details {
+  font: 400 13px/1.5 var(--sans);
+}
+
+/* Pinned ledger history: its own card under the board. */
+.crown-history {
+  margin-top: 18px;
+  padding: 20px 24px 12px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--c-radius-card);
+  background: var(--c-card);
+  box-shadow: var(--c-shadow-card);
+}
+.crown-history-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+.crown-history-head h2,
+.crown-history-head h3,
+.crown-history-head strong {
+  margin: 0;
+  font: 600 20px/1.2 var(--display);
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.crown-history-sub {
+  font: 400 14px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+.crown-history-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.crown-history-table th {
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--c-line);
+  font: 500 13px/1.2 var(--sans);
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.crown-history-table td {
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--c-line-soft);
+  font: 400 14px/1.35 var(--sans);
+  color: var(--text);
+}
+.crown-history-table td.mono {
+  font: 400 14px/1.35 var(--mono);
+}
+.crown-history-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.crown-history .pin-badge {
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  font: 600 11px/1.3 var(--sans);
+  letter-spacing: 0.06em;
+}
+.overview-main .crown-history {
+  margin-top: 18px;
+}
+
+/* Pipeline: the Coding shadow lane at the head of the Scoring column. */
+.pipeline-coding-lane {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklab, var(--c-wait) 45%, var(--c-line));
+  border-radius: var(--c-radius-row);
+  background: color-mix(in oklab, var(--c-wait) 7%, var(--c-raised));
+}
+.pipeline-coding-lane-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 10px;
+}
+.pipeline-coding-lane-heading strong {
+  font: 600 12px/1.3 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-wait);
+}
+.pipeline-coding-lane-heading span {
+  padding: 2px 8px;
+  border: 1px solid color-mix(in oklab, var(--c-wait) 55%, transparent);
+  border-radius: var(--r-pill);
+  font: 400 12px/1.3 var(--sans);
+  color: var(--c-wait);
+}
+.pipeline-coding-lane-status {
+  font: 500 14px/1.4 var(--sans);
+  color: var(--text);
+}
+.pipeline-coding-lane-boundary {
+  font: 400 13px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+.pipeline-coding-shadow {
+  display: grid;
+  gap: 3px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--c-line-soft);
+  font: 400 13px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+.pipeline-coding-shadow-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pipeline-coding-shadow-heading strong {
+  font-weight: 600;
+  color: var(--c-wait);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Leaderboard context strips (emissions, chain, efficiency, rollout)
+   ═════════════════════════════════════════════════════════════════════════ */
+.emissions-strip.show,
+.chain-observation.show,
+.efficiency-strip,
+.rollout-strip,
+.leaderboard-notice.show {
+  margin-top: 16px;
+  padding: 18px 22px;
+  font: 400 14px/1.55 var(--sans);
+}
+.emissions-title,
+.efficiency-title,
+.rollout-head {
+  font: 500 15px/1.45 var(--sans);
+  color: var(--text);
+}
+.emissions-recipients,
+.emissions-reason,
+.efficiency-detail,
+.rollout-note,
+.chain-observation {
+  font: 400 14px/1.55 var(--sans);
+  color: var(--text-dim);
+}
+.emissions-why summary {
+  font: 400 14px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+.efficiency-param {
+  padding: 3px 10px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-pill);
+  font: 400 12px/1.3 var(--mono);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Global search results
+   ═════════════════════════════════════════════════════════════════════════ */
+.search-popover {
+  padding: 6px;
+  border: 1px solid var(--c-line);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--c-surface) 96%, var(--ditto-ink));
+  box-shadow: 0 24px 60px -24px color-mix(in oklab, #000 80%, transparent);
+}
+.search-meta {
+  padding: 8px 12px 6px;
+  font: 400 13px/1.3 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.search-result {
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+.search-result:hover,
+.search-result[aria-selected="true"] {
+  background: color-mix(in oklab, var(--c-gold) 10%, var(--c-raised));
+}
+.search-result-kind {
+  padding: 3px 8px;
+  border: 1px solid var(--c-line);
+  border-radius: 6px;
+  font: 600 11px/1.2 var(--sans);
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.search-result-title {
+  font: 600 15px/1.3 var(--sans);
+  color: var(--text);
+}
+.search-result-detail {
+  font: 400 13px/1.35 var(--sans);
+  color: var(--text-dim);
+}
+.search-empty {
+  padding: 14px 12px;
+  font: 400 14px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Entity drawer and full entity pages (agent, miner, validator, screener)
+   ═════════════════════════════════════════════════════════════════════════ */
+.modal-back.open {
+  background: color-mix(in oklab, var(--ditto-island) 72%, transparent);
+  backdrop-filter: blur(6px);
+}
+.modal {
+  padding: 30px 32px 32px;
+  border: 1px solid var(--c-line);
+  border-radius: 18px;
+  background:
+    radial-gradient(
+      700px 220px at 20% 0%,
+      color-mix(in oklab, var(--c-gold) 5%, transparent),
+      transparent 70%
+    ),
+    var(--bg-elev);
+  box-shadow: 0 40px 100px -30px color-mix(in oklab, #000 85%, transparent);
+  scrollbar-width: thin;
+}
+.modal-actions {
+  top: 20px;
+  right: 20px;
+  gap: 10px;
+}
+.modal-actions .btn,
+.modal-actions .open-full,
+.modal-actions .back-dashboard {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--c-raised) 60%, transparent);
+  color: var(--text);
+  font: 500 14px/1 var(--sans);
+}
+.modal-actions .close {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  padding: 0;
+}
+.modal .dhead {
+  gap: 12px;
+  padding-right: 190px;
+}
+.modal .dhead .miner-avatar {
+  width: 56px;
+  height: 56px;
+  border: 2px solid color-mix(in oklab, var(--c-gold) 70%, transparent);
+  box-shadow: 0 0 18px -4px color-mix(in oklab, var(--c-gold) 45%, transparent);
+}
+.modal h3,
+.modal #d-title {
+  font: 700 30px/1.15 var(--display);
+  letter-spacing: -0.02em;
+}
+.modal .d-version {
+  font: 400 15px/1.3 var(--sans);
+  color: var(--text-dim);
+}
+.modal #d-bench {
+  font-size: 13px;
+}
+.modal .dk {
+  margin-top: 8px;
+  gap: 10px;
+}
+.modal .dk-label {
+  font: 400 14px/1.3 var(--sans);
+  color: var(--text-dim);
+}
+.modal #d-hotkey,
+.modal #d-hotkey button {
+  font: 400 14px/1.3 var(--mono);
+}
+/* Headline score. */
+.modal .score-headline {
+  gap: 14px;
+  margin: 22px 0 0;
+}
+.modal .score-headline-item {
+  padding: 16px 20px;
+  border: 1px solid var(--c-line);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--c-raised) 55%, transparent);
+}
+.modal .score-headline-item.primary {
+  border-color: color-mix(in oklab, var(--c-gold) 55%, var(--c-line));
+  background: color-mix(in oklab, var(--c-gold) 8%, var(--c-raised));
+}
+.modal .score-headline-bench {
+  font: 500 12px/1.3 var(--sans);
+}
+.modal .score-headline-value {
+  font: 600 40px/1.05 var(--sans);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.modal .score-headline-state {
+  font: 400 14px/1.3 var(--sans);
+}
+.modal .family-standing {
+  padding: 16px 20px;
+  border: 1px solid color-mix(in oklab, var(--memory) 45%, var(--c-line));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--memory) 7%, var(--c-raised));
+}
+.modal .family-standing strong {
+  font: 600 15px/1.35 var(--sans);
+}
+.modal .family-standing p {
+  font: 400 14px/1.55 var(--sans);
+  color: var(--text-dim);
+}
+/* Summary, facts, and the history sections. */
+.modal .pipeline-summary h4,
+.modal .pipeline-section-heading h4,
+.modal .pipeline-section-heading {
+  font: 600 18px/1.3 var(--display);
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+}
+.modal .pipeline-current-message,
+.modal .pipeline-detail-state {
+  font: 400 17px/1.5 var(--sans);
+  color: var(--text);
+}
+.modal .pipeline-key-facts dt,
+.modal .pipeline-meta dt,
+.modal .stat-row .k {
+  font: 400 13px/1.35 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.modal .pipeline-key-facts dd,
+.modal .pipeline-meta dd,
+.modal .stat-row .v {
+  font: 500 15px/1.4 var(--sans);
+  color: var(--text);
+}
+.modal .pipeline-history-region {
+  padding: 20px 22px;
+  border: 1px solid var(--c-line);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--c-raised) 45%, transparent);
+}
+.modal .attempt,
+.modal .accepted-score,
+.modal .inference-run {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--c-line-soft);
+  font: 400 14px/1.45 var(--sans);
+}
+.modal .attempt:last-child,
+.modal .accepted-score:last-child,
+.modal .inference-run:last-child {
+  border-bottom: 0;
+}
+.modal .accepted-score-value {
+  font: 600 18px/1.2 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.modal .accepted-score-command,
+.modal code,
+.modal pre {
+  font-size: 13px;
+}
+/* Disclosure sections (validator and screener drawers, miner profile). */
+.modal details > summary,
+.modal .cgsum {
+  padding: 12px 0;
+  font: 600 16px/1.3 var(--sans);
+  color: var(--text);
+  cursor: pointer;
+}
+.modal .stat-group,
+.modal .vdetail {
+  padding: 4px 0 8px 18px;
+}
+.modal .stat-row {
+  padding: 11px 0;
+  border-bottom: 1px solid var(--c-line-soft);
+}
+.modal .subhead {
+  font: 500 14px/1.3 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.modal progress {
+  appearance: none;
+  width: 100%;
+  height: 7px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--ditto-ink) 12%, transparent);
+  overflow: hidden;
+}
+.modal progress::-webkit-progress-bar {
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--ditto-ink) 12%, transparent);
+}
+.modal progress::-webkit-progress-value {
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--c-progress), var(--c-progress-hi));
+}
+.modal progress::-moz-progress-bar {
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--c-progress), var(--c-progress-hi));
+}
+.modal .benchmark-agent,
+.modal .benchmark-agent button,
+.modal .current-agent,
+.modal .current-agent button {
+  font: 600 14px/1.3 var(--sans);
+  color: var(--text);
+}
+.modal .benchmark-progress-text,
+.modal .benchmark-stage-label {
+  font: 400 13px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+/* Miner profile. */
+.modal .miner-profile-links {
+  gap: 10px;
+}
+.modal .miner-profile-links a,
+.modal .miner-profile-links span {
+  padding: 6px 14px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--c-raised) 55%, transparent);
+  color: var(--text);
+  font: 500 14px/1.2 var(--sans);
+  text-decoration: none;
+}
+.modal .miner-subs-filters {
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.modal .miner-sub {
+  padding: 12px 14px;
+  border: 1px solid var(--c-line-soft);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--c-raised) 40%, transparent);
+}
+.modal .miner-sub + .miner-sub {
+  margin-top: 8px;
+}
+.modal .miner-sub-main {
+  gap: 12px;
+  font: 600 15px/1.3 var(--sans);
+}
+.modal .miner-sub-time {
+  font: 400 13px/1.3 var(--sans);
+  color: var(--text-dim);
+}
+.modal .miner-subs-more {
+  margin-top: 12px;
+}
+/* Full entity page: the card sits on the navy ground with room around it. */
+body.entity-page {
+  background:
+    radial-gradient(
+      1100px 500px at 50% -10%,
+      color-mix(in oklab, var(--c-gold) 5%, transparent),
+      transparent 70%
+    ),
+    var(--bg);
+}
+body.entity-page .modal {
+  width: min(1120px, calc(100vw - 48px));
+  margin: 40px auto 64px;
+  padding: 36px 40px 40px;
+}
+@media (max-width: 720px) {
+  .modal,
+  body.entity-page .modal {
+    padding: 22px 18px 24px;
+    border-radius: 14px;
+  }
+  .modal .dhead {
+    padding-right: 0;
+    padding-top: 44px;
+  }
+  .modal h3,
+  .modal #d-title {
+    font-size: 24px;
+  }
+  .modal .score-headline-value {
+    font-size: 32px;
+  }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Fleet: Screeners and Targon builds tabs
+   ═════════════════════════════════════════════════════════════════════════ */
+/* A screener host row is one card spanning the table; the per-cell card
+   edges from the validator table must not apply to its single cell. */
+.fleet-table tbody tr.screener-host-row > td {
+  padding: 0;
+  border: 1px solid var(--c-line);
+  border-radius: 12px;
+  background: var(--c-card);
+}
+.screener-host-group {
+  border-radius: 12px;
+  background: transparent;
+}
+.screener-host-summary {
+  grid-template-columns: minmax(220px, 1.1fr) minmax(160px, 1fr) minmax(220px, 1.2fr) auto;
+  padding: 18px 22px;
+  cursor: pointer;
+}
+.screener-host-identity strong {
+  font: 600 17px/1.3 var(--sans);
+  color: var(--text);
+}
+.screener-host-state,
+.screener-host-state .fleet-node-status[class] {
+  font: 400 14px/1.4 var(--sans);
+}
+.screener-host-capacity .fleet-host-specs,
+.screener-host-capacity .fleet-unreported,
+.screener-host-load .fleet-unreported {
+  font: 400 14px/1.4 var(--sans);
+  color: var(--text-dim);
+}
+/* The host's load reads as three compact bars on one line of columns. */
+.screener-host-load .fleet-resources {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.screener-host-load .fleet-resource {
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  gap: 4px 8px;
+  align-items: center;
+}
+.screener-host-load .fleet-resource-label {
+  grid-column: 1;
+  grid-row: 1;
+}
+.screener-host-load .fleet-resource-value {
+  grid-column: 2;
+  grid-row: 1;
+  text-align: right;
+}
+.screener-host-load .fleet-resource-track {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+.screener-host-toggle {
+  font: 500 13px/1 var(--sans);
+  color: var(--text-dim);
+}
+.screener-workers-board {
+  border-top: 1px solid var(--c-line-soft);
+}
+.screener-worker-table thead th {
+  border-radius: 0 !important;
+  background: transparent;
+  border-left: 0 !important;
+  border-right: 0 !important;
+}
+.screener-worker-table tbody td {
+  border-radius: 0 !important;
+  border-left: 0 !important;
+  border-right: 0 !important;
+  background: transparent;
+}
+.screener-worker-table {
+  border-spacing: 0 !important;
+  margin-top: 0 !important;
+}
+
+/* Targon builds. */
+.submission-builds {
+  padding: 24px 26px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--c-radius-card);
+  background: var(--c-card);
+  box-shadow: var(--c-shadow-card);
+}
+.submission-builds-eyebrow {
+  font: 500 13px/1.3 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--c-gold);
+}
+.submission-builds h2 {
+  margin: 6px 0 8px;
+  font: 600 24px/1.2 var(--display);
+  letter-spacing: -0.015em;
+}
+.submission-builds-head p {
+  max-width: 80ch;
+  font: 400 15px/1.55 var(--sans);
+  color: var(--text-dim);
+}
+.submission-builds-window {
+  font: 500 13px/1.3 var(--sans);
+  color: var(--text-dim);
+}
+.submission-builds-ledger {
+  gap: 12px;
+  margin: 18px 0;
+}
+.submission-builds-ledger > * {
+  padding: 12px 16px;
+  border: 1px solid var(--c-line);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--c-raised) 45%, transparent);
+  font: 400 14px/1.4 var(--sans);
+}
+.submission-builds-table th {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--c-line);
+  font: 500 13px/1.2 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.submission-builds-table td {
+  padding: 14px;
+  border-bottom: 1px solid var(--c-line-soft);
+  font: 400 14px/1.4 var(--sans);
+}
+.submission-builds-empty,
+.submission-builds-none {
+  padding: 22px 14px;
+  font: 400 15px/1.5 var(--sans);
+  color: var(--text-dim);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Signed-in miner console
+   ═════════════════════════════════════════════════════════════════════════ */
+.account-console {
+  display: grid;
+  gap: 18px;
+}
+.account-console .account-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 22px 24px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--c-radius-card);
+  background: var(--c-card);
+}
+.account-console .account-head h2 {
+  font: 700 28px/1.15 var(--display);
+  letter-spacing: -0.02em;
+}
+.account-console .account-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: 0;
+}
+.account-console .account-tabs .btn {
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--c-surface) 85%, transparent);
+  font: 400 15px/1 var(--sans);
+}
+.account-console .account-tabs .btn.active {
+  border-color: color-mix(in oklab, var(--c-gold) 70%, transparent);
+  background: color-mix(in oklab, var(--c-gold) 12%, var(--c-surface));
+  color: var(--text);
+}
+.account-console .account-card {
+  padding: 22px 24px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--c-radius-card);
+  background: var(--c-card);
+}
+.account-console .account-field input,
+.account-console .account-field textarea {
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 1px solid var(--c-line);
+  border-radius: 10px;
+  background: var(--c-surface);
+  color: var(--text);
+  font: 400 15px/1.4 var(--sans);
+}
+.account-console .account-list li,
+.account-console .account-list > * {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--c-line-soft);
+  font: 400 14px/1.45 var(--sans);
+}
+.account-console .account-logs,
+.account-console pre {
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+/* ── Review fixes: drawer header chip, screener load, build ledger ────── */
+/* modal.css paints #d-bench plum for every state (an ID outranks the tone
+   class), so a healthy validator read in the memory encoding's colour. The
+   chip follows its tone like every other status chip. */
+.modal #d-bench {
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  font: 600 13px/1.3 var(--sans);
+}
+.modal #d-bench.good {
+  color: var(--good);
+  border-color: color-mix(in oklab, var(--good) 45%, transparent);
+  background: color-mix(in oklab, var(--good) 13%, transparent);
+}
+.modal #d-bench.warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 48%, transparent);
+  background: color-mix(in oklab, var(--warn) 13%, transparent);
+}
+.modal #d-bench.bad {
+  color: color-mix(in oklab, var(--danger) 80%, var(--text));
+  border-color: color-mix(in oklab, var(--danger) 48%, transparent);
+  background: color-mix(in oklab, var(--danger) 13%, transparent);
+}
+.modal #d-bench.progress {
+  color: var(--c-progress-hi);
+  border-color: color-mix(in oklab, var(--c-progress) 50%, transparent);
+  background: color-mix(in oklab, var(--c-progress) 15%, transparent);
+}
+.modal #d-bench.paused,
+.modal #d-bench.unknown {
+  color: var(--text-dim);
+  border-color: var(--c-line);
+  background: transparent;
+}
+
+/* Screener host load: three compact label/value/bar rows, like the
+   validator host cell, instead of three columns that ran into each other. */
+.screener-host-summary {
+  grid-template-columns: minmax(220px, 1.1fr) minmax(160px, 1fr) minmax(240px, 1fr) auto;
+}
+.screener-host-load .fleet-resources {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+.screener-host-load .fleet-resource {
+  grid-template-columns: 46px 44px minmax(0, 1fr);
+  grid-template-rows: auto;
+  gap: 10px;
+}
+.screener-host-load .fleet-resource-label,
+.screener-host-load .fleet-resource-value,
+.screener-host-load .fleet-resource-track {
+  grid-row: 1;
+}
+.screener-host-load .fleet-resource-label {
+  grid-column: 1;
+}
+.screener-host-load .fleet-resource-value {
+  grid-column: 2;
+}
+.screener-host-load .fleet-resource-track {
+  grid-column: 3;
+}
+.fleet-table .current-agent,
+.fleet-table .current-agent button,
+.screener-progress-stage {
+  font: 500 14px/1.4 var(--sans);
+  color: var(--text);
+}
+
+/* Build ledger: the count leads, the label sits under it. */
+.submission-builds-ledger > div {
+  display: grid;
+  gap: 2px;
+}
+.submission-builds-ledger strong {
+  font: 600 22px/1.2 var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.submission-builds-ledger span {
+  font: 400 13px/1.3 var(--sans);
+  color: var(--text-dim);
+}
+
+/* Held-crown callout on the Leaderboard page. */
+.koth-standing-metrics dt {
+  font: 400 13px/1.3 var(--sans);
+}
+.koth-standing-metrics dd {
+  font: 600 16px/1.3 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.koth-standing-title {
+  font: 600 16px/1.4 var(--sans);
+}
+.emissions-strip .emissions-next-pin,
+.emissions-strip .emissions-next-pin *,
+.rollout-strip .rollout-note,
+.rollout-strip .rollout-note *,
+.chain-observation .chain-observation-label {
+  font-size: 14px;
+  line-height: 1.55;
+}
+.rollout-strip .rollout-status[class] {
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
 }

@@ -3,7 +3,7 @@
 // headline identity on purpose: box = who reigns at a glance, strip = why.
 // Solid's fine-grained updates replace the lastChampionHtml signature gate —
 // unchanged content never rewrites the aria-live region.
-import { Show, createMemo } from "solid-js";
+import { Show } from "solid-js";
 import type { JSX } from "solid-js";
 
 import { agentName, fx, pct, publicDisplayName, relTime, shortKey } from "../../lib/format";
@@ -16,7 +16,6 @@ import {
   nextPinVerdict,
   pinLabel,
   signedScore,
-  validatorWeightViews,
 } from "../../lib/scoring";
 import { TipTarget } from "../ui/Tooltip";
 import { leaderboardVersionView } from "../board/board-state";
@@ -55,23 +54,6 @@ export function ChampionBox(props: { store: LeaderboardStore }): JSX.Element {
       ? recipient.share_of_miner_pool
       : e?.champion_share;
   };
-  // The chain's own reading of the crown: how many revealed validator
-  // vectors put this miner first. Same arithmetic as the board's per-row
-  // "Validator top choice" badge, so the card and the row cannot disagree.
-  const revealed = createMemo(() => {
-    const snapshot = store.chainWeights();
-    const views = (validatorWeightViews(snapshot) ?? []).filter((view) => view.entries.length);
-    if (!views.length) return null;
-    const hotkey = championEntry()?.miner_hotkey;
-    return {
-      vectors: views.length,
-      topChoice: hotkey
-        ? views.filter((view) => view.entries.find((entry) => entry.top)?.hotkey === hotkey).length
-        : null,
-      block: snapshot?.block ?? null,
-      stale: Boolean(snapshot?.stale),
-    };
-  });
   const composite = (): number | null => {
     const entry = championEntry();
     return entry ? displayComposite(entry, store.settledView()) : null;
@@ -272,24 +254,6 @@ export function ChampionBox(props: { store: LeaderboardStore }): JSX.Element {
           </Show>
         </Show>
       </div>
-      {/* Outside the live region: the block number moves every poll, and a
-          polite region would re-announce the whole card each time. */}
-      <Show when={hasChampion() && !scoreCeilingPool() && revealed()}>
-        {(chain) => (
-          <div class="champion-chain">
-            <span>
-              Revealed weights · <b>{chain().vectors}</b> validator vectors
-              {chain().block != null ? " · block " + Number(chain().block).toLocaleString() : ""}
-              {chain().stale ? " · stale" : ""}
-            </span>
-            <Show when={chain().topChoice != null}>
-              <span class="champion-chain-verdict">
-                Top choice of <b>{chain().topChoice}</b> of {chain().vectors} vectors
-              </span>
-            </Show>
-          </div>
-        )}
-      </Show>
     </section>
   );
 }
