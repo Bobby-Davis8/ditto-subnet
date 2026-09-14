@@ -143,31 +143,16 @@ async def _amain() -> int:
                 subtensor_network=config.subtensor_network,
             )
             logger.info("weight mode: Pylon identity (put_weights)")
-            async with create_chain_client(chain_config) as chain:
-                coding_canary: CodingCanaryWorker | None = None
-                if config.coding_canary_enabled:
-
-                    def _sign_canary_receipt(
-                        lease: CodingCertificationLeaseResponse,
-                        receipt: CodingCapabilityCertificationReceipt,
-                    ) -> str:
-                        return sign_coding_certification(
-                            keypair,
-                            validator_hotkey=config.validator_hotkey,
-                            agent_id=lease.authority.agent_id,
-                            bench_version=lease.authority.bench_version,
-                            lease_id=lease.authority.lease_id,
-                            screened_image_sha256=lease.authority.screened_image_sha256,
-                            receipt=receipt,
-                        )
-
-                    coding_canary = CodingCanaryWorker(
-                        platform=platform,
-                        runtime=CodingCanaryRuntime(config, http),
-                        sign_receipt=_sign_canary_receipt,
-                        poll_seconds=config.coding_canary_poll_seconds,
-                    )
-                    logger.info("coding canary worker enabled")
+            async with (
+                create_chain_client(chain_config) as chain,
+                AsyncExitStack() as coding_resources,
+            ):
+                coding_canary = await _create_coding_canary_worker(
+                    config=config,
+                    platform=platform,
+                    keypair=keypair,
+                    resources=coding_resources,
+                )
                 worker = ValidatorWorker(
                     config=config,
                     platform=platform,
@@ -181,56 +166,97 @@ async def _amain() -> int:
                         coding_canary.offer if coding_canary is not None else None
                     ),
                 )
-                async with AsyncExitStack() as coding_resources:
-                    coding_worker = await _create_coding_shadow_worker(
-                        config=config,
-                        platform=platform,
-                        keypair=keypair,
-                        resources=coding_resources,
+                coding_worker = await _create_coding_shadow_worker(
+                    config=config,
+                    platform=platform,
+                    keypair=keypair,
+                    resources=coding_resources,
+                )
+                _apply_ditto_logging()  # re-assert: bittensor has initialised
+
+                async def run_ordinary_worker() -> None:
+                    await worker.run_forever(
+                        stop,
+                        drain_requested=drain_requested,
+                        bootstrap_resume=(
+                            mark_bootstrap_resumed if bootstrap_drain_pending else None
+                        ),
+                        extra_busy=_extra_busy(coding_worker, coding_canary),
                     )
-                    _apply_ditto_logging()  # re-assert: bittensor has initialised
 
-                    async def run_ordinary_worker() -> None:
-                        await worker.run_forever(
-                            stop,
-                            drain_requested=drain_requested,
-                            bootstrap_resume=(
-                                mark_bootstrap_resumed
-                                if bootstrap_drain_pending
-                                else None
-                            ),
-                            extra_busy=_extra_busy(coding_worker, coding_canary),
-                        )
-
-                    extras: list[tuple[str, _ExtraWorker]] = []
-                    if coding_worker is not None:
-                        extras.append(("validator-coding-shadow-worker", coding_worker))
-                    if coding_canary is not None:
-                        extras.append(("validator-coding-canary-worker", coding_canary))
-                    try:
-                        if not extras:
-                            await run_ordinary_worker()
-                        else:
-                            async with asyncio.TaskGroup() as group:
+                extras: list[tuple[str, _ExtraWorker]] = []
+                if coding_worker is not None:
+                    extras.append(("validator-coding-shadow-worker", coding_worker))
+                if coding_canary is not None:
+                    extras.append(("validator-coding-canary-worker", coding_canary))
+                try:
+                    if not extras:
+                        await run_ordinary_worker()
+                    else:
+                        async with asyncio.TaskGroup() as group:
+                            group.create_task(
+                                run_ordinary_worker(),
+                                name="validator-ordinary-worker",
+                            )
+                            for name, extra_worker in extras:
                                 group.create_task(
-                                    run_ordinary_worker(),
-                                    name="validator-ordinary-worker",
+                                    extra_worker.run_forever(
+                                        stop,
+                                        drain_requested=drain_requested,
+                                    ),
+                                    name=name,
                                 )
-                                for name, extra_worker in extras:
-                                    group.create_task(
-                                        extra_worker.run_forever(
-                                            stop,
-                                            drain_requested=drain_requested,
-                                        ),
-                                        name=name,
-                                    )
-                    finally:
-                        stop.set()
+                finally:
+                    stop.set()
     finally:
         write_update_state("stopping")
         telemetry.close()
     logger.info("validator worker stopped")
     return 0
+
+
+async def _create_coding_canary_worker(
+    *,
+    config: ValidatorConfig,
+    platform: PlatformClient,
+    keypair: Any,
+    resources: AsyncExitStack,
+) -> CodingCanaryWorker | None:
+    if not config.coding_canary_enabled:
+        return None
+
+    # The scorer control bearer and the per-lease broker private key cross this
+    # client. Keep it separate from Platform/Pylon traffic and never let an
+    # inherited proxy setting observe it.
+    canary_http = await resources.enter_async_context(
+        httpx.AsyncClient(
+            timeout=config.http_timeout_seconds,
+            trust_env=False,
+        )
+    )
+
+    def _sign_canary_receipt(
+        lease: CodingCertificationLeaseResponse,
+        receipt: CodingCapabilityCertificationReceipt,
+    ) -> str:
+        return sign_coding_certification(
+            keypair,
+            validator_hotkey=config.validator_hotkey,
+            agent_id=lease.authority.agent_id,
+            bench_version=lease.authority.bench_version,
+            lease_id=lease.authority.lease_id,
+            screened_image_sha256=lease.authority.screened_image_sha256,
+            receipt=receipt,
+        )
+
+    worker = CodingCanaryWorker(
+        platform=platform,
+        runtime=CodingCanaryRuntime(config, canary_http),
+        sign_receipt=_sign_canary_receipt,
+        poll_seconds=config.coding_canary_poll_seconds,
+    )
+    logger.info("coding canary worker enabled")
+    return worker
 
 
 async def _create_coding_shadow_worker(

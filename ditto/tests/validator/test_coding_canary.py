@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -447,9 +450,9 @@ async def test_canary_worker_aborts_issued_lease_if_claim_fails() -> None:
     assert runtime.certified == []
 
 
-def _runtime_config() -> Any:
+def _runtime_config(url: str = "http://127.0.0.1:18081") -> Any:
     return SimpleNamespace(
-        dittobench_api_url="http://127.0.0.1:18081",
+        dittobench_api_url=url,
         dittobench_control_token=_TOKEN,
     )
 
@@ -483,7 +486,7 @@ async def test_canary_runtime_certify_accepts_private_json() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), trust_env=False
     ) as http:
-        runtime = CodingCanaryRuntime(_runtime_config(), http)
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
         outcome = await runtime.certify(
             _lease(status=CodingCertificationLeaseStatus.CLAIMED),
             _harness(),
@@ -511,7 +514,7 @@ async def test_canary_runtime_rejects_missing_no_store() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), trust_env=False
     ) as http:
-        runtime = CodingCanaryRuntime(_runtime_config(), http)
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
         with pytest.raises(ValidatorInfrastructureError, match="cache policy"):
             await runtime.certify(
                 _lease(status=CodingCertificationLeaseStatus.CLAIMED),
@@ -530,6 +533,272 @@ async def test_canary_runtime_probe_treats_404_as_unavailable() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), trust_env=False
     ) as http:
-        runtime = CodingCanaryRuntime(_runtime_config(), http)
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
         with pytest.raises(PlatformInfrastructureError, match="unavailable"):
             await runtime.require_available()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # The fixed Compose scorer origin on the stack's private bridge.
+        "http://sandbox-docker:8000",
+        "http://sandbox-docker:8000/",
+        "http://127.0.0.1:18081",
+        "http://localhost:18081",
+        "https://scorer.invalid",
+    ],
+)
+async def test_canary_runtime_accepts_compose_loopback_and_tls_origins(
+    url: str,
+) -> None:
+    async with httpx.AsyncClient(trust_env=False) as http:
+        CodingCanaryRuntime(_runtime_config(url), http)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://sandbox-docker",
+        "http://sandbox-docker:8001",
+        "http://SANDBOX-DOCKER:8000",
+        "http://sandbox-docker.:8000",
+        "http://sandbox-docker.invalid:8000",
+        "http://scorer.invalid:8000",
+        "http://10.0.0.5:8000",
+        "https://sandbox-docker:8000/v1",
+        "http://sandbox-docker:8000/v1",
+        "http://operator:secret@sandbox-docker:8000",
+        "http://sandbox-docker:8000?next=1",
+        "http://sandbox-docker:8000#fragment",
+        "ws://sandbox-docker:8000",
+        "http://127.0.0.1:not-a-port",
+        "sandbox-docker:8000",
+    ],
+)
+async def test_canary_runtime_rejects_other_plaintext_or_shaped_origins(
+    url: str,
+) -> None:
+    async with httpx.AsyncClient(trust_env=False) as http:
+        with pytest.raises(ValueError, match="configuration is invalid"):
+            CodingCanaryRuntime(_runtime_config(url), http)
+
+
+async def test_canary_runtime_rejects_a_proxy_inheriting_client() -> None:
+    async with httpx.AsyncClient() as http:
+        assert http.trust_env is True
+        with pytest.raises(ValueError, match="configuration is invalid"):
+            CodingCanaryRuntime(_runtime_config("http://sandbox-docker:8000"), http)
+
+
+class _HangingBody(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.Event().wait()
+        yield b""  # pragma: no cover - never reached
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def _certify(runtime: CodingCanaryRuntime) -> CodingCanaryOutcome:
+    return await runtime.certify(
+        _lease(status=CodingCertificationLeaseStatus.CLAIMED),
+        _harness(),
+        _grant_exchange(),
+        broker_public_key="A" * 43,
+        broker_private_key="B" * 86,
+    )
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected_read"),
+    [
+        (timedelta(minutes=20), 1200.0),
+        (timedelta(seconds=5), 5.0),
+    ],
+)
+async def test_canary_runtime_bounds_certify_by_the_lease_deadline(
+    remaining: timedelta, expected_read: float
+) -> None:
+    observed: list[dict[str, float]] = []
+    deadline = _authority().deadline
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request.extensions["timeout"])
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
+            json=_canary_response_payload(),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False, timeout=30.0
+    ) as http:
+        runtime = CodingCanaryRuntime(
+            _runtime_config("http://sandbox-docker:8000"),
+            http,
+            clock=lambda: deadline - remaining,
+        )
+        await _certify(runtime)
+    assert observed == [
+        {
+            "connect": min(10.0, expected_read),
+            "read": expected_read,
+            "write": min(60.0, expected_read),
+            "pool": min(10.0, expected_read),
+        }
+    ]
+
+
+async def test_canary_runtime_caps_certify_at_the_scorer_operation_bound() -> None:
+    observed: list[dict[str, float]] = []
+    deadline = _authority().deadline
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request.extensions["timeout"])
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
+            json=_canary_response_payload(),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(
+            _runtime_config(),
+            http,
+            clock=lambda: deadline - timedelta(hours=1),
+        )
+        await _certify(runtime)
+    assert [value["read"] for value in observed] == [32 * 60.0]
+
+
+@pytest.mark.parametrize(
+    "offset", [timedelta(0), timedelta(seconds=1), timedelta(hours=2)]
+)
+async def test_canary_runtime_never_sends_after_the_lease_deadline(
+    offset: timedelta,
+) -> None:
+    calls = 0
+    deadline = _authority().deadline
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(
+            _runtime_config(), http, clock=lambda: deadline + offset
+        )
+        with pytest.raises(ValidatorInfrastructureError, match="deadline expired"):
+            await _certify(runtime)
+    assert calls == 0
+
+
+async def test_canary_runtime_rejects_a_naive_clock_before_sending() -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(
+            _runtime_config(), http, clock=lambda: _NOW.replace(tzinfo=None)
+        )
+        with pytest.raises(ValidatorInfrastructureError, match="clock is invalid"):
+            await _certify(runtime)
+    assert calls == 0
+
+
+async def test_canary_runtime_deadline_closes_a_stalled_stream_without_retry() -> None:
+    calls = 0
+    body = _HangingBody()
+    deadline = _authority().deadline
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
+            stream=body,
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False, timeout=30.0
+    ) as http:
+        runtime = CodingCanaryRuntime(
+            _runtime_config("http://sandbox-docker:8000"),
+            http,
+            clock=lambda: deadline - timedelta(milliseconds=100),
+        )
+        started = time.monotonic()
+        with pytest.raises(ValidatorInfrastructureError, match="deadline exceeded"):
+            await asyncio.wait_for(_certify(runtime), timeout=5)
+        assert time.monotonic() - started < 5
+    assert calls == 1
+    assert body.closed is True
+
+
+async def test_canary_runtime_deadline_abandons_a_scorer_that_never_answers() -> None:
+    calls = 0
+    released = asyncio.Event()
+    deadline = _authority().deadline
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        try:
+            await asyncio.Event().wait()
+        finally:
+            released.set()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False, timeout=30.0
+    ) as http:
+        runtime = CodingCanaryRuntime(
+            _runtime_config(),
+            http,
+            clock=lambda: deadline - timedelta(milliseconds=100),
+        )
+        with pytest.raises(ValidatorInfrastructureError, match="deadline exceeded"):
+            await asyncio.wait_for(_certify(runtime), timeout=5)
+    assert calls == 1
+    assert released.is_set()
+
+
+async def test_canary_runtime_cancellation_closes_the_stream_and_propagates() -> None:
+    body = _HangingBody()
+    streaming = asyncio.Event()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        streaming.set()
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
+            stream=body,
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
+        task = asyncio.create_task(_certify(runtime))
+        await asyncio.wait_for(streaming.wait(), timeout=5)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert body.closed is True

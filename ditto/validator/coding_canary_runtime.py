@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import ipaddress
+import asyncio
 import json
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -22,6 +23,7 @@ from ditto.api_models.coding_inference_grants import (
     CodingCertificationInferenceExchangeResponse,
 )
 from ditto.validator.coding_canary import CodingCanaryOutcome
+from ditto.validator.coding_executor_transport import tls_or_loopback
 from ditto.validator.config import ValidatorConfig
 from ditto.validator.errors import (
     PlatformInfrastructureError,
@@ -31,6 +33,15 @@ from ditto.validator.errors import (
 _REQUEST_SCHEMA = "dittobench-coding-certification-canary-request-v1"
 _RESPONSE_SCHEMA = "dittobench-coding-certification-canary-response-v1"
 _MAX_BODY_BYTES = 8 << 20
+# The validator Compose service reaches the scorer through the sandbox-docker
+# network namespace on the stack's private bridge. That fixed service origin is
+# the only plaintext, non-loopback scorer origin the canary accepts; miner
+# containers run inside the nested daemon and cannot reach port 8000.
+_COMPOSE_SCORER_ORIGINS = frozenset({"http://sandbox-docker:8000"})
+# One certify call may never outlive its lease. The scorer independently caps
+# a canary operation at 32 minutes, and a lease deadline is at most 30 minutes
+# after issue, so the local bound is the earlier of the two.
+_MAX_CERTIFY_SECONDS = 32 * 60.0
 
 
 class _WireModel(BaseModel):
@@ -68,13 +79,16 @@ class CodingCanaryRuntime:
         parsed = urlsplit(config.dittobench_api_url)
         token = config.dittobench_control_token
         if (
-            not _tls_or_loopback(parsed.scheme, parsed.hostname)
-            or not parsed.netloc
+            not _permitted_scorer_origin(parsed)
             or parsed.username is not None
             or parsed.password is not None
+            or parsed.path not in {"", "/"}
             or parsed.query
             or parsed.fragment
             or not _valid_control_token(token)
+            # The bearer and the broker private key travel on this client; an
+            # inherited proxy setting must never receive them.
+            or getattr(client, "trust_env", True)
         ):
             raise ValueError("coding canary runtime configuration is invalid")
         self._base = config.dittobench_api_url.rstrip("/")
@@ -144,29 +158,45 @@ class CodingCanaryRuntime:
                 "broker_private_key": broker_private_key,
             },
         }
+        budget = self._certify_budget_seconds(lease)
+        timeout = httpx.Timeout(
+            budget,
+            connect=min(10.0, budget),
+            write=min(60.0, budget),
+            pool=min(10.0, budget),
+        )
         body = bytearray()
         try:
-            async with self._client.stream(
-                "POST",
-                f"{self._base}/v1/coding/certifier/canary",
-                headers=self._headers(),
-                json=payload,
-                follow_redirects=False,
-            ) as response:
-                if response.status_code != 200:
-                    raise ValidatorInfrastructureError(
-                        f"coding canary runtime rejected ({response.status_code})"
-                    )
-                if not _private_json_headers(response.headers):
-                    raise ValidatorInfrastructureError(
-                        "coding canary runtime cache policy is invalid"
-                    )
-                async for chunk in response.aiter_bytes(chunk_size=16 << 10):
-                    if len(body) + len(chunk) > _MAX_BODY_BYTES:
+            # Single shot: no retry. Leaving this block for any reason, including
+            # the deadline or task cancellation, closes the stream so the scorer
+            # observes the disconnect and tears the harness down.
+            async with asyncio.timeout(budget):
+                async with self._client.stream(
+                    "POST",
+                    f"{self._base}/v1/coding/certifier/canary",
+                    headers=self._headers(),
+                    json=payload,
+                    follow_redirects=False,
+                    timeout=timeout,
+                ) as response:
+                    if response.status_code != 200:
                         raise ValidatorInfrastructureError(
-                            "coding canary runtime response size is invalid"
+                            f"coding canary runtime rejected ({response.status_code})"
                         )
-                    body.extend(chunk)
+                    if not _private_json_headers(response.headers):
+                        raise ValidatorInfrastructureError(
+                            "coding canary runtime cache policy is invalid"
+                        )
+                    async for chunk in response.aiter_bytes(chunk_size=16 << 10):
+                        if len(body) + len(chunk) > _MAX_BODY_BYTES:
+                            raise ValidatorInfrastructureError(
+                                "coding canary runtime response size is invalid"
+                            )
+                        body.extend(chunk)
+        except TimeoutError as error:
+            raise ValidatorInfrastructureError(
+                "coding canary runtime deadline exceeded"
+            ) from error
         except httpx.HTTPError as error:
             raise ValidatorInfrastructureError(
                 "coding canary runtime request failed"
@@ -191,6 +221,17 @@ class CodingCanaryRuntime:
             harness_destroyed=True,
         )
 
+    def _certify_budget_seconds(self, lease: CodingCertificationLeaseResponse) -> float:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValidatorInfrastructureError("coding canary runtime clock is invalid")
+        remaining = (
+            lease.authority.deadline.astimezone(UTC) - now.astimezone(UTC)
+        ).total_seconds()
+        if not math.isfinite(remaining) or remaining <= 0:
+            raise ValidatorInfrastructureError("coding canary lease deadline expired")
+        return min(remaining, _MAX_CERTIFY_SECONDS)
+
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self._token}",
@@ -206,20 +247,16 @@ def _private_json_headers(headers: httpx.Headers) -> bool:
     } and headers.get("Content-Type", "").lower().startswith("application/json")
 
 
-def _tls_or_loopback(scheme: str, hostname: str | None) -> bool:
-    if hostname is None or hostname == "":
+def _permitted_scorer_origin(parsed: SplitResult) -> bool:
+    if not parsed.netloc:
         return False
-    if scheme == "https":
-        return True
-    if scheme != "http":
-        return False
-    host = hostname.casefold()
-    if host in {"localhost", "localhost."}:
+    if f"{parsed.scheme}://{parsed.netloc}" in _COMPOSE_SCORER_ORIGINS:
         return True
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        _ = parsed.port
     except ValueError:
         return False
+    return tls_or_loopback(parsed.scheme, parsed.hostname)
 
 
 def _valid_control_token(value: str) -> bool:
