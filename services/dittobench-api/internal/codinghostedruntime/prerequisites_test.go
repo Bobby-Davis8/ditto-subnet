@@ -5,11 +5,37 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
-// The native host prerequisites role renders this record for its fixed host.
-const prerequisitesTemplate = "../../../../infra/ansible/roles/coding_hosted_prerequisites/templates/host-prerequisites.json.j2"
+// The native host prerequisites role renders this record for its fixed host from
+// its port constants. .github/workflows/dittobench.yml watches both files.
+const (
+	prerequisitesTemplate = "../../../../infra/ansible/roles/coding_hosted_prerequisites/templates/host-prerequisites.json.j2"
+	prerequisitesVars     = "../../../../infra/ansible/roles/coding_hosted_prerequisites/vars/main.yml"
+)
+
+type prerequisitesPorts struct{ router, proxy string }
+
+func rolePorts(t *testing.T) prerequisitesPorts {
+	t.Helper()
+	vars, err := os.ReadFile(prerequisitesVars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := func(name string) string {
+		matches := regexp.MustCompile(`(?m)^`+name+`: ([1-9][0-9]{3,4})$`).FindAllSubmatch(vars, -1)
+		if len(matches) != 1 {
+			t.Fatalf("role constant %s is not one canonical port", name)
+		}
+		return string(matches[0][1])
+	}
+	return prerequisitesPorts{
+		router: value("coding_hosted_prerequisites_router_port"),
+		proxy:  value("coding_hosted_prerequisites_proxy_port"),
+	}
+}
 
 type prerequisitesRecord struct {
 	Schema         string `json:"schema"`
@@ -28,11 +54,26 @@ func renderPrerequisites(t *testing.T, address string) prerequisitesRecord {
 	if err != nil {
 		t.Fatal(err)
 	}
-	placeholder := []byte("{{ coding_hosted_prerequisites_host_address }}")
-	if bytes.Count(template, placeholder) != 2 || bytes.Count(template, []byte("{{")) != 2 {
+	ports := rolePorts(t)
+	substitutions := []struct{ placeholder, value string }{
+		{"{{ coding_hosted_prerequisites_host_address }}", address},
+		{"{{ coding_hosted_prerequisites_router_port }}", ports.router},
+		{"{{ coding_hosted_prerequisites_proxy_port }}", ports.proxy},
+	}
+	if bytes.Count(template, []byte("{{")) != 4 {
 		t.Fatal("prerequisites template has unexpected substitutions")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(bytes.ReplaceAll(template, placeholder, []byte(address))))
+	for _, substitution := range substitutions {
+		want := 1
+		if substitution.value == address {
+			want = 2
+		}
+		if bytes.Count(template, []byte(substitution.placeholder)) != want {
+			t.Fatal("prerequisites template has unexpected substitutions")
+		}
+		template = bytes.ReplaceAll(template, []byte(substitution.placeholder), []byte(substitution.value))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(template))
 	decoder.DisallowUnknownFields()
 	var record prerequisitesRecord
 	if err := decoder.Decode(&record); err != nil {
@@ -59,6 +100,7 @@ func loadWithPrerequisites(t *testing.T, record prerequisitesRecord) (*runtimeCo
 
 func TestPrerequisitesRoleRecordPassesRuntimeLoader(t *testing.T) {
 	// The role guard admits 10.33.0.2 through 10.33.0.253; check both bounds.
+	ports := rolePorts(t)
 	for _, address := range []string{"10.33.0.2", "10.33.0.253"} {
 		record := renderPrerequisites(t, address)
 		// Every language runtime uses 10001; the Rust executor requires it.
@@ -70,7 +112,7 @@ func TestPrerequisitesRoleRecordPassesRuntimeLoader(t *testing.T) {
 			t.Fatalf("runtime rejected the role record for %s", address)
 		}
 		if config.docker.HostGatewayIP != address || config.docker.EgressNetwork != "ditto-coding-restricted" ||
-			config.docker.EgressProxy != "http://"+address+":18090" || config.publicBase != "http://host.docker.internal:18080" {
+			config.docker.EgressProxy != "http://"+address+":"+ports.proxy || config.publicBase != "http://host.docker.internal:"+ports.router {
 			t.Fatal("runtime did not bind the role record")
 		}
 	}

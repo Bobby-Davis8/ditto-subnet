@@ -1,12 +1,15 @@
 """Native host prerequisites; synthetic checks never change a host or start a unit."""
 
+import errno
 import importlib.util
 import ipaddress
 import json
 import re
 import socket
 import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -14,6 +17,8 @@ import yaml
 ROOT = Path(__file__).parents[2]
 ROLE = ROOT / "infra/ansible/roles/coding_hosted_prerequisites"
 PLACEHOLDER = "{{ coding_hosted_prerequisites_host_address }}"
+ROUTER_PORT = "{{ coding_hosted_prerequisites_router_port }}"
+PROXY_PORT = "{{ coding_hosted_prerequisites_proxy_port }}"
 WORKER = "30000000-0000-4000-8000-000000000003"
 
 
@@ -38,13 +43,22 @@ CONNECTIVITY = load(
 )
 TASKS_SOURCE = (ROLE / "tasks/main.yml").read_text()
 GUARD_SOURCE = (ROLE / "tasks/guard.yml").read_text()
+FILES_SOURCE = (ROLE / "tasks/files.yml").read_text()
 UNIT = (ROLE / "templates/egress-proxy.service.j2").read_text()
+CONSTANTS = yaml.safe_load((ROLE / "vars/main.yml").read_text())
 
 
 def render(address="10.33.0.2"):
     template = (ROLE / "templates/host-prerequisites.json.j2").read_text()
-    assert template.count("{{") == template.count(PLACEHOLDER) == 2
-    return json.loads(template.replace(PLACEHOLDER, address))
+    assert template.count("{{") == 4 and template.count(PLACEHOLDER) == 2
+    assert template.count(ROUTER_PORT) == template.count(PROXY_PORT) == 1
+    for placeholder, value in (
+        (PLACEHOLDER, address),
+        (ROUTER_PORT, CONSTANTS["coding_hosted_prerequisites_router_port"]),
+        (PROXY_PORT, CONSTANTS["coding_hosted_prerequisites_proxy_port"]),
+    ):
+        template = template.replace(placeholder, str(value))
+    return json.loads(template)
 
 
 def block():
@@ -90,6 +104,22 @@ def test_role_is_default_off_with_exact_host_source_and_confirmation():
     ]["that"] == ["not ansible_check_mode"]
 
 
+def test_ports_are_role_constants_written_once():
+    assert CONSTANTS == {
+        "coding_hosted_prerequisites_router_port": 18080,
+        "coding_hosted_prerequisites_proxy_port": 18090,
+    }
+    for path in ROLE.rglob("*"):
+        if path.is_file() and "__pycache__" not in path.parts:
+            text = "" if path == ROLE / "vars/main.yml" else path.read_text()
+            assert "18080" not in text and "18090" not in text, path
+    # The helper and proxy take ports only from the rendered record and unit.
+    assert f"egress-proxy.py {PLACEHOLDER} {PROXY_PORT}" in UNIT
+    assert f"SocketBindAllow=ipv4:tcp:{PROXY_PORT}" in UNIT.splitlines()
+    for placeholder in (ROUTER_PORT, PROXY_PORT):
+        assert placeholder.strip("{} ") in TASKS_SOURCE
+
+
 def test_playbook_fixture_and_ci_never_enable_the_role():
     playbook = yaml.safe_load(
         (
@@ -125,6 +155,21 @@ def test_playbook_fixture_and_ci_never_enable_the_role():
     assert "playbooks/gcp-coding-hosted-prerequisites.yml" in workflow
     assert "-i localhost, tests/coding-hosted-prerequisites.yml" in workflow
     assert "coding_hosted_prerequisites_enabled" not in workflow
+
+
+def test_dittobench_ci_runs_the_go_record_test_when_its_role_inputs_change():
+    go_test = (
+        ROOT
+        / "services/dittobench-api/internal/codinghostedruntime/prerequisites_test.go"
+    ).read_text()
+    read = re.findall(r'"\.\./\.\./\.\./\.\./(infra/[^"]+)"', go_test)
+    assert sorted(read) == [
+        "infra/ansible/roles/coding_hosted_prerequisites/templates/host-prerequisites.json.j2",
+        "infra/ansible/roles/coding_hosted_prerequisites/vars/main.yml",
+    ]
+    workflow = yaml.safe_load((ROOT / ".github/workflows/dittobench.yml").read_text())
+    # PyYAML reads the bare `on` key as True.
+    assert set(read) <= set(workflow[True]["pull_request"]["paths"])
 
 
 def test_rendered_record_passes_helper_and_fits_connectivity_candidate_tcp():
@@ -228,6 +273,10 @@ def test_record_is_a_closed_object():
 
 def host_fixture(monkeypatch, *, port_range=(32768, 60999)):
     calls = []
+    monkeypatch.setattr(HELPER, "search_path", lambda: ("synthetic-unit-path",))
+    monkeypatch.setattr(
+        HELPER, "unit_overrides", lambda paths: calls.append(("units", paths))
+    )
     subordinate = {
         "/etc/subuid": f"{HOST.USER}:100000:65536\n",
         "/etc/subgid": f"{HOST.USER}:200000:65536\n",
@@ -250,7 +299,12 @@ def test_check_maps_candidate_identity_and_probes_both_exact_listeners(monkeypat
     record = render()
     calls = host_fixture(monkeypatch)
     receipt = HELPER.check(record)
-    assert calls == ["identity", ("10.33.0.2", 18080), ("10.33.0.2", 18090)]
+    assert calls == [
+        "identity",
+        ("10.33.0.2", 18080),
+        ("10.33.0.2", 18090),
+        ("units", ("synthetic-unit-path",)),
+    ]
     assert receipt == {
         "schema": "dittobench-coding-hosted-host-prerequisites-check-v2",
         "shadow_only": True,
@@ -301,14 +355,209 @@ def test_check_refuses_a_range_that_cannot_map_the_candidate(monkeypatch):
         HELPER.check(record)
 
 
+@pytest.mark.parametrize("size", [10000, 65535, 65537])
+def test_check_refuses_a_host_policy_range_of_another_size(monkeypatch, size):
+    record = render()
+    calls = host_fixture(monkeypatch)
+    monkeypatch.setattr(
+        HELPER,
+        "host_policy",
+        lambda: {
+            "identity": lambda: None,
+            "mapping": lambda _source, _user, _ids: (100000, 100000 + size),
+        },
+    )
+    with pytest.raises(ValueError):
+        HELPER.check(record)
+    assert calls == []
+
+
 def test_bind_probe_detects_busy_and_nonlocal_addresses():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
-        held.bind(("127.0.0.1", 0))
-        held.listen(1)
-        with pytest.raises(OSError):
-            HELPER.bindable("127.0.0.1", held.getsockname()[1])
+    for reuse in (0, 1):  # Python sockets default to 0; Go net.Listen sets 1.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, reuse)
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            with pytest.raises(OSError) as busy:
+                HELPER.bindable("127.0.0.1", held.getsockname()[1])
+            assert busy.value.errno == errno.EADDRINUSE
     with pytest.raises(OSError):
         HELPER.bindable("192.0.2.1", 18080)  # TEST-NET-1 is never assigned locally.
+
+
+def refused_port():
+    """A loopback port left in server-side TIME_WAIT by one proxy refusal."""
+    server = PROXY.Server(("127.0.0.1", 0), PROXY.Refusal)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        assert exchange(port, b"GET / HTTP/1.1\r\n\r\n").startswith(b"HTTP/1.1 405")
+    finally:
+        server.shutdown()
+        server.server_close()
+    # Without SO_REUSEADDR the old connection still owns the port.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as plain:
+        with pytest.raises(OSError) as busy:
+            plain.bind(("127.0.0.1", port))
+        assert busy.value.errno == errno.EADDRINUSE
+    return port
+
+
+def test_bind_probe_treats_time_wait_as_free_like_go_net_listen():
+    HELPER.bindable("127.0.0.1", refused_port())
+
+
+UNIT_NAMES = [
+    f"{name}{suffix}"
+    for name in (
+        "ditto-coding-hosted-egress-proxy.service",
+        "ditto-coding-hosted-egress-.service",
+        "ditto-coding-hosted-.service",
+        "ditto-coding-.service",
+        "ditto-.service",
+        "service",
+    )
+    for suffix in (".d", ".wants", ".requires", ".upholds")
+] + [
+    "ditto-coding-hosted-egress-proxy.socket",
+    "ditto-coding-hosted-egress-proxy.timer",
+    "ditto-coding-hosted-egress-proxy.path",
+]
+
+
+def test_unit_scan_covers_systemd_257_load_path_and_drop_in_names():
+    # `systemd-analyze unit-paths` on Debian 13 (systemd 257.13-1~deb13u1).
+    assert [str(path) for path in HELPER.UNIT_PATHS] == [
+        "/etc/systemd/system.control",
+        "/run/systemd/system.control",
+        "/run/systemd/transient",
+        "/run/systemd/generator.early",
+        "/etc/systemd/system",
+        "/etc/systemd/system.attached",
+        "/run/systemd/system",
+        "/run/systemd/system.attached",
+        "/run/systemd/generator",
+        "/usr/local/lib/systemd/system",
+        "/usr/lib/systemd/system",
+        "/run/systemd/generator.late",
+    ]
+    assert HELPER.unit_names() == UNIT_NAMES
+    fragment = Path("/etc/systemd/system/ditto-coding-hosted-egress-proxy.service")
+    assert fragment == HELPER.FRAGMENT
+
+
+def analyze(monkeypatch, stdout):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(HELPER.subprocess, "run", run)
+    return calls
+
+
+def test_search_path_requires_the_exact_reviewed_list(monkeypatch):
+    listing = "".join(f"{path}\n" for path in HELPER.UNIT_PATHS).encode()
+    calls = analyze(monkeypatch, listing)
+    assert HELPER.search_path() == HELPER.UNIT_PATHS
+    argv, kwargs = calls[0]
+    assert argv == ("/usr/bin/systemd-analyze", "unit-paths")
+    assert kwargs["check"] is True and kwargs["env"]["PATH"] == "/usr/bin:/bin"
+    lines = listing.decode().splitlines()
+    for changed in (
+        lines[:-1],
+        [*lines, "/lib/systemd/system"],
+        [lines[1], lines[0], *lines[2:]],
+        [*lines[:4], "/opt/units", *lines[5:]],
+    ):
+        analyze(monkeypatch, "".join(f"{line}\n" for line in changed).encode())
+        with pytest.raises(ValueError):
+            HELPER.search_path()
+
+
+def unit_tree(tmp_path, monkeypatch):
+    paths = [tmp_path / str(path).lstrip("/") for path in HELPER.UNIT_PATHS]
+    for path in paths:
+        path.mkdir(parents=True)
+    fragment = tmp_path / "etc/systemd/system" / HELPER.UNIT
+    monkeypatch.setattr(HELPER, "FRAGMENT", fragment)
+    protected = []
+    monkeypatch.setattr(HELPER, "protected", protected.append)
+    return paths, fragment, protected
+
+
+def test_unit_scan_accepts_a_clean_host_and_the_installed_fragment(
+    tmp_path, monkeypatch
+):
+    paths, fragment, protected = unit_tree(tmp_path, monkeypatch)
+    (paths[10] / "multi-user.target.wants").mkdir()
+    (paths[10] / "multi-user.target.wants/other.service").symlink_to("/dev/null")
+    (paths[4] / "other.service.d").mkdir()
+    HELPER.unit_overrides(paths)
+    assert protected == []
+    fragment.write_text("[Service]\n")
+    HELPER.unit_overrides(paths)
+    assert protected == [fragment]
+
+
+@pytest.mark.parametrize("name", UNIT_NAMES)
+def test_unit_scan_refuses_every_drop_in_dependency_or_trigger_name(
+    tmp_path, monkeypatch, name
+):
+    paths, _fragment, _protected = unit_tree(tmp_path, monkeypatch)
+    (paths[10] / name).mkdir()
+    with pytest.raises(ValueError):
+        HELPER.unit_overrides(paths)
+
+
+@pytest.mark.parametrize("index", range(12))
+def test_unit_scan_refuses_overrides_in_every_load_path(tmp_path, monkeypatch, index):
+    paths, _fragment, _protected = unit_tree(tmp_path, monkeypatch)
+    (paths[index] / "ditto-coding-hosted-.service.d").mkdir()
+    (paths[index] / "ditto-coding-hosted-.service.d/weaken.conf").write_text("")
+    with pytest.raises(ValueError):
+        HELPER.unit_overrides(paths)
+
+
+@pytest.mark.parametrize("index", [i for i in range(12) if i != 4])
+def test_unit_scan_refuses_another_fragment_alias_or_mask(tmp_path, monkeypatch, index):
+    paths, _fragment, _protected = unit_tree(tmp_path, monkeypatch)
+    (paths[index] / HELPER.UNIT).symlink_to("/dev/null")
+    with pytest.raises(ValueError):
+        HELPER.unit_overrides(paths)
+
+
+@pytest.mark.parametrize("kind", ["wants", "requires", "upholds"])
+def test_unit_scan_refuses_dangling_reverse_dependency_links(
+    tmp_path, monkeypatch, kind
+):
+    paths, _fragment, _protected = unit_tree(tmp_path, monkeypatch)
+    directory = paths[10] / f"multi-user.target.{kind}"
+    directory.mkdir()
+    (directory / HELPER.UNIT).symlink_to("/nonexistent/" + HELPER.UNIT)
+    with pytest.raises(ValueError):
+        HELPER.unit_overrides(paths)
+
+
+def fake_path(mode, uid=0, nlink=1, parents=()):
+    info = SimpleNamespace(st_mode=mode, st_uid=uid, st_nlink=nlink)
+    return SimpleNamespace(lstat=lambda: info, parents=list(parents))
+
+
+def test_protected_files_require_one_link_like_connectivity_root_path():
+    root = [fake_path(0o040755)]
+    HELPER.protected(fake_path(0o100444, parents=root))
+    for unsafe in (
+        fake_path(0o100444, nlink=2, parents=root),
+        fake_path(0o100444, uid=1000, parents=root),
+        fake_path(0o100446, parents=root),
+        fake_path(0o120777, parents=root),
+        fake_path(0o100444, parents=[fake_path(0o040777)]),
+    ):
+        with pytest.raises(ValueError):
+            HELPER.protected(unsafe)
 
 
 class Stream:
@@ -376,6 +625,16 @@ def refusing_server(monkeypatch):
     server.server_close()
 
 
+def test_proxy_restarts_at_once_after_a_refusal_but_never_shares_a_listener():
+    port = refused_port()
+    with PROXY.Server(("127.0.0.1", port), PROXY.Refusal) as restarted:
+        assert restarted.server_address == ("127.0.0.1", port)
+        assert restarted.socket.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT) == 0
+        with pytest.raises(OSError) as second:
+            PROXY.Server(("127.0.0.1", port), PROXY.Refusal)
+        assert second.value.errno == errno.EADDRINUSE
+
+
 def test_proxy_refuses_connect_and_every_other_method(refusing_server):
     connect = exchange(
         refusing_server, b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: x\r\n\r\n"
@@ -387,6 +646,85 @@ def test_proxy_refuses_connect_and_every_other_method(refusing_server):
     assert plain.startswith(b"HTTP/1.1 405 Method Not Allowed\r\n")
     # A slow client is closed at the deadline without a tunnel.
     assert exchange(refusing_server, b"CONNECT slow") == b""
+
+
+@pytest.fixture
+def closing_server(monkeypatch):
+    """Refusing server that reports when it has closed each connection."""
+    monkeypatch.setattr(PROXY, "DEADLINE_SECONDS", 2.0)
+    closed = threading.Event()
+
+    class Server(PROXY.Server):
+        def shutdown_request(self, request):
+            super().shutdown_request(request)
+            closed.set()
+
+    server = Server(("127.0.0.1", 0), PROXY.Refusal)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_address[1], closed
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize(
+    "payload,status",
+    [
+        (
+            b"POST http://example.invalid/ HTTP/1.1\r\nContent-Length: 60000\r\n\r\n"
+            + b"a" * 60000,
+            b"HTTP/1.1 405 Method Not Allowed\r\n",
+        ),
+        (b"CONNECT " + b"a" * 20000, b"HTTP/1.1 403 Forbidden\r\n"),
+        (b"GET http://example.invalid/ HTTP/1.1\r\n\r\n", b"HTTP/1.1 405"),
+    ],
+)
+def test_proxy_refusal_survives_unread_request_bytes(closing_server, payload, status):
+    port, closed = closing_server
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        client.sendall(payload)
+        body = b""
+        while chunk := client.recv(4096):
+            body += chunk
+        assert body.startswith(status)
+        # Half-close as a client does after reading EOF; the proxy then closes.
+        client.shutdown(socket.SHUT_WR)
+        assert closed.wait(5)
+        time.sleep(0.05)
+        # Closing with unread bytes would have sent RST instead of FIN.
+        assert client.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0
+
+
+def test_proxy_drain_is_bounded_in_bytes_and_time(monkeypatch):
+    assert PROXY.DRAIN_BYTES == 65536 and PROXY.DRAIN_SECONDS == 1.0
+    monkeypatch.setattr(PROXY, "DRAIN_SECONDS", 0.2)
+    received = []
+
+    class Endless:
+        def settimeout(self, timeout):
+            assert 0 < timeout <= 0.2
+
+        def recv(self, size):
+            received.append(size)
+            return b"a" * size
+
+    handler = object.__new__(PROXY.Refusal)
+    handler.request = Endless()
+    handler.drain()
+    assert sum(received) == PROXY.DRAIN_BYTES
+
+    started = time.monotonic()
+
+    class Trickle(Endless):
+        def recv(self, _size):
+            assert time.monotonic() - started < 0.5, "drain outlived its deadline"
+            time.sleep(0.02)
+            return b"a"
+
+    # One deadline for the whole drain: a trickling client cannot extend it.
+    handler.request = Trickle()
+    handler.drain()
+    assert 0.2 <= time.monotonic() - started < 0.5
 
 
 def test_proxy_has_no_upstream_connection_path():
@@ -448,39 +786,56 @@ def test_stopped_or_failed_units_are_not_live():
     ]
 
 
+INSTALL = "Install fixed prerequisite files without replacing existing bytes"
+RECEIPT = "Record the source revision that installed these bytes"
+
+
 def test_all_checks_precede_writes_and_nothing_is_started_enabled_or_created():
     names = [item["name"] for item in block()]
-    first_write = names.index(
-        "Install fixed prerequisite files without replacing existing bytes"
-    )
+    first_write = names.index(INSTALL)
     for check in (
         "Refuse check mode for an enabled convergence",
         "Require the existing daemon-identity deny guard",
         "Refuse to converge while a worker, custody instance or egress proxy is live",
         "Require the policy directory and host policy from daemon provisioning",
         "Refuse to rewrite unexpected existing prerequisite state",
-        "Refuse overrides that could weaken the proxy sandbox",
-        "Check the record and unit before installing anything",
-        "Require the exact redacted check receipt",
+        "Refuse an unexpected convergence receipt path",
+        "Check the record, unit search path and unit before installing anything",
+        "Require the exact redacted check result",
     ):
         assert names.index(check) < first_write
-    install = task("Install fixed prerequisite files without replacing existing bytes")
+    install = task(INSTALL)
     assert install["ansible.builtin.copy"]["force"] is False
     assert install["loop"] == ["helper", "proxy", "record", "unit"]
-    assert task("Reload unit definitions without enabling or starting the proxy") == {
-        "name": "Reload unit definitions without enabling or starting the proxy",
-        "ansible.builtin.systemd_service": {"daemon_reload": True},
-    }
+    assert install["register"] == "coding_hosted_prerequisites_install"
+    reload = task(
+        "Reload unit definitions after installing a file, "
+        "without enabling or starting the proxy"
+    )
+    assert reload["ansible.builtin.systemd_service"] == {"daemon_reload": True}
+    assert reload["when"] == "coding_hosted_prerequisites_install is changed"
+    assert names.index(INSTALL) < names.index(reload["name"])
     state = task("Require the exact static, inactive and unmodified proxy unit")
+    show = task("Read the loaded egress proxy unit state")["ansible.builtin.command"]
+    properties = show["argv"][-1].removeprefix("--property=").split(",")
     expected = state["ansible.builtin.assert"]["that"][0]
+    listed = re.findall(r"'([A-Za-z]+)=", expected)
+    assert listed == sorted(listed) and sorted(properties) == listed
     for value in (
         "ActiveState=inactive",
         "DropInPaths=",
         "UnitFileState=static",
         "NeedDaemonReload=no",
+        "WantedBy=",
+        "RequiredBy=",
+        "UpheldBy=",
+        "BoundBy=",
+        "TriggeredBy=",
+        "OnFailureOf=",
+        "OnSuccessOf=",
     ):
         assert f"'{value}'" in expected
-    source = TASKS_SOURCE + GUARD_SOURCE
+    source = TASKS_SOURCE + GUARD_SOURCE + FILES_SOURCE
     for forbidden in (
         "state: started",
         "state: restarted",
@@ -503,13 +858,115 @@ def test_all_checks_precede_writes_and_nothing_is_started_enabled_or_created():
     assert f"{scratch}\n            state: absent" in source
 
 
+def test_pre_write_and_post_install_file_checks_share_one_task_file():
+    imports = [item for item in block() if "ansible.builtin.import_tasks" in item]
+    by_name = {item["name"]: item for item in imports}
+    before = by_name["Refuse to rewrite unexpected existing prerequisite state"]
+    after = by_name["Require exact root-owned installed bytes and modes"]
+    names = [item["name"] for item in block()]
+    assert (
+        names.index(before["name"]) < names.index(INSTALL) < names.index(after["name"])
+    )
+    for item, installed in ((before, False), (after, True)):
+        assert item["ansible.builtin.import_tasks"] == "files.yml"
+        assert item["vars"] == {
+            "coding_hosted_prerequisites_require_installed": installed
+        }
+    stat, assertion = yaml.safe_load(FILES_SOURCE)
+    assert stat["ansible.builtin.stat"]["follow"] is False
+    assert stat["ansible.builtin.stat"]["checksum_algorithm"] == "sha256"
+    condition = " ".join(assertion["ansible.builtin.assert"]["that"][0].split())
+    assert condition == (
+        "(not item.stat.exists and not coding_hosted_prerequisites_require_installed) "
+        "or (item.stat.isreg | default(false) and item.stat.uid == 0 and "
+        "item.stat.nlink == 1 and item.stat.mode == item.item.value.mode and "
+        "item.stat.checksum == item.item.value.content | hash('sha256'))"
+    )
+
+
+def test_receipt_records_the_installing_revision_outside_the_byte_compared_set():
+    receipt_path = "/usr/local/lib/ditto-coding-hosted/host-prerequisites-receipt.json"
+    render_files = task("Render every fixed prerequisite file in memory")
+    files = render_files["ansible.builtin.set_fact"][
+        "coding_hosted_prerequisites_files"
+    ]
+    assert receipt_path not in [item["path"] for item in files.values()]
+    inspect = task("Inspect the convergence receipt without following links")
+    assert inspect["ansible.builtin.stat"] == {"path": receipt_path, "follow": False}
+    refuse = " ".join(
+        task("Refuse an unexpected convergence receipt path")["ansible.builtin.assert"][
+            "that"
+        ][0].split()
+    )
+    for condition in ("isreg", "uid == 0", "nlink == 1", "mode == '0444'"):
+        assert condition in refuse
+    record = task(RECEIPT)
+    copy = record["ansible.builtin.copy"]
+    assert (copy["dest"], copy["owner"], copy["mode"]) == (receipt_path, "root", "0444")
+    content = " ".join(copy["content"].split())
+    for field in (
+        "'schema': 'dittobench-coding-hosted-host-prerequisites-receipt-v2'",
+        "'source_revision': coding_hosted_prerequisites_source_revision",
+        "'record_sha256': coding_hosted_prerequisites_files.record.content "
+        "| hash('sha256')",
+        "'applied_at': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')",
+        "to_json(sort_keys=true, separators=[',', ':'])",
+    ):
+        assert field in content
+    assert " ".join(record["when"].split()) == (
+        "coding_hosted_prerequisites_install is changed or "
+        "not coding_hosted_prerequisites_receipt_state.stat.exists"
+    )
+    names = [item["name"] for item in block()]
+    assert names.index("Require exact root-owned installed bytes and modes") < (
+        names.index(RECEIPT)
+    )
+
+
+def test_unit_verify_reports_only_this_unit_and_fails_on_any_output():
+    checks = task(
+        "Check the record, unit search path and unit before installing anything"
+    )["block"]
+    verify = next(
+        item for item in checks if item["name"].startswith("Require systemd to accept")
+    )
+    argv = verify["ansible.builtin.command"]["argv"]
+    assert argv[:4] == [
+        "/usr/bin/systemd-analyze",
+        "verify",
+        "--recursive-errors=no",
+        "--man=no",
+    ]
+    assert " ".join(verify["failed_when"].split()) == (
+        "coding_hosted_prerequisites_verify.rc != 0 or "
+        "coding_hosted_prerequisites_verify.stdout | length > 0 or "
+        "coding_hosted_prerequisites_verify.stderr | length > 0"
+    )
+    helper = next(item for item in checks if item["name"].startswith("Check address"))
+    assert helper["ansible.builtin.command"]["argv"][-1] == "check"
+    assert checks.index(helper) < checks.index(verify)
+
+
+def test_one_router_port_serializes_rollout_attempts_on_this_host():
+    # Bounded rollout admits max_parallel up to 4 but never runs two attempts with
+    # the same router_listen at once; this record has exactly one.
+    rollout = (
+        ROOT / "apps/platform/ditto/api_server/coding_bounded_rollout.py"
+    ).read_text()
+    assert (
+        "resources=tuple(config.wire.host.router_listen for config in configs)"
+        in rollout
+    )
+    assert [key for key in render() if key.endswith("_listen")] == ["router_listen"]
+
+
 def test_proxy_unit_is_manual_refusing_and_ip_confined():
     assert "[Install]" not in UNIT
     for line in (
         "Type=exec",
         "DynamicUser=yes",
-        "ExecStart=/usr/bin/python3 -I -B "
-        f"/usr/local/lib/ditto-coding-hosted/egress-proxy.py {PLACEHOLDER} 18090",
+        "ExecStart=/usr/bin/python3 -I -B /usr/local/lib/ditto-coding-hosted/"
+        f"egress-proxy.py {PLACEHOLDER} {PROXY_PORT}",
         "Restart=no",
         "NoNewPrivileges=yes",
         "CapabilityBoundingSet=",
@@ -517,7 +974,7 @@ def test_proxy_unit_is_manual_refusing_and_ip_confined():
         "ProtectSystem=strict",
         "RestrictAddressFamilies=AF_INET",
         "SocketBindDeny=any",
-        "SocketBindAllow=ipv4:tcp:18090",
+        f"SocketBindAllow=ipv4:tcp:{PROXY_PORT}",
         "IPAddressDeny=any",
         f"IPAddressAllow={PLACEHOLDER}/32",
         "StandardOutput=null",
@@ -548,5 +1005,17 @@ def test_doc_states_the_boundaries():
         "candidate_tcp",
         "Rollback",
         "weight_eligible=false",
+        "one concurrent attempt",
+        "additional router ports",
+        "today it is advisory",
+        "coding_hosted_attempt_config.py",
+        "host-prerequisites-receipt.json",
+        "--recursive-errors=no",
+        "SO_REUSEADDR",
     ):
         assert boundary in doc
+    connectivity = " ".join(
+        (ROOT / "infra/docs/coding-hosted-connectivity-v2.md").read_text().split()
+    )
+    required = connectivity[connectivity.index("## Qualification still required") :]
+    assert "qualified rootless candidate network and proxy enforcement" in required
