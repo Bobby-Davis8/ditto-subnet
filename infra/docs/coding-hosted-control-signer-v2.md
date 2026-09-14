@@ -1,103 +1,283 @@
-# Hosted-v2 control signer: host wiring and protected ceremony
+# Hosted-v2 control signer: host wiring, isolation and protected ceremony
 
 This layer wires the existing default-off Platform signer loader
 (`apps/platform/docs/coding-hosted-control-startup-v2.md`) and the validator
 control command (`docs/coding-hosted-validator-transport-v2.md`) into host
-convergence and the Platform deploy. Every switch ships off. It does not
-generate, transport, back up or activate a key. No CI job, workflow input or
-artifact contains seed material. That does not keep deploy tooling away from
-the seed on the host; see [Who can read the seed](#who-can-read-the-seed).
+convergence and the Platform deploy. It follows the 2026-09-15 decision for
+#1901: a dedicated, locked-down `ditto-api` service identity is the only
+component that may read the online control-signer seed, and the deploy user's
+Docker and journalctl access is narrowed whatever the signer mode.
+
+Every switch ships off, and nothing here is active on any host. This layer
+never generates, transports, backs up or activates a key. No CI job, workflow
+input, workflow artifact, Git object, chat message (including Telegram),
+command argument or log line contains seed material.
 
 ## The key
 
 The control signer is a new **online operational** SR25519 key held by the
 Platform API process. It signs canonical native-v2 status and result envelopes
-and nothing else. It is distinct from the offline curator Ed25519 key, from
+and nothing else. It is completely separate from the offline curator Ed25519
+key, which never touches this host or this automation. It is also distinct from
 every validator hotkey and coldkey, from the screener hotkey and from any
 payment wallet. A signature never makes an operation weight-eligible.
 
-## Fixed placement on the Platform host
-
-| Item | Requirement |
-|---|---|
-| Seed file | `/etc/ditto-platform/coding-hosted-signer/seed`, fixed, not configurable |
-| Content | Raw 32-byte SR25519 seed. No hex text, mnemonic, seed URI or wallet file |
-| File | Regular file, single link, mode `0600`, owner `deploy` |
-| Directory | `/etc/ditto-platform/coding-hosted-signer`, real directory, mode `0700`, owner `deploy` |
-| Ancestors | `/etc/ditto-platform`, `/etc`, `/`: real directories owned by root or `deploy`, no group or world write |
-
-The path is a literal in `platform.env.j2` and in the import vars of
-`roles/platform_app/tasks/coding_hosted_signer.yml`. It is not a role default
-or inventory variable.
-
-`deploy` is `platform_owner`, the user pm2 runs `ditto-api` as
-(`pm2 startup systemd -u deploy`; the Deploy Platform workflow runs
-`sudo -iu deploy ... ./scripts/update.sh`). The loader's `read_private` requires
-the seed and its directory to be owned by the process UID, so today the seed
-must be owned by `deploy`.
+Neither seed, online or curator, may ever be placed in CI, Git, Telegram,
+workflow artifacts, command arguments or logs.
 
 ## Who can read the seed
 
-File permissions do not separate `ditto-api` from anything else that runs as
-`deploy`. **Any process running as `deploy` can read the seed**, including:
-
-- every pm2 app on the host: `ditto-api`, the Go relays `ditto-api-relay-1`
-  and `ditto-api-relay-2` (which serve the public inference path through Caddy)
-  and the daily `ditto-screened-image-cleanup` job
-  (`apps/platform/scripts/ecosystem.config.js`);
-- every child of those processes, for example `gcloud`, `skopeo`, the Docker
-  CLI and the hosted runtime helper executables that `ditto-api` starts;
-- everything `scripts/update.sh` runs on each deploy: `git`, `uv sync` (package
-  build backends), `npm ci` and `npm run build` (package lifecycle scripts),
-  `alembic` and `docker compose`;
-- anyone who can `sudo -iu deploy`: the Deploy Platform workflow's IAP SSH
-  identity, and every `ditto` group member through
-  `%ditto ALL=(deploy) NOPASSWD: ALL` in `roles/base/tasks/users.yml`.
-
-`deploy` is root-equivalent too. It is in the `docker` group
-(`roles/platform_app/tasks/main.yml`), and `ditto` members may run
-`sudo /bin/journalctl *`, which has a documented pager shell escape. A process
-running as `deploy` can therefore also read files owned by other users.
-
-"The relay never reads the seed" is a property of the code: the Go relay has no
-loader, and the Python loader returns before touching the path unless
-`DITTO_ROLE` selects the API process. It is not an operating-system boundary.
-
-## What automation does
-
-| | Disabled (default) | Enabled |
+| Identity | Runs | Seed |
 |---|---|---|
-| `platform_app` converge | Renders `DITTO_CODING_HOSTED_CONTROL_ENABLED=false`. The statically imported signer tasks are all skipped, so the seed path is never inspected. | Right after the role's preflight, before any other `platform_app` task (the playbook runs the `base` role first), asserts a 48-character SS58 hotkey that differs from the screener hotkey and a non-root API user. It then stat-verifies ancestors, directory and seed with `follow: false` and `get_checksum: false`. Renders `true`, the literal seed path and `DITTO_CODING_HOSTED_SIGNER_HOTKEY`. |
-| `scripts/update.sh` deploy | Skips the signer check. | After sourcing `.env` and `.env.deploy`, and before Pylon, migrations or pm2 are touched, runs `uv run python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`. That entry point uses the loader's own path checks through `lstat` and never opens the seed. On failure the deploy stops at stage `signer-preflight` and the checkout rolls back while the old process keeps serving. |
-| `validator_stack` converge | Renders `VALIDATOR_CODING_HOSTED_CONTROL_ENABLED=false` and an empty `VALIDATOR_CODING_HOSTED_PLATFORM_HOTKEY`. | Before any other `validator_stack` task (the playbook runs `base` first), requires both this address and `validator_stack_hotkey` to be exact 48-character SS58 strings and different, then renders both. |
-| `docker-compose.yml` | `${VALIDATOR_CODING_HOSTED_CONTROL_ENABLED:-false}`, `${VALIDATOR_CODING_HOSTED_PLATFORM_HOTKEY:-}` | Passes the operator's values through to the `ditto-subnet` container |
+| `ditto-api` (system user, no login, no sudo, no supplementary group) | only the `ditto-api` API process, through `ditto-platform-api.service`, and its metadata preflight | **Owner.** The only non-root identity that can open it |
+| `ditto-api-build` (system user, no login, no sudo, no supplementary group) | `uv sync` for sealed releases, in a sandboxed transient unit | No |
+| `deploy` | `scripts/update.sh`, the pm2 relays `ditto-api-relay-1/2`, `ditto-screened-image-cleanup`, migrations | No. It reaches `ditto-api` only through four exact sudo commands |
+| team accounts in `ditto` | `sudo -u deploy`, `systemctl start/stop/restart ditto-*`, journal reads | No |
+| root, including OS Login admins and the Deploy Platform workflow identity | everything | Yes (see [Residual risks](#residual-risks)) |
+
+`read_private` and `private_directory` compare the owner of the seed and its
+directory with the effective UID of the reading process, so a placement owned
+by `ditto-api` fails closed for any other process even if its permissions were
+widened. The Ansible guard requires the same owner, and it accepts only root or
+`ditto-api` as owners of the ancestors. A `deploy`-owned seed, directory or
+ancestor fails the converge.
+
+The signer may be enabled only together with both isolation switches below. The
+Ansible profile guard and `scripts/update.sh` both refuse an enabled signer
+while `ditto-api` would run as `deploy`.
+
+## Switches
+
+| Variable (`platform_app`) | Default | Effect when true | Kind |
+|---|---|---|---|
+| `platform_pylon_root_unit_enabled` | `false` | Pylon through a root-owned unit; `deploy` leaves the `docker` group | Reviewed activation |
+| `platform_api_service_identity_enabled` | `false` | `ditto-api` as the `ditto-api` user from sealed releases | Reviewed activation |
+| `platform_coding_hosted_control_enabled` | `false` | Renders the signer settings; requires both switches above and a `ditto-api`-owned seed | Reviewed activation |
+| team journal and sudoers narrowing (`base` role) | always | See [Deploy access](#deploy-access) | **Immediate** on the next `base` converge |
+
+`ditto/tests/test_coding_hosted_control_signer_wiring.py` fails when any of the
+three activation variables, or `validator_stack_coding_hosted_control_enabled`,
+is set truthy in an inventory, playbook or workflow file that is not listed in
+its `REVIEWED_ACTIVATIONS` table. An activation pull request adds its host_vars
+file there in the same reviewed change.
+
+With every switch off, a converge and a deploy behave as before: pm2 runs
+`ditto-api` as `deploy` from `/opt/ditto-subnet`, `update.sh` runs
+`docker compose` as `deploy`, and nothing new is created. The only visible
+differences are the two `.env` lines `DITTO_PLATFORM_API_SUPERVISOR=pm2` and
+`DITTO_PLATFORM_PYLON_UNIT=`, which select exactly that path.
+
+## Deploy access
+
+### Immediate: no root journalctl or pager for the `ditto` group
+
+`deploy` is a member of `ditto`, so it had every `%ditto` rule in
+`/etc/sudoers.d/ditto-team` (`roles/base/tasks/users.yml`). Two gave root:
+
+- `/bin/journalctl *` accepted any option as root, for example `--cursor-file=`
+  (writes a root-owned file at any path), `--vacuum-*`, `--setup-keys`, and the
+  pager, which has a shell escape wherever systemd's secure pager mode is not in
+  effect;
+- `/bin/systemctl status ditto-*` ran the same pager as root.
+
+Both rules are removed. Team members join `systemd-journal` and run
+`journalctl -u <unit>` and `systemctl status <unit>` without sudo, as
+themselves, so no pager or option runs as root. `deploy` is not a member and has
+no journal access. The remaining rules are `systemctl start|stop|restart ditto-*`,
+`daemon-reload`, `reload caddy` and `(deploy) ALL`. Operators with OS Login
+admin keep their own full sudo, which the skill scripts use.
+
+No automation used either removed rule: `update.sh`, the Deploy Platform
+workflow and the relay release never call `journalctl` or `systemctl status`
+through sudo. This part is therefore not gated. It takes effect on the next
+converge of any playbook that runs the `base` role, and no such converge has
+been run.
+
+### Gated: Pylon without the docker group
+
+The `docker` group is root-equivalent. `deploy`'s only use of it is
+`update.sh`'s `docker compose up -d --wait pylon` (also in `start.sh`). The
+relays, the cleanup job and `ditto-api` never talk to a Docker daemon on the
+Platform host; `builder_image.py` calls the Artifact Registry API through
+`gcloud`, and `coding_bounded_rollout.py` runs on the separate rootless coding
+host.
+
+A root unit that ran compose on the checkout's `docker-compose.yml`, or with
+`deploy`'s `.env`, would still hand `deploy` root, because `deploy` can edit
+both. With `platform_pylon_root_unit_enabled` (`tasks/pylon_root_unit.yml`) the
+role:
+
+1. installs `/etc/ditto-platform/pylon/compose.yml` (root, `0600`). Its `pylon`
+   service is byte-for-byte equal in YAML to `apps/platform/docker-compose.yml`,
+   and `ditto/tests/test_platform_deploy_access.py` fails on drift;
+2. renders `/etc/ditto-platform/pylon/pylon.env` (root, `0600`) with exactly the
+   values compose used to interpolate from the exported `.env`:
+   `SUBTENSOR_NETWORK`, `PYLON_OPEN_ACCESS_TOKEN` and
+   `BITTENSOR_WALLET_PATH=/home/deploy/.bittensor/wallets`. The other `pylon`
+   variables keep their compose defaults, as before;
+3. installs `ditto-platform-pylon.service`, a root `oneshot` that runs
+   `docker compose --project-name ditto-platform ... up --detach --wait pylon`
+   with an empty root-owned `DOCKER_CONFIG`. It is not enabled; the container's
+   `restart: unless-stopped` still restores Pylon after a reboot;
+4. adds `/etc/sudoers.d/ditto-platform-pylon` with the single exact rule
+   `deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart ditto-platform-pylon.service`;
+5. renders `DITTO_PLATFORM_PYLON_UNIT=ditto-platform-pylon.service`, so
+   `update.sh` restarts the unit instead of calling compose;
+6. removes `deploy` from `docker` with `gpasswd --delete`.
+
+This is gated because it cannot be proven without a live host: the project name
+must adopt the running `ditto-platform-pylon-1` without recreating it, and the
+pm2 daemon keeps its old supplementary groups until it restarts.
+
+## Dedicated `ditto-api` identity
+
+`platform_api_service_identity_enabled` (`tasks/api_service_identity.yml`)
+prepares the identity. It does not enable or start a unit, build a release or
+touch the seed.
+
+- **Users.** `ditto-api` and `ditto-api-build` are system users with
+  `/usr/sbin/nologin`, a locked password and exactly no supplementary group. The
+  converge fails if either is in `docker`, `sudo`, `adm`, `systemd-journal`,
+  `google-sudoers`, `ditto` or `deploy`'s group.
+- **Root-owned inputs.** `/usr/local/sbin/ditto-platform-api-release` (installer),
+  `/usr/local/libexec/ditto-platform-api/launch` (launcher),
+  `/etc/systemd/system/ditto-platform-api.service`, and
+  `/etc/ditto-platform/api/` (root:`ditto-api`, `0750`). That directory holds:
+  - `platform.env`, the same template and secrets as `deploy`'s `.env`, readable
+    only by `ditto-api`, with paths pointing into the sealed release;
+  - `release.json` (interpreter and deploy user);
+  - a root-only copy of the read-only GitHub deploy key, and a root-owned
+    `known_hosts` for github.com.
+- **Sudoers.** `/etc/sudoers.d/ditto-platform-api` allows `deploy` exactly
+  `ditto-platform-api-release install`, `... activate`, `... stop` and
+  `... logs`. There is no wildcard, so sudo refuses any other argument. The
+  installer reads its request from stdin and never lets `deploy` choose a path,
+  user, unit or command. The only file it reads from `deploy`'s tree is the
+  built dashboard, as data.
+- **Relays, cleanup job, migrations.** They stay on `deploy`'s pm2 and checkout.
+  Caddy still proxies `localhost:8000`.
+
+### Process supervision
+
+`ditto-platform-api.service` runs as `User=ditto-api`, `Group=ditto-api` with an
+empty `SupplementaryGroups=`. It has no root pm2 daemon and no second pm2 home:
+
+- `ExecStartPre=launch preflight` runs
+  `python -I -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`
+  as `ditto-api`. `ExecStart=launch serve` runs `python -I -m ditto.api_server`.
+- The launcher refuses any user but `ditto-api`. It resolves `current` once,
+  requires `/opt/ditto-platform-api/releases/<40-hex>`, sources only
+  `/etc/ditto-platform/api/platform.env` and `deploy.env`, and exports
+  `DITTO_BUILD_COMMIT=<revision>` so `/health` reports the sealed revision.
+- Hardening: `NoNewPrivileges`, empty `CapabilityBoundingSet` and
+  `AmbientCapabilities`, `ProtectSystem=strict`,
+  `ReadOnlyPaths=/opt/ditto-platform-api /etc/ditto-platform`,
+  `InaccessiblePaths=` the deploy checkout, the legacy checkout, relay releases,
+  the installer's Git workspace, the builder's cache and the Docker socket.
+  Also `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectKernel*`,
+  `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`,
+  `ProtectProc=invisible`, `RestrictNamespaces`, `RestrictRealtime`,
+  `RestrictSUIDSGID`, `LockPersonality`, `RemoveIPC`,
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`,
+  `SystemCallArchitectures=native` and
+  `SystemCallFilter=@system-service ~@privileged`. The state directory
+  `/var/lib/ditto-platform-api` (`0700`) is the `HOME` for `gcloud`. Only the
+  Hippius evidence spool is added to `ReadWritePaths`, and only when Hippius
+  evidence is enabled. `systemd-analyze security --offline` rates the rendered
+  unit 1.4 ("OK").
+- pm2 parity: `KillSignal=SIGINT`, `TimeoutStopSec=35`, `MemoryMax=3072M`,
+  `Restart=on-failure` with a start limit of 10 in 300 s (pm2's
+  `max_restarts: 10`), and `LimitNOFILE=65536`.
+
+### Code integrity: sealed releases
+
+A user split alone would not help. `deploy` writes `/opt/ditto-subnet` and its
+`.venv`, so it could change code that the next restart runs as `ditto-api`.
+Instead, `ditto-api` runs only from sealed root-owned releases.
+`ditto-platform-api-release install` does the following as root:
+
+1. Clones `main` of `git@github.com:ditto-assistant/ditto-subnet.git` into a
+   fresh root-only directory, commits only (`--filter=tree:0`), and refuses the
+   revision unless `git merge-base --is-ancestor <revision> main` holds.
+   Unmerged branches and pull-request heads never run as `ditto-api`.
+2. Fetches that exact revision (`--depth=1`) into a second fresh repository.
+   Git verifies every object hash on receipt, and the revision must resolve to
+   itself. Git runs with no system or global configuration, `GIT_ALLOW_PROTOCOL=ssh`,
+   and `ssh -F /dev/null` with the root-owned key and `known_hosts`
+   (`StrictHostKeyChecking=yes`, `BatchMode=yes`). Nothing is read from
+   `deploy`'s checkout or `.git`.
+3. Extracts `git archive` into `/opt/ditto-platform-api/releases/<revision>`
+   with Python's `data` tar filter, which refuses absolute or escaping names and
+   links, devices and set-id bits.
+4. Copies `apps/platform/dashboard/dist` from the deploy checkout as plain data.
+   Each path component is opened without following links, and each entry must
+   be a single-link regular file or directory owned by `deploy`, within file
+   count, size and depth bounds. A link, a special file, or a file `deploy` does
+   not own (such as the seed) fails the install instead of being published.
+5. Builds the environment with
+   `uv sync --frozen --no-dev --project <release>/apps/platform` as
+   `ditto-api-build`, inside a transient `systemd-run` unit that has the same
+   sandbox plus `ReadWritePaths=` only its `.venv` and cache. It uses the pinned
+   root-owned interpreter (`platform_api_release_python`, default
+   `/usr/bin/python3.13`), `UV_PYTHON_DOWNLOADS=never` and `UV_LINK_MODE=copy`.
+   The unit's cgroup is stopped when uv exits, so no builder process outlives
+   the build.
+6. Seals the tree: every entry root-owned, directories `0755`, files `0644` or
+   `0755`. It refuses hard links, special files and links that leave the release,
+   except `.venv/bin/python*` to the pinned interpreter.
+7. Writes a receipt with the SHA-256 of a manifest over every path, owner, mode,
+   content digest and link target.
+8. Runs the metadata preflight from the sealed release as `ditto-api`, in a
+   sandboxed transient unit. Only then does it stage the deploy-owned values
+   (the seven `.env.deploy` keys, validated against a strict character set and
+   shell-quoted) as `deploy-<revision>.env`, root:`ditto-api` `0640`.
+
+`activate` re-verifies the whole manifest, moves the staged values to
+`deploy.env`, atomically points `current` at the release, and runs
+`systemctl enable` and `systemctl restart`. It keeps the running and previous
+releases and deletes older ones. A release that fails its manifest is rebuilt,
+unless it is the running one, which is never deleted. `stop` runs
+`systemctl disable --now`. `logs` prints the unit's last 80 journal lines with
+`--no-pager`.
+
+Trade-offs:
+
+- Each deploy clones `main` history (commits only) and exports the revision
+  from GitHub, and builds a second environment. A reused release skips both.
+  That costs deploy time, a GitHub dependency, and disk for up to two releases
+  of about 90 MB of source plus the environment on a 30 GB boot disk.
+- The dashboard bundle is built by `deploy` and copied as data. `ditto-api`
+  serves those bytes but never executes them, so `deploy` still controls what
+  browsers load, as today.
+- Python dependencies are pinned by `uv.lock` hashes. Build backends such as
+  hatchling are resolved at build time. They run as `ditto-api-build`, which
+  holds no secret and cannot write a sealed tree.
+
+### What automation does
+
+| | Every switch off (default) | Pylon unit and identity on, signer off | All three on |
+|---|---|---|---|
+| `platform_app` converge | As before; signer tasks skipped, the seed path never inspected | Adds the Pylon unit and the identity as above. No unit started | Profile guard (hotkey, both switches, `platform_api_process_user == 'ditto-api'`), then the stat-only guard on the fixed path with `follow: false` and `get_checksum: false` |
+| `update.sh` | pm2 as `deploy`, compose as `deploy`, no sudo | `install` before Pylon and migrations; the pm2 copy of `ditto-api` is removed; `activate` after migrations; verify through `systemctl show` and `/health` | The same. The metadata preflight runs as `ditto-api` inside `install` and again as `ExecStartPre`. `deploy` never stats or opens the seed |
+| Enabled signer while `ditto-api` would run under pm2 | — | — | Converge fails at the profile guard; `update.sh` stops at stage `signer-preflight` before Pylon, migrations or pm2, and rolls the checkout back |
+| `validator_stack` converge | Trust off and empty | Same | Unchanged: exact SS58 checks, then render |
 
 No task creates, copies, templates, fetches, slurps, hashes, moves or deletes
-the seed. A missing or unsafe seed fails the converge, or the deploy, with a
-pointer here. Neither check can read the seed, so neither can catch a hotkey
-that does not match it or an all-zero seed. Only API startup catches those.
+the seed. Neither the Ansible guard nor the preflight reads it, so neither can
+catch a hotkey that does not match it or an all-zero seed. Only API startup
+catches those.
 
-## How ditto-api picks up a change
+### How `ditto-api` picks up a change
 
-- A converge rewrites `.env` but never restarts `ditto-api`.
-- `scripts/update.sh` sources `.env`, then calls
-  `pm2 start|reload scripts/ecosystem.config.js --only ditto-api --update-env`
-  and `pm2 save`. It reloads `ditto-api` even when the revision is unchanged.
-  Run it through the Deploy Platform workflow
-  (`.github/workflows/platform-deploy.yml`, `workflow_dispatch`) for the
-  revision already in service.
-- pm2 restarts `ditto-api` on its own after a crash or `max_memory_restart`
-  (`autorestart: true`, `max_restarts: 10`, `min_uptime: 10s`), and resurrects
-  it after a reboot. It then reuses the environment from the last
-  `--update-env` and `pm2 save`, **not** the current `.env`. A bare
-  `pm2 restart ditto-api` does not refresh it either.
-- The disabled template renders an explicit `false`, so a refreshed
-  environment overrides an earlier `true`.
-
-So while pm2's saved environment enables the signer, the matching seed must stay
-in place. If it disappears or is replaced, the next automatic restart fails
-closed, and pm2 stops retrying once `ditto-api` is `errored`. The orders below
-never create that state.
+- A converge rewrites `/etc/ditto-platform/api/platform.env` and `.env` but
+  restarts nothing.
+- Under the unit, every start sources the current root-owned files. That
+  includes automatic restarts and reboots, because the unit is enabled by
+  `activate`. So a converge that changes the signer settings takes effect at the
+  next restart, even without a deploy. Change signer settings only together with
+  the deploy that follows them (see the orders below).
+- Under pm2 (switches off), the old behaviour holds: pm2 reuses the environment
+  from the last `--update-env` and `pm2 save`.
 
 ## Protected ceremony (outside this repository)
 
@@ -107,89 +287,98 @@ properties the ceremony must meet:
 
 - Generate the seed on an offline or otherwise protected machine the
   custodians control. Never in CI, a workflow, a workflow artifact, Git, chat
-  (including Telegram), tickets or this repository's automation.
+  (including Telegram), tickets, a command argument, a log or this repository's
+  automation.
 - Use fresh randomness for this key alone. Never derive or reuse it from the
-  curator key, a validator or screener key, a mnemonic or any wallet.
+  offline curator key, a validator or screener key, a mnemonic or any wallet.
 - Record only the derived public SS58 address for review.
-- Place the seed directly at the fixed path with the owner, modes and single
-  link above, created exclusively rather than edited in place. Leave no
-  intermediate copy on another host, image, candidate or validator host, shell
-  history or temporary file.
+- Place the seed directly at the fixed path, created exclusively rather than
+  edited in place. Leave no intermediate copy on another host, image, candidate
+  or validator host, shell history or temporary file.
 - Custodians hold the backup under their own custody policy and rehearse
   recovery. The backup never enters automation.
 - Verify with metadata only. Never print or hash the seed in shared output.
 
-## Activation is a reviewed change
+## Fixed placement on the Platform host
 
-`ditto/tests/test_coding_hosted_control_signer_wiring.py` parses every
-inventory, playbook and workflow file. It fails when
-`platform_coding_hosted_control_enabled` or
-`validator_stack_coding_hosted_control_enabled` is set truthy in a file that is
-not listed in its `REVIEWED_ACTIVATIONS` table. The check reads values, not
-names. Staging a public hotkey, or setting a flag to `false` while revoking,
-needs no entry. An activation pull request adds its host_vars file to
-`REVIEWED_ACTIVATIONS` in the same reviewed change.
+| Item | Requirement |
+|---|---|
+| Seed file | `/etc/ditto-platform/coding-hosted-signer/seed`, fixed, not configurable |
+| Content | Raw 32-byte SR25519 seed. No hex text, mnemonic, seed URI or wallet file |
+| File | Regular file, single link, mode `0600`, owner `ditto-api` |
+| Directory | `/etc/ditto-platform/coding-hosted-signer`, real directory, mode `0700`, owner `ditto-api` |
+| Ancestors | `/etc/ditto-platform`, `/etc`, `/`: real directories owned by root (or `ditto-api`), no group or world write. Never `deploy` |
+
+The path is a literal in `platform.env.j2` and in the import vars of
+`roles/platform_app/tasks/coding_hosted_signer.yml`. It is not a role default
+or inventory variable.
 
 ## Enabling order
 
-1. The ceremony places the seed on the target Platform host and records the
-   public address.
-2. Reviewed Git change to `infra/ansible/host_vars/ditto-platform-<env>.yml`:
-   `platform_coding_hosted_control_enabled: true` and
-   `platform_coding_hosted_signer_hotkey: <public SS58>`, plus its
-   `REVIEWED_ACTIVATIONS` entry.
-3. Converge `infra/ansible/playbooks/gcp-platform-app.yml --limit ditto-platform-<env>`.
-   The signer guard runs before any other `platform_app` task.
-4. Run the Deploy Platform workflow for the revision in service. `update.sh`
-   runs the metadata preflight, then reloads `ditto-api` with
-   `--update-env` and saves it. Startup derives the key, compares it with the
-   hotkey and runs a sign/verify challenge.
-5. Verify through Backroom `get_coding_control_plane` that
+Each numbered step is a separate reviewed change or operator action. None is
+authorized by this pull request.
+
+1. **Pylon unit.** Set `platform_pylon_root_unit_enabled: true` in
+   `infra/ansible/host_vars/ditto-platform-<env>.yml`, add its
+   `REVIEWED_ACTIVATIONS` entry, and converge
+   `gcp-platform-app.yml --limit ditto-platform-<env>`. Run the Deploy Platform
+   workflow for the revision in service; `update.sh` restarts the unit, which
+   must adopt the existing container without recreating it. Restart the pm2
+   daemon in a maintenance window (`systemctl restart pm2-deploy`), then confirm
+   that `deploy` and the pm2 processes no longer carry the `docker` group.
+2. **Identity, signer off.** Set `platform_api_service_identity_enabled: true`
+   with its entry, and converge. Run the Deploy Platform workflow. It builds and
+   activates the first sealed release and removes the pm2 copy of `ditto-api`.
+   Verify `/health` on the revision. Also verify Targon candidate promotion
+   (`skopeo`), `gcloud` calls, runtime profiles and, if enabled, the Hippius
+   evidence spool (its authority files move to `ditto-api` ownership). Rehearse
+   on `ditto-platform-dev` first.
+3. **Ceremony.** Place the seed owned by `ditto-api` and record the public
+   address.
+4. **Signer.** Set `platform_coding_hosted_control_enabled: true` and
+   `platform_coding_hosted_signer_hotkey: <public SS58>`, add the entry, and
+   converge. The profile and stat guards run before any other `platform_app`
+   task.
+5. Run the Deploy Platform workflow for the revision in service. `install` runs
+   the preflight as `ditto-api`, then `activate` restarts the unit. Startup
+   derives the key, compares it with the hotkey and runs a sign/verify challenge.
+6. Verify through Backroom `get_coding_control_plane` that
    `hosted_control_configured=true`, `shadow_only=true` and
    `weight_eligible=false`.
-6. Reviewed validator trust change, for example in
+7. Reviewed validator trust change, for example in
    `infra/ansible/host_vars/ditto-validator-prod.yml`:
    `validator_stack_coding_hosted_control_enabled: true` and
    `validator_stack_coding_hosted_platform_hotkey: <same public SS58>`, plus its
-   `REVIEWED_ACTIVATIONS` entry. Take the address from the reviewed Platform
-   change or the custodian record, never from a Platform response.
-7. Converge `infra/ansible/playbooks/gcp-validator-prod.yml`. The command also
-   needs a validator stack release that contains it and this Compose
-   pass-through.
+   entry. Take the address from the reviewed Platform change or the custodian
+   record, never from a Platform response. Converge
+   `gcp-validator-prod.yml`.
 
-If the hotkey reviewed in step 2 does not match the seed, the metadata preflight
-in step 4 still passes, and `ditto-api` refuses to start after the reload. The
-deploy fails at `verify` with the API down. Recover with steps 1 and 2 of
-Rotation (disable, then deploy).
+If the hotkey reviewed in step 4 does not match the seed, the preflight still
+passes, the unit fails its start limit after `activate`, and the deploy fails at
+`verify` with the API down. Recover with steps 1 to 3 of Revocation.
 
 ## Rotation
 
 There is no hotkey fallback, and validators trust exactly one address. Rotate
-when no hosted operation is in flight. Never touch the seed while pm2's saved
-environment enables the signer.
+when no hosted operation is in flight.
 
 1. Reviewed change setting `platform_coding_hosted_control_enabled: false`
-   (and removing its `REVIEWED_ACTIVATIONS` entry). Converge
-   `gcp-platform-app.yml --limit ditto-platform-<env>`.
-2. Run the Deploy Platform workflow for the revision in service. `update.sh`
-   skips the signer check and reloads `ditto-api` with the disabled environment
-   (`--update-env`, then `pm2 save`).
-3. Confirm through `get_coding_control_plane` that
-   `hosted_control_configured=false`. From here validator commands fail
+   (and removing its `REVIEWED_ACTIVATIONS` entry). Converge, then run the
+   Deploy Platform workflow for the revision in service. The unit restarts with
+   the disabled environment; the identity and Pylon switches stay on.
+2. Confirm `hosted_control_configured=false`. From here validator commands fail
    verification, which is the intended fail-closed state.
-4. The ceremony replaces the seed at the fixed path, keeping owner, mode and
-   single link. It creates the new file exclusively and renames it into place,
-   then records the new public address. Custodians retire the old seed and
-   backup under their policy.
-5. Reviewed change setting `platform_coding_hosted_control_enabled: true` and
-   the new `platform_coding_hosted_signer_hotkey`, restoring the
-   `REVIEWED_ACTIVATIONS` entry. Converge. The stat guard checks the new
-   placement.
-6. Run the Deploy Platform workflow again. The metadata preflight runs before
-   pm2 is touched, then `ditto-api` reloads with the new hotkey.
-7. Verify `hosted_control_configured=true`, `shadow_only=true` and
+3. The ceremony replaces the seed at the fixed path, keeping owner `ditto-api`,
+   mode and single link. It creates the new file exclusively, renames it into
+   place and records the new public address. Custodians retire the old seed and
+   its backup under their policy.
+4. Reviewed change setting `platform_coding_hosted_control_enabled: true` and
+   the new `platform_coding_hosted_signer_hotkey`, restoring the entry.
+   Converge. The stat guard checks the new placement.
+5. Run the Deploy Platform workflow again, then verify
+   `hosted_control_configured=true`, `shadow_only=true` and
    `weight_eligible=false`.
-8. Reviewed change to every validator's trust address, then converge each
+6. Reviewed change to every validator's trust address, then converge each
    validator.
 
 ## Revocation
@@ -199,13 +388,25 @@ environment enables the signer.
    false`, clear the address and converge. The validator control command then
    refuses to run, whoever signed the envelope.
 2. Set `platform_coding_hosted_control_enabled: false` and converge.
-3. Run the Deploy Platform workflow for the revision in service, so `ditto-api`
-   restarts with the refreshed, disabled environment.
+3. Run the Deploy Platform workflow for the revision in service, so the unit
+   restarts with the disabled environment. (Because every unit start reads the
+   root-owned file, an automatic restart after step 2 is already disabled.)
 4. Confirm `hosted_control_configured=false`. The disabled loader no longer
-   reads the path, and neither will a later automatic restart.
+   reads the path.
 5. Only then does the ceremony remove the seed from the host and record the
    revocation. Automation never deletes it. A replacement requires a fresh
    ceremony and the enabling order.
+
+## Returning `ditto-api` to pm2
+
+Disable the signer first (Revocation). Then set
+`platform_api_service_identity_enabled: false` and converge. `.env` renders
+`DITTO_PLATFORM_API_SUPERVISOR=pm2`, and the role stops managing the identity
+but removes nothing. The next deploy sees the leftover unit file enabled or
+active, runs `ditto-platform-api-release stop` before pm2 starts `ditto-api`,
+and continues as before. Removing the users, releases, unit, installer and
+sudoers files afterwards is a separate operator step. The Pylon switch can be
+reverted the same way; the converge then re-adds `deploy` to `docker`.
 
 ## Validator trust
 
@@ -215,102 +416,66 @@ and it cannot equal the validator's own hotkey. Community validators keep both
 values off and empty unless they opt in through their own reviewed
 configuration. The validator worker never reads either value.
 
-## Risks and open decisions
+## Residual risks
 
-### The seed is readable by every `deploy` process
+These remain after every switch is on.
 
-Leaving the flag off avoids this risk. Enabling it as designed accepts that a
-code-execution bug in a relay or the cleanup job, a malicious package script run
-by `update.sh`, or anyone who can act as `deploy` can copy the control key. What
-they gain is the ability to forge shadow status and result envelopes that trusting
-validators accept. Weights are not affected. Revocation is the remedy.
-
-Running `ditto-api`, and only `ditto-api`, under a dedicated user would take
-these changes:
-
-1. **User and file ownership.** Add a system user (for example `ditto-api`) with
-   no login and no sudo, outside the `docker` and `ditto` groups.
-   `read_private` and `private_directory` compare owners with the process UID.
-   So the seed and its directory move to that user. So do the other files the
-   API checks the same way: the Hippius evidence spool
-   (`platform_coding_hippius_evidence_spool_root`) and the authority files the
-   role asserts `pw_name == platform_owner`. That needs a new variable such as
-   `platform_api_user`, used by those tasks and by this guard instead of
-   `platform_owner`. `.env` is `deploy:ditto 0640` today, so the API user needs
-   its own readable copy or an `EnvironmentFile=`. Log paths and the
-   `gcloud`/`skopeo` home directories need the same treatment.
-2. **Process manager.** pm2's per-app `uid`/`gid` only works when the pm2
-   daemon runs as root, which would give root a checkout that `deploy` can
-   write. Not an option. The alternatives are a second pm2 daemon for the new
-   user (`pm2 startup systemd -u ditto-api`, separate `PM2_HOME`) or a systemd
-   unit `ditto-api.service` (`User=`, `EnvironmentFile=`, `Restart=`,
-   `MemoryMax=` for `max_memory_restart`, sandboxing). A unit could also use
-   `LoadCredential=`, so the at-rest seed is root-owned. That needs the
-   `read_private` owner and mode rules revisited, and has not been checked.
-   Relays and the cleanup job stay on `deploy`'s pm2.
-3. **`scripts/update.sh`.** Today it runs as `deploy` and drives `ditto-api`
-   with `pm2 jlist`, `pm2_deploy_plan.js`, `pm2 start|reload --update-env`,
-   `pm2 save` and the pm2-based verification loop. With a separate manager,
-   `ditto-api` needs its own restart and state probe. The existing sudoers
-   grant `%ditto ... /bin/systemctl restart ditto-*` would already cover
-   `systemctl restart ditto-api`. The update.sh test harness
-   (`apps/platform/ditto/tests/scripts/test_update_script.py`) would need a
-   matching path.
-4. **Code integrity.** This is the part that decides whether the split helps.
-   `ditto-api` runs `/opt/ditto-subnet` and its `.venv`, and `deploy` writes
-   both (`git reset --hard`, `uv sync`). Anything running as `deploy` can change
-   that code and have it run as the new user at the next restart. A user split
-   alone turns "read the seed now" into "read it after the next restart". To
-   close the gap, the API must run from a release directory `deploy` cannot
-   write, installed by a root-owned step. The relay already uses immutable
-   releases, but those are `deploy`-writable too.
-5. **Root-equivalent paths.** While `deploy` is in the `docker` group
-   (`update.sh` uses it for `docker compose up`) and `ditto` members may run
-   `sudo journalctl *`, any `deploy` process can read any user's files. Both
-   would need narrowing, for example Pylon compose through a root-owned unit and
-   `journalctl --no-pager`-only grants.
-6. **Unaffected.** Caddy reaches the API over TCP
-   (`reverse_proxy localhost:{{ platform_api_port }}` in `Caddyfile.j2`), so
-   the upstream does not change. Children the API itself starts (hosted helpers,
-   `gcloud`, `skopeo`, Docker CLI) would still share its user.
-
-Options for review:
-
-- **A.** Keep the current design and document the exposure, with the flag off
-  until someone accepts it for a time-boxed shadow canary. No code change.
-- **B.** User split only (items 1 to 3). A moderate change. It stops casual reads
-  by relays, the cleanup job and package scripts, but not persistence through
-  the checkout or the root-equivalent paths.
-- **C.** User split plus root-owned immutable API releases plus narrowed
-  `docker` and `sudo` grants (items 1 to 5). The only host-local option that
-  keeps `deploy` away from the key. Redesigns the Platform API deploy.
-- **D.** Move signing out of the API process into a separately deployed signer
-  with its own user and code path, or remote or hardware custody. The Platform
-  startup doc already requires a reviewed adapter for that.
+- **Root.** Anyone with root on the Platform host can read the seed or the
+  memory of `ditto-api`. That includes OS Login admins
+  (`roles/compute.osAdminLogin` in `infra/terraform/stacks/gcp-platform`) and
+  the Deploy Platform workflow's service account, which runs `sudo install` and
+  `sudo rm -rf` for relay releases. No seed is in CI, but the CI identity is
+  root on the host. So is a local kernel privilege escalation from any user.
+- **Signing oracle.** Isolation protects the key, not what `ditto-api` decides
+  to sign. `deploy` still runs migrations, relays and the cleanup job, holds the
+  database credentials, and supplies the `.env.deploy` values and the dashboard
+  bytes. Whoever controls those can influence which operations the API signs
+  under its own rules. What `deploy` can no longer do is copy the key, so
+  disabling or rotating it ends the exposure.
+- **Reviewed code, not the current release.** `install` accepts any revision
+  reachable from `main`, including an older one with a known flaw. Anyone who
+  can merge to `main`, or a malicious locked dependency, still reaches
+  `ditto-api`.
+- **Builder cache.** `ditto-api-build`'s uv cache persists between builds. A
+  malicious build-time dependency could poison later builds. Clearing
+  `/var/lib/ditto-platform-api-build/uv-cache` removes it.
+- **GitHub host key.** The installer's `known_hosts` comes from
+  `ssh-keyscan` at converge, the same trust-on-first-use the checkout already
+  uses.
+- **Availability, not confidentiality.** `ditto` members, including `deploy`,
+  may still `systemctl start|stop|restart ditto-*`. That wildcard also accepts
+  additional unit names, so they can stop services such as the firewall. None
+  of this reads the seed.
+- **Operations that changed.** Under the unit, `ditto-api` logs go to the
+  journal, not `apps/platform/logs`. `scripts/profile-python.sh` and the
+  `read_platform_logs.sh` skill still assume pm2 and need a follow-up before
+  step 2.
+- **Not rehearsed on a host.** The unit sandbox (for example `skopeo` under
+  `RestrictNamespaces`), `uv sync` against a read-only source tree, and Pylon
+  adoption are covered only by synthetic tests. Steps 1 and 2 must be rehearsed
+  on dev.
 
 ### Other open decisions
 
-- Only API startup detects a hotkey that does not match the seed. A wrong
-  reviewed hotkey takes `ditto-api` down at deploy until it is disabled again.
-- The relay processes do not read the three `DITTO_CODING_HOSTED_*` keys.
-  Blanking them in `ecosystem.config.js` would cost a relay rollout and would
-  not stop a relay from reading the seed file.
+- Only API startup detects a hotkey that does not match the seed.
 - Is Secret Manager ruled out as the custodian backup location? Any process on
   the VM can use the VM service account, so it is not a per-user boundary.
 - The Ansible ancestor rule forbids group or world write even on root-owned
-  sticky directories, which the Python loader accepts. The update.sh preflight
-  uses the loader's rule. The fixed path's ancestors are not sticky, so both
-  agree there.
+  sticky directories, which the Python loader accepts. The fixed path's
+  ancestors are not sticky, so both agree there.
 
 ## Validation
 
-- `uv run pytest -q ditto/tests/test_coding_hosted_control_signer_wiring.py`
+- `uv run pytest -q ditto/tests/test_coding_hosted_control_signer_wiring.py ditto/tests/test_platform_deploy_access.py ditto/tests/test_platform_api_release.py`
 - `cd apps/platform && uv run pytest -q -n 0 ditto/tests/api_server/test_coding_hosted_signer_host_wiring.py ditto/tests/api_server/test_coding_hosted_signer_preflight.py ditto/tests/scripts/test_update_script.py`
 - From `infra/ansible`:
   `uvx --from ansible-core==2.21.2 ansible-playbook -i localhost, tests/coding-hosted-control-signer.yml`
-  renders both env templates with real Ansible and runs the real guards:
+  renders every env, unit and Pylon template with real Ansible and runs the real
+  guards:
   - validator trust cases, including padded own hotkeys;
-  - Platform profile cases: screener hotkey, root user;
+  - Platform profile cases: screener hotkey, root or `ditto-api` deploy user,
+    and each missing isolation switch;
   - the disabled and enabled entry point on the fixed path;
   - the stat guard on synthetic temporary trees: missing, wrong mode, symlink,
-    hard link, wrong size, unsafe directory or ancestor, foreign owner.
+    hard link, wrong size, unsafe directory or ancestor, foreign owner, and a
+    tree still owned by `deploy`.

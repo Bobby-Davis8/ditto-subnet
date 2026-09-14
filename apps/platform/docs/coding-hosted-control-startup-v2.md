@@ -38,22 +38,30 @@ updates and process restart; there is no hotkey fallback.
 The `platform_app` Ansible role renders these settings, default off. When
 enabled it renders the fixed seed path
 `/etc/ditto-platform/coding-hosted-signer/seed` and the reviewed public hotkey.
-Right after the role's preflight, before any other `platform_app` task, it
-stat-verifies without reading that the seed and its `0700` directory are owned
-by `deploy`, the pm2 user that runs `ditto-api`. Unless the sourced environment
-disables the signer, `scripts/update.sh` runs
-`python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`
-before touching pm2. That entry point applies `read_private`'s location and file
-checks through `lstat` and never opens the seed, so only startup detects a hotkey
-mismatch.
+Enabling also requires two reviewed isolation switches. The first runs
+`ditto-api` as the dedicated `ditto-api` user from sealed root-owned releases
+through `ditto-platform-api.service`. The second moves Pylon to a root-owned
+unit so `deploy` leaves the `docker` group.
 
-"A relay never reads the seed" describes the code, not an operating-system
-boundary. Every process running as `deploy` can read the file: both relays, the
-image-cleanup job, deploy-time `uv sync`/`npm ci`, and anyone who can act as
-`deploy`. The risk analysis and the options for a dedicated API user are in
-`infra/docs/coding-hosted-control-signer-v2.md`, along with the fixed placement,
-enabling order, rotation and revocation. Seed creation, backup, placement and
-production activation are a separate protected ceremony.
+Right after the role's preflight, the converge stat-verifies without reading
+that the seed and its `0700` directory are owned by `ditto-api`. The metadata
+entry point `python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`
+runs as `ditto-api`, from the sealed release, before `scripts/update.sh`
+activates it and again as the unit's `ExecStartPre`. It applies `read_private`'s
+location and file checks through `lstat` and never opens the seed, so only
+startup detects a hotkey mismatch. `update.sh` itself never checks or opens the
+seed, and it refuses to deploy an enabled signer while `ditto-api` would still
+run under `deploy`'s pm2.
+
+`read_private` compares owners with the process's effective UID, so the relays,
+the image-cleanup job, deploy tooling and anyone acting as `deploy` cannot use
+the placement. Root still can. The implemented design, its residual risks, the
+fixed placement, enabling order, rotation and revocation are in
+`infra/docs/coding-hosted-control-signer-v2.md`. Seed creation, backup,
+placement and production activation are a separate protected ceremony. The
+online control-signer seed and the offline curator key stay completely separate,
+and neither ever enters CI, Git, Telegram, workflow artifacts, command arguments
+or logs.
 
 ## Signing and lifecycle boundary
 
