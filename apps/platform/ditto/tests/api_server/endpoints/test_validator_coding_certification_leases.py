@@ -46,6 +46,9 @@ from ditto.db.models import (
     CodingCertificationInferenceGrant,
     CodingCertificationLease,
 )
+from ditto.db.queries.coding_certification_allowlist import (
+    CodingCertificationAllowlistRefusedError,
+)
 from ditto.db.queries.coding_certification_inference_grants import (
     CodingCertificationInferenceGrantActivation,
     CodingCertificationInferenceGrantResult,
@@ -613,3 +616,59 @@ async def test_claimed_lease_inference_grant_is_signed_no_store_and_default_off(
     assert revoked.status_code == 200, revoked.text
     assert revoked.json()["status"] == "revoked"
     assert revoked.json()["lease_id"] == str(_LEASE)
+
+
+async def test_allowlist_refusal_is_a_fixed_no_store_403_everywhere(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch,
+) -> None:
+    mocks = _install(app, session_maker, monkeypatch)
+    mocks.issue.side_effect = CodingCertificationAllowlistRefusedError()
+    issued = await client.post(
+        "/api/v1/validator/coding-certification-leases",
+        json=_issue_payload(),
+    )
+    assert issued.status_code == 403, issued.text
+    assert issued.headers["Cache-Control"] == "no-store"
+    assert "coding certification is not allowlisted" in issued.text
+    # The refused request's nonce is still burned, so it cannot be replayed.
+    assert mocks.consume.await_count == 1
+
+    grants = _install_grant_transport(app, monkeypatch)
+    grants.ensure.side_effect = CodingCertificationAllowlistRefusedError()
+    offer = await client.post(
+        f"/api/v1/validator/coding-certification-leases/{_LEASE}/inference-grant",
+        json=_grant_payload(),
+    )
+    assert offer.status_code == 403, offer.text
+    assert offer.headers["Cache-Control"] == "no-store"
+    assert "coding certification is not allowlisted" in offer.text
+
+    grants.activate.side_effect = CodingCertificationAllowlistRefusedError()
+    nonce = uuid4()
+    requested_at = datetime.now(UTC)
+    broker = "A" * 43
+    exchanged = await client.post(
+        "/api/v1/validator/coding-certification-leases/inference-exchange",
+        json=CodingInferenceExchangeRequest(
+            validator_hotkey=_VALIDATOR,
+            grant_id=_GRANT,
+            broker_public_key=broker,
+            nonce=nonce,
+            requested_at=requested_at,
+            signature=_KEYPAIR.sign(
+                coding_inference_exchange_signing_message(
+                    validator_hotkey=_VALIDATOR,
+                    grant_id=_GRANT,
+                    broker_public_key=broker,
+                    nonce=nonce,
+                    requested_at=requested_at,
+                )
+            ).hex(),
+        ).model_dump(mode="json"),
+    )
+    assert exchanged.status_code == 403, exchanged.text
+    assert "bearer" not in exchanged.text
+    assert mocks.consume.await_count == 3

@@ -13826,6 +13826,49 @@ async def test_shadow_coding_certification_accepts_unused_inference_without_sett
     assert accepted.json()["active"] is False
 
 
+async def test_shadow_coding_certification_refuses_receipt_after_claimed_deadline(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
+    now = datetime.now(UTC)
+    receipt = _coding_certification_receipt(
+        issued_at_unix=int((now - timedelta(minutes=5)).timestamp())
+    )
+    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
+    async with session_maker() as session, session.begin():
+        lease = await session.get(CodingCertificationLease, lease_id)
+        assert lease is not None
+        lease.issued_at = now - timedelta(minutes=15)
+        lease.claimed_at = now - timedelta(minutes=14)
+        lease.deadline = now - timedelta(seconds=30)
+    payload = receipt.model_dump(mode="json", by_alias=True)
+    payload["status"] = "failed"
+    payload["failure_stage"] = "run"
+    payload["failure_code"] = "coding_inference_not_observed"
+    payload["model_evidence"] = None
+    late = _finalize_coding_receipt(payload)
+    _install_db(app, session_maker)
+    _install_chain(app)
+    refused = await client.post(
+        f"/api/v1/validator/agent/{agent_id}/coding-certification",
+        json=_coding_certification_payload(agent_id, lease_id, receipt=late),
+    )
+    assert refused.status_code == 404, refused.text
+    async with session_maker() as session, session.begin():
+        stored = await session.get(CodingCertificationLease, lease_id)
+        receipts = await session.scalar(
+            select(func.count())
+            .select_from(CodingCapabilityCertification)
+            .where(CodingCapabilityCertification.lease_id == lease_id)
+        )
+    assert stored is not None
+    assert stored.status == CodingCertificationLeaseStatus.EXPIRED.value
+    assert stored.claimed_at is not None
+    assert receipts == 0
+
+
 async def test_shadow_coding_certification_rejects_unbound_legacy_certified_replay(
     app: FastAPI,
     client: httpx.AsyncClient,

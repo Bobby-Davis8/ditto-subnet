@@ -50,8 +50,9 @@ def _policy() -> CoreQualificationPolicy:
 
 
 async def _seed_agent(session: AsyncSession, *, screened: bool = True) -> Agent:
+    agent_id = uuid4()
     agent = Agent(
-        agent_id=uuid4(),
+        agent_id=agent_id,
         miner_hotkey=bittensor.Keypair.create_from_uri("//Charlie").ss58_address,
         name="coding-certification-lease-agent",
         sha256="ab" * 32,
@@ -60,9 +61,7 @@ async def _seed_agent(session: AsyncSession, *, screened: bool = True) -> Agent:
         screened_image_sha256="cd" * 32 if screened else None,
         screened_image_size_bytes=1234 if screened else None,
         screened_image_id="sha256:" + "ef" * 32 if screened else None,
-        screened_image_ref="ditto-screen/coding-cert-lease:latest"
-        if screened
-        else None,
+        screened_image_ref=f"ditto-screen/{agent_id}:latest" if screened else None,
         screened_image_upload_id=uuid4() if screened else None,
         screened_image_verified_at=_NOW if screened else None,
         created_at=_NOW,
