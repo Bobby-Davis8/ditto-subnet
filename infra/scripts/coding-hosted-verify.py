@@ -33,8 +33,14 @@ CUSTODY_RECEIPT = "/var/lib/ditto-coding-custody/keys/private-input-rsa-receipt.
 RUNTIME_ROOT = "/opt/ditto-coding-hosted"
 RUNTIME_BUNDLE = "/opt/ditto-coding-hosted/runtime-bundle.py"
 IMAGE_ROOT = "/opt/ditto-coding-hosted-images"
-# Reviewed default location. Not yet provisioned or confirmed: reported only.
-POSTGRES_ENVIRONMENT_FILE = "/etc/ditto-coding-hosted/postgres-environment.json"
+# Reviewed default locations, not yet provisioned or confirmed: reported only.
+# Each reader requires its own owner-only copy inside a 0700 directory it owns.
+CUSTODY_POSTGRES_ENVIRONMENT = (
+    "/var/lib/ditto-coding-custody/private/postgres-environment.json"
+)
+WORKER_POSTGRES_ENVIRONMENT = (
+    "/var/lib/ditto-coding-hosted/private/postgres-environment.json"
+)
 CLEAN_PATH = "/usr/sbin:/usr/bin:/bin"
 
 checks: list[dict[str, object]] = []
@@ -221,15 +227,24 @@ def check_runtime() -> None:
 
 
 def check_postgres_environment() -> None:
-    info = metadata(POSTGRES_ENVIRONMENT_FILE)
-    record(
-        "postgres environment file metadata (never opened, not yet provisioned)",
-        info.get("type") == "file"
-        and info.get("links") == 1
-        and not int(str(info.get("mode", "0777")), 8) & 0o077,
-        {"path": POSTGRES_ENVIRONMENT_FILE, **info},
-        required=False,
-    )
+    for reader, path, user in (
+        ("custody", CUSTODY_POSTGRES_ENVIRONMENT, CUSTODY_USER),
+        ("worker", WORKER_POSTGRES_ENVIRONMENT, RUNTIME_USER),
+    ):
+        info = metadata(path)
+        directory = metadata(os.path.dirname(path))
+        record(
+            f"{reader} postgres environment metadata (never opened, not provisioned)",
+            info.get("type") == "file"
+            and info.get("owner") == user
+            and info.get("mode") == "0600"
+            and info.get("links") == 1
+            and directory.get("type") == "directory"
+            and directory.get("owner") == user
+            and directory.get("mode") == "0700",
+            {"file": info, "directory": directory},
+            required=False,
+        )
 
 
 def main() -> int:

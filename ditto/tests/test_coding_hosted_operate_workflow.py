@@ -170,7 +170,12 @@ def test_verifier_never_opens_private_material() -> None:
     parents = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
     }
-    private = {"CUSTODY_PRIVATE_KEY", "CUSTODY_RECEIPT", "POSTGRES_ENVIRONMENT_FILE"}
+    private = {
+        "CUSTODY_PRIVATE_KEY",
+        "CUSTODY_RECEIPT",
+        "CUSTODY_POSTGRES_ENVIRONMENT",
+        "WORKER_POSTGRES_ENVIRONMENT",
+    }
     seen = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Name) and node.id in private):

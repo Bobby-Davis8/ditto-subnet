@@ -139,7 +139,8 @@ check piped from the exact checked-out revision: host identity, egress unit,
 inactive rootful Docker, the rootless daemon through the preinstalled non-root
 `host-policy.py verify`, the custody public-key SPKI, and lstat-only metadata for
 the private key, key receipt, runtime install, image imports and the not yet
-provisioned PostgreSQL environment file. It never opens private material and has
+provisioned custody-owned and worker-owned PostgreSQL environment copies (each
+reader requires its own `0600` file in a `0700` directory it owns). It never opens private material and has
 no command, path, host, project or revision inputs.
 
 The identity is root-capable on that one host (OS Login admin), so the job always
