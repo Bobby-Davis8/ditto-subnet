@@ -251,24 +251,40 @@ def test_command_line_never_opens_the_seed(tmp_path):
 def test_a_process_that_does_not_own_the_seed_is_refused(tmp_path, monkeypatch):
     """deploy (or a relay) cannot use a ditto-api-owned placement.
 
-    The loader and the metadata check compare every owner with the effective
-    UID of the process, so a seed that belongs to ditto-api fails closed for any
-    other user even if its file permissions were widened. Only the effective
-    UID is simulated here; nothing is opened.
+    The loader and the metadata check compare the seed's and its directory's
+    owner with the effective UID of the process, so a placement that belongs to
+    ditto-api fails closed for any other user even if its permissions were
+    widened. On a host every ancestor is root-owned; here the ancestors are
+    reported as root-owned and the effective UID is simulated, so only the
+    placement's own owner checks can refuse. Nothing is opened.
     """
     seed = _placement(tmp_path)
     config = HostedControlSignerConfig(True, seed, KEY.ss58_address)
     owner = os.geteuid()
+    placement = seed.parent
+    real_lstat = Path.lstat
     real_open = os.open
+
+    def root_owned_ancestors(self, *args, **kwargs):
+        info = real_lstat(self, *args, **kwargs)
+        if self not in (placement, seed) and placement.is_relative_to(self):
+            fields = list(info[:10])
+            fields[4] = 0
+            return os.stat_result(fields)
+        return info
 
     def guarded_open(path, *args, **kwargs):
         if os.fspath(path) == os.fspath(seed):
             pytest.fail("a non-owner opened the seed")
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    monkeypatch.setattr(Path, "lstat", root_owned_ancestors)
     monkeypatch.setattr(os, "open", guarded_open)
 
+    # Control: the owning process accepts the same placement.
+    assert preflight.check_hosted_signer_seed_metadata(config) is True
+
+    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
     with pytest.raises(ApiServerConfigError):
         preflight.check_hosted_signer_seed_metadata(config)
     with pytest.raises(ApiServerConfigError):

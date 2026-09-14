@@ -814,6 +814,34 @@ def test_dashboard_files_owned_by_anyone_but_deploy_are_refused(tmp_path: Path) 
         RELEASE.copy_dashboard(dist, target, UID + 1)
 
 
+def test_a_foreign_file_inside_a_deploy_owned_directory_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The per-file owner check, separately from the directory check.
+
+    Creating another user's file needs root, so the opened file's owner is
+    reported as foreign while every directory keeps its real owner.
+    """
+    dist = _dist(tmp_path)
+    real_fstat = os.fstat
+
+    def foreign_files(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return info
+        fields = list(info[:10])
+        fields[4] = UID + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(RELEASE.os, "fstat", foreign_files)
+    target = tmp_path / "release/dist"
+    target.parent.mkdir()
+    with pytest.raises(RELEASE.ReleaseError) as error:
+        RELEASE.copy_dashboard(dist, target, UID)
+    assert "deploy-owned single link" in str(error.value)
+    assert not (target / "index.html").exists()
+
+
 def test_dashboard_size_is_bounded(tmp_path: Path, monkeypatch) -> None:
     dist = _dist(tmp_path)
     monkeypatch.setattr(RELEASE, "MAX_DASHBOARD_FILES", 1)
