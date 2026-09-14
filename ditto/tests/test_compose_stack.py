@@ -195,7 +195,10 @@ def test_shadow_coding_worker_is_present_but_default_off_on_both_sides() -> None
 
     assert _compose_default(scorer["DITTOBENCH_CODING_SHADOW_ENABLED"]) == "false"
     assert _compose_default(scorer["DITTOBENCH_CODING_CANARY_ENABLED"]) == "false"
-    assert _compose_default(scorer["DITTOBENCH_CODING_CERTIFICATION_ROOT"]) == ""
+    # Fixed image path, consumed only behind the canary gate above.
+    assert scorer["DITTOBENCH_CODING_CERTIFICATION_ROOT"] == (
+        "/opt/ditto/coding/certification-root"
+    )
     assert _compose_default(scorer["DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST"]) == ""
     assert _compose_default(validator["VALIDATOR_CODING_SHADOW_ENABLED"]) == "false"
     assert _compose_default(validator["VALIDATOR_CODING_SHADOW_RUN_ID"]) == ""

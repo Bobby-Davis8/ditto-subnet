@@ -70,6 +70,34 @@ RUN wget -q -O /longmemeval_s_cleaned.json \
       | sha256sum -c - && \
     chmod 0444 /longmemeval_s_cleaned.json
 
+# ---- public coding certification pack ----
+# The default-off certification canary (DITTOBENCH_CODING_CANARY_ENABLED) loads
+# a repo-shaped root. Copy the committed certification/v1 capsule and the locked
+# inference policy its manifest names, verify every byte against these pins, and
+# reject any other file or link. The manifest digest is the identity Platform
+# binds into every certification lease, but the runtime loader does not re-hash
+# the visible workspace or grader files, so this build-time check binds them.
+FROM alpine:3.22 AS coding-certification-pack
+COPY research/dittobench-coding-datagen/certification/v1/ \
+    /pack/certification-root/research/dittobench-coding-datagen/certification/v1/
+COPY packages/dittobench-coding-contract/testdata/coding_inference_policy_locked_v1.json \
+    /pack/certification-root/packages/dittobench-coding-contract/testdata/coding_inference_policy_locked_v1.json
+WORKDIR /pack/certification-root
+RUN printf '%s\n' \
+      "cb608113db0cc31001fe0a7294854453061f9e85d1471520100ce99eca97a903  research/dittobench-coding-datagen/certification/v1/manifest.json" \
+      "7eb7029d0c80edbfba4bc3a26634edc48e191608902cb4906125ace7b66a1016  research/dittobench-coding-datagen/certification/v1/capsules/PRACTICE-LEDGER-001/visible/workspace/app.py" \
+      "645b042006605024a9a166cd1e4a44302f0f09464a1c40b0370b74ea9319bf4a  research/dittobench-coding-datagen/certification/v1/capsules/PRACTICE-LEDGER-001/visible/workspace/tests/test_visible.py" \
+      "e42313d1d3423c0e5164ddcd8c88a32058ee7dd7ef190fd9b6826a8a6a1b9bf8  research/dittobench-coding-datagen/certification/v1/capsules/PRACTICE-LEDGER-001/grader/tests/test_regression.py" \
+      "6dd79225817b56ebf155f8344cd5faf752c8dd57802b21d6d2cbbae9cc2ff0b4  packages/dittobench-coding-contract/testdata/coding_inference_policy_locked_v1.json" \
+      > /tmp/certification-pack.sha256 && \
+    sha256sum -c /tmp/certification-pack.sha256 && \
+    cut -c67- /tmp/certification-pack.sha256 | sort > /tmp/certification-pack.expected && \
+    find . -type f | sed 's|^\./||' | sort > /tmp/certification-pack.actual && \
+    diff -u /tmp/certification-pack.expected /tmp/certification-pack.actual && \
+    test -z "$(find . ! -type f ! -type d)" && \
+    find . -type d -exec chmod 0555 {} + && \
+    find . -type f -exec chmod 0444 {} +
+
 # ---- validator sandbox runtime ----
 # This opt-in target runs the API beside a host Docker daemon. The binary shells
 # out to both git and docker when it materializes and runs miner submissions.
@@ -93,6 +121,12 @@ COPY --from=confirmation-assets --chown=65532:65532 --chmod=0444 \
 COPY --chown=65532:65532 --chmod=0444 \
     packages/dittobench-coding-contract/testdata/coding_inference_policy_locked_v1.json \
     /opt/ditto/coding/coding_inference_policy_locked_v1.json
+# BuildKit applies --chmod=0444 to the implicitly created /opt/ditto/coding, which
+# leaves the non-root scorer unable to traverse to the locked policy. Keep the
+# directory traversable but read-only. The verified certification pack is
+# root-owned, 0555/0444, and consulted only when the canary gate is enabled.
+COPY --from=coding-certification-pack /pack/ /opt/ditto/coding/
+RUN chmod 0555 /opt/ditto/coding
 ENV HOME=/tmp
 # Legacy fallback only; the binary above already carries these values.
 ENV DITTOBENCH_SOFTWARE_VERSION=${DITTOBENCH_SOFTWARE_VERSION}
