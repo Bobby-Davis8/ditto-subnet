@@ -5,6 +5,12 @@ import type { input as ZodInput, output as ZodOutput } from 'zod'
 import type { components as PlatformComponents } from '../generated/platform-api'
 import {
   auditReasonSchema,
+  codingHostedAssignmentCancelledSchema,
+  codingHostedAssignmentDetailSchema,
+  codingHostedAssignmentListSchema,
+  codingHostedAssignmentPlanSchema,
+  codingHostedOperationStateSchema,
+  codingNativeControlStatusSchema,
   CEILING_DISABLED,
   platformSupportsRetestCohortSize,
   parseContinualRetestSettingsControl,
@@ -4423,5 +4429,71 @@ describe('batched ATH rulings schemas', () => {
     expect(parsed.rulings?.every((item) => item.action === 'reject')).toBe(true)
     expect(parsed.rulings?.every((item) => item.evidence_references.length > 0)).toBe(true)
     expect(parsed.source).toBe('docs/sn118-top5-board-review-2026-09-13.json')
+  })
+})
+
+describe('hosted-v2 Coding assignment schemas', () => {
+  type Schemas = PlatformComponents['schemas']
+
+  it('stays statically exhaustive against the generated Platform response types', () => {
+    expectTypeOf<keyof ZodOutput<typeof codingHostedAssignmentDetailSchema>>().toEqualTypeOf<
+      keyof Schemas['AdminHostedAssignmentDetail']
+    >()
+    expectTypeOf<ZodOutput<typeof codingHostedAssignmentDetailSchema>>().toMatchTypeOf<
+      Schemas['AdminHostedAssignmentDetail']
+    >()
+    expectTypeOf<keyof ZodOutput<typeof codingHostedAssignmentListSchema>>().toEqualTypeOf<
+      keyof Schemas['AdminHostedAssignmentList']
+    >()
+    expectTypeOf<keyof ZodOutput<typeof codingHostedAssignmentCancelledSchema>>().toEqualTypeOf<
+      keyof Schemas['AdminHostedAssignmentCancelled']
+    >()
+    expectTypeOf<keyof ZodOutput<typeof codingHostedAssignmentPlanSchema>>().toEqualTypeOf<
+      keyof Schemas['AdminHostedAssignmentPlan']
+    >()
+    // Every state Platform can send must parse, including cancelled.
+    expectTypeOf<Schemas['AdminHostedAssignmentSummary']['state']>().toEqualTypeOf<
+      ZodOutput<typeof codingHostedOperationStateSchema>
+    >()
+    expectTypeOf<Schemas['CodingHostedOperationRecord']['state']>().toEqualTypeOf<
+      ZodOutput<typeof codingHostedOperationStateSchema>
+    >()
+  })
+
+  it('parses a cancelled control-plane row', () => {
+    const parsed = codingNativeControlStatusSchema.parse({
+      total_native_operations: 1,
+      native_operations: [{
+        evaluation_id: '11111111-1111-4111-8111-111111111111',
+        attempt_id: '22222222-2222-4222-8222-222222222222',
+        release_row_id: '33333333-3333-4333-8333-333333333333',
+        registration_sha256: 'a'.repeat(64),
+        agent_id: '44444444-4444-4444-8444-444444444444',
+        validator_hotkey: `5${'V'.repeat(47)}`,
+        artifact_sha256: 'b'.repeat(64),
+        screened_image_sha256: 'c'.repeat(64),
+        assignment_sha256: 'd'.repeat(64),
+        state: 'cancelled',
+        expires_at: '2026-09-14T12:15:00Z',
+        created_at: '2026-09-14T12:00:00Z',
+        admitted_at: null,
+        started_at: null,
+        frozen: false,
+        closed_at: '2026-09-14T12:02:00Z',
+        close_reason: 'aborted',
+        registered_actor: 'peyton@omniaura.ai',
+        registered_reason: 'synthetic hosted canary assignment',
+        shadow_only: true,
+        weight_eligible: false,
+      }],
+      hosted_control_configured: false,
+      contract_v1_reconciliation_enabled: false,
+      contract_v1_ticket_set_enabled: false,
+      contract_v1_ticket_lease_seconds: 3600,
+      native_v2_selectable: false,
+      shadow_only: true,
+      weight_eligible: false,
+    })
+    expect(parsed.native_operations[0]?.state).toBe('cancelled')
   })
 })
