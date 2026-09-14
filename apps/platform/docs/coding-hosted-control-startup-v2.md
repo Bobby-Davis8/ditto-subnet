@@ -38,11 +38,22 @@ updates and process restart; there is no hotkey fallback.
 The `platform_app` Ansible role renders these settings, default off. When
 enabled it renders the fixed seed path
 `/etc/ditto-platform/coding-hosted-signer/seed` and the reviewed public hotkey.
-Before touching the host it stat-verifies, without reading, that the seed and
-its `0700` directory are owned by `deploy`, the pm2 user that runs `ditto-api`.
-Seed creation, backup, placement and production activation are a separate
-protected ceremony. The fixed placement, enabling order, rotation and
-revocation live in `infra/docs/coding-hosted-control-signer-v2.md`.
+Right after the role's preflight, before any other `platform_app` task, it
+stat-verifies without reading that the seed and its `0700` directory are owned
+by `deploy`, the pm2 user that runs `ditto-api`. Unless the sourced environment
+disables the signer, `scripts/update.sh` runs
+`python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`
+before touching pm2. That entry point applies `read_private`'s location and file
+checks through `lstat` and never opens the seed, so only startup detects a hotkey
+mismatch.
+
+"A relay never reads the seed" describes the code, not an operating-system
+boundary. Every process running as `deploy` can read the file: both relays, the
+image-cleanup job, deploy-time `uv sync`/`npm ci`, and anyone who can act as
+`deploy`. The risk analysis and the options for a dedicated API user are in
+`infra/docs/coding-hosted-control-signer-v2.md`, along with the fixed placement,
+enabling order, rotation and revocation. Seed creation, backup, placement and
+production activation are a separate protected ceremony.
 
 ## Signing and lifecycle boundary
 
