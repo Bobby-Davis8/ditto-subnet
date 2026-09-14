@@ -11,6 +11,9 @@ on:
       - services/dittobench-api/internal/rootlessnetns/**
       - services/dittobench-api/cmd/dittobench-coding-router-listener/**
       - services/dittobench-api/internal/codinghostedruntime/**
+      # The integration test and the source router it serves import these.
+      - services/dittobench-api/internal/codingcertifier/**
+      - services/dittobench-api/internal/codinggateway/**
       - services/dittobench-api/internal/codingsource/**
       - services/dittobench-api/internal/sandbox/**
       - services/dittobench-api/go.mod
