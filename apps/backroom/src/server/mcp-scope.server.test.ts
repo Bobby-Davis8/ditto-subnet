@@ -564,6 +564,8 @@ describe('MCP scope challenges', () => {
       'get_validator_weight_diagnostics',
       'get_core_qualification_policy',
       'get_agent_core_qualification',
+      'get_coding_certification_allowlist',
+      'list_coding_certification_leases',
     ]) {
       const request = new Request('https://backroom.dittobench.ai/mcp', {
         method: 'POST',
@@ -577,6 +579,20 @@ describe('MCP scope challenges', () => {
       expect(await callsWriteTool(request)).toBe(false)
       expect(await requiredScopesForRequest(request)).toEqual([])
     }
+  })
+
+  it('requires write scope to change the coding certification allowlist', async () => {
+    const request = new Request('https://backroom.dittobench.ai/mcp', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'set_coding_certification_allowlist', arguments: {} },
+      }),
+    })
+    expect(await callsWriteTool(request)).toBe(true)
+    expect(await requiredScopesForRequest(request)).toEqual([BACKROOM_WRITE_SCOPE])
   })
 
   it('recognizes sensitive screening artifact calls as artifact-scoped reads', async () => {
