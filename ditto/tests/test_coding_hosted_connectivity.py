@@ -298,9 +298,25 @@ def test_role_and_service_are_manual_default_off_and_nondelegated():
         "BindReadOnlyPaths=/run/user/{{ coding_hosted_uid }}"
         "/dockerd-rootless/child_pid\n" in unit
     )
+    role_tasks = (ROLE / "tasks/main.yml").read_text()
+    assert "coding_hosted_router_namespace in ['host', 'rootless-netns']" in role_tasks
+    # The unit's namespace is compared with every attempt configuration it runs.
+    assert "ansible.builtin.include_tasks: router-namespace.yml" in role_tasks
+    assert role_tasks.index("Require worker-owned private attempt configurations") < (
+        role_tasks.index("router-namespace.yml")
+    )
+    comparison = yaml.safe_load((ROLE / "tasks/router-namespace.yml").read_text())
+    assert comparison[0]["no_log"] is True and comparison[1]["no_log"] is True
+    conditions = " ".join(comparison[2]["ansible.builtin.assert"]["that"])
+    for required in (
+        "item.router_namespace | default('host') == coding_hosted_router_namespace",
+        "coding_hosted_connectivity_profile.expires_at_unix",
+        "not in coding_hosted_connectivity_profile.candidate_tcp",
+    ):
+        assert required in conditions
     assert (
-        "coding_hosted_router_namespace in ['host', 'rootless-netns']"
-        in (ROLE / "tasks/main.yml").read_text()
+        "router-namespace-refusal.yml"
+        in (ROOT / "infra/ansible/tests/coding-hosted-connectivity.yml").read_text()
     )
     assert "[Install]" not in unit
     assert (
