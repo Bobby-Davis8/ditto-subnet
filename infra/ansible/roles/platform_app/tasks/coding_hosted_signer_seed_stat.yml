@@ -1,8 +1,11 @@
 ---
-# Stat-only guard for the pre-placed hosted-v2 control signer seed. Reached only
-# through coding_hosted_signer.yml, which first pins the fixed production paths;
-# infra/ansible/tests/coding-hosted-control-signer.yml exercises it directly
-# against synthetic temporary trees.
+# Stat-only guard for the pre-placed hosted-v2 control signer seed. Imported by
+# coding_hosted_signer.yml with the fixed production paths, and by
+# infra/ansible/tests/coding-hosted-control-signer-seed-case.yml with synthetic
+# temporary trees. Inputs (import vars, never role defaults or inventory):
+#   platform_coding_hosted_signer_guard_ancestors  every ancestor directory
+#   platform_coding_hosted_signer_guard_directory  the 0700 seed directory
+#   platform_coding_hosted_signer_guard_seed       the seed file
 #
 # Every stat uses follow: false and get_checksum: false. No task in this file
 # may read file contents.
@@ -14,7 +17,7 @@
     get_checksum: false
     get_mime: false
     get_attributes: false
-  loop: "{{ platform_coding_hosted_signer_seed_ancestors }}"
+  loop: "{{ platform_coding_hosted_signer_guard_ancestors }}"
   register: platform_coding_hosted_signer_ancestor_stats
 
 - name: Require safe hosted-v2 control signer seed ancestors
@@ -38,7 +41,7 @@
 
 - name: Inspect the hosted-v2 control signer seed directory without following links
   ansible.builtin.stat:
-    path: "{{ platform_coding_hosted_signer_seed_directory }}"
+    path: "{{ platform_coding_hosted_signer_guard_directory }}"
     follow: false
     get_checksum: false
     get_mime: false
@@ -54,7 +57,7 @@
       - platform_coding_hosted_signer_directory_stat.stat.pw_name | default('') == platform_owner
       - platform_coding_hosted_signer_directory_stat.stat.mode == '0700'
     fail_msg: >-
-      {{ platform_coding_hosted_signer_seed_directory }} must be a real directory
+      {{ platform_coding_hosted_signer_guard_directory }} must be a real directory
       owned by {{ platform_owner }} with mode 0700. Ansible never creates it: the
       protected ceremony in infra/docs/coding-hosted-control-signer-v2.md places
       the directory and seed. Otherwise set platform_coding_hosted_control_enabled
@@ -63,7 +66,7 @@
 
 - name: Inspect the hosted-v2 control signer seed metadata without reading it
   ansible.builtin.stat:
-    path: "{{ platform_coding_hosted_signer_seed_file }}"
+    path: "{{ platform_coding_hosted_signer_guard_seed }}"
     follow: false
     get_checksum: false
     get_mime: false
@@ -81,7 +84,7 @@
       - platform_coding_hosted_signer_seed_stat.stat.nlink == 1
       - platform_coding_hosted_signer_seed_stat.stat.size == 32
     fail_msg: >-
-      The hosted-v2 control signer seed at {{ platform_coding_hosted_signer_seed_file }}
+      The hosted-v2 control signer seed at {{ platform_coding_hosted_signer_guard_seed }}
       is missing or unsafe: it must be a single-link regular 32-byte file owned by
       {{ platform_owner }} with mode 0600. Ansible never creates, copies or reads
       it. Place it through the protected ceremony in
