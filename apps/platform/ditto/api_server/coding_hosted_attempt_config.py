@@ -1,12 +1,14 @@
 """Fixed-host materializer for one hosted-v2 Platform runtime configuration.
 
 Authority comes from committed Platform state, read in one read-only snapshot.
-Transferred public authorities are selected by the assignment's own digests and
-verified before use. Owner-only secret files are referenced at fixed paths and
-checked by metadata only; the worker's PostgreSQL environment is the single
-exception, parsed in memory to open that read-only connection. This module never
-starts a unit, admits or creates an assignment, issues a grant, contacts a
-provider or writes to PostgreSQL. The runtime rechecks everything under locks.
+Transferred public authorities are selected by operator pins that must equal the
+assignment's own digests, and verified before use. Owner-only secret files are
+referenced at fixed paths and checked by metadata. Two are parsed in memory, as
+the runtime parses them: the PostgreSQL environment, to open that read-only
+connection, and the Hippius environment, to derive the storage authorities the
+probe receipt must bind. This module never starts a unit, admits or creates an
+assignment, issues a grant, contacts a provider or writes to PostgreSQL. The
+runtime rechecks everything under locks.
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ditto.api_models.agent_status import SCOREABLE_AGENT_STATUSES
 from ditto.api_models.coding_hosted_budget import HostedBudgetProfile
 from ditto.api_models.coding_hosted_inference import HostedInferencePolicy
 from ditto.api_models.coding_hosted_runtime import HostedPlatformRuntimeInput
@@ -46,20 +47,49 @@ from ditto.api_models.coding_private_v2_registry import (
     CodingPrivateV2RegistrationAuthority,
 )
 from ditto.api_server.coding_hippius_custody import RsaOaepHippiusEvidenceKeyWrapper
-from ditto.api_server.coding_hippius_probe import load_hippius_probe_receipt
+from ditto.api_server.coding_hippius_probe import (
+    PROBE_RECEIPT_MAX_AGE_SECONDS,
+    load_hippius_probe_receipt,
+)
 from ditto.api_server.coding_hosted_authoring_evidence import canonical, sha
 from ditto.api_server.coding_hosted_budget import ProfiledBudgetEstimator
+from ditto.api_server.coding_hosted_control import (
+    SHUTDOWN_OPERATION_SECONDS as CONTROL_SHUTDOWN_OPERATION_SECONDS,
+)
 from ditto.api_server.coding_hosted_installed_worker import (
     NAME as WORKER_NAME,
 )
 from ditto.api_server.coding_hosted_installed_worker import (
     ROOT as RUNTIME_PARENT,
 )
-from ditto.api_server.coding_hosted_installed_worker import (
-    require_installed_worker,
+from ditto.api_server.coding_hosted_launch import (
+    authority_bound,
+    launch_pending,
+    launch_registration,
+    screened_image_ready,
+    stored_authority,
+    task_open,
 )
-from ditto.api_server.coding_hosted_runtime_config import postgres_config
+from ditto.api_server.coding_hosted_runtime import (
+    WORKER_FINALIZATION_SECONDS,
+    WORKER_SHUTDOWN_GRACE_SECONDS,
+)
+from ditto.api_server.coding_hosted_runtime_config import (
+    CONFIG_MAX_BYTES,
+    EXECUTION_PROFILE_MAX_BYTES,
+    GRADING_PROFILE_MAX_BYTES,
+    HIPPIUS_ENVIRONMENT_MAX_BYTES,
+    IMAGE_STORAGE_MAX_BYTES,
+    POLICY_MAX_BYTES,
+    POSTGRES_ENVIRONMENT_MAX_BYTES,
+    PROVIDER_KEY_MAX_BYTES,
+    PUBLIC_AUTHORITY_MAX_BYTES,
+    RELEASE_AUTHORITY_MAX_BYTES,
+    hippius_configs,
+    postgres_config,
+)
 from ditto.api_server.coding_hosted_runtime_io import (
+    fsync_directory,
     private_directory,
     protected_helper,
     read_json,
@@ -75,28 +105,45 @@ from ditto.db.models import (
     CodingPrivateV2Release,
     CodingPrivateV2ReleaseEvent,
 )
-from ditto.db.queries.coding_hosted_admission import HostedAssignmentAuthority, _now
-from ditto.db.queries.coding_hosted_private import _selection_matches
-from ditto_screening_protocol import SCREENING_POLICY_VERSION
+from ditto.db.queries.coding_hosted_admission import (
+    HostedAssignmentAuthority,
+    _now,
+    artifact_available,
+    release_available,
+)
 
 RECEIPT_SCHEMA = "dittobench-coding-hosted-attempt-config-receipt-v2"
 WORKER_USER = "ditto-coding-hosted"
 HOSTNAME = "ditto-coding-hosted-v2"
 HOME = Path("/var/lib/ditto-coding-hosted")
+# Root-owned, worker-group-readable staging for the reviewed public inputs. The
+# operator wrapper writes here as root; nothing root writes is worker-controlled.
+INPUTS = Path("/var/lib/ditto-coding-hosted-attempt-inputs")
 PREREQUISITES = Path("/usr/local/lib/ditto-coding-hosted/host-prerequisites.json")
 DOCKER = Path("/usr/bin/docker")
 DOCKER_SOCKET = Path("/run/ditto-coding-hosted/docker.sock")
 CUSTODY_SOCKET = Path("/run/ditto-coding-custody/custody.sock")
 PREREQUISITES_SCHEMA = "dittobench-coding-hosted-host-prerequisites-v2"
-EXECUTOR_LANGUAGES = ("go", "node", "python", "rust")
+EXECUTOR_REPOSITORIES = tuple(
+    f"coding-runtime.invalid/{language}/runtime"
+    for language in ("go", "node", "python", "rust")
+)
 # Leave room for custody prepare/start, connectivity and worker start.
 MINIMUM_REMAINING_SECONDS = 300
-# The runtime invocation's bounded post-deadline finalization window; evidence
-# publication inside it still requires a probe receipt younger than 24 hours.
-FINALIZATION_SECONDS = 3600
-PROBE_MAX_AGE_SECONDS = 86400
+# Latest evidence publication after the assignment deadline, from the runtime's
+# own bounds in run_loaded_runtime and HostedRuntimeServices.shutdown: the Go
+# child's post-deadline timeout and SIGTERM grace, then the control drain (close,
+# then abort, each bounded) of the one attempt the control binds. Every
+# publisher's probe check (_check_probe, _fresh) requires a receipt younger than
+# PROBE_RECEIPT_MAX_AGE_SECONDS at the moment it publishes.
+EVIDENCE_PUBLICATION_SECONDS = (
+    WORKER_FINALIZATION_SECONDS
+    + WORKER_SHUTDOWN_GRACE_SECONDS
+    + 2 * CONTROL_SHUTDOWN_OPERATION_SECONDS
+)
 UNITS = ("ditto-coding-hosted-worker.service", "ditto-coding-custody@*.service")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_REVISION = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _NETWORK = re.compile(r"[a-z0-9_][a-z0-9_-]{0,127}")
 _PORT = re.compile(r"[1-9][0-9]{3,4}")
@@ -131,38 +178,36 @@ def refusal(stage: str):
 class AttemptRequest:
     evaluation_id: UUID
     assignment_sha256: str
+    runtime_revision: str
+    execution_profile_sha256: str
+    grading_profile_sha256: str
+    inference_policy_sha256: str
+    budget_profile_sha256: str
     probe_receipt_sha256: str
     evidence_wrapping_key_sha256: str
 
     @classmethod
     def parse(
-        cls,
-        *,
-        evaluation_id: str,
-        assignment_sha256: str,
-        probe_receipt_sha256: str,
-        evidence_wrapping_key_sha256: str,
+        cls, *, evaluation_id: str, runtime_revision: str, **digests: str
     ) -> AttemptRequest:
         with refusal("attempt request invalid"):
             parsed = UUID(evaluation_id)
             require(
-                parsed.int != 0 and str(parsed) == evaluation_id,
+                parsed.int != 0
+                and str(parsed) == evaluation_id
+                and type(runtime_revision) is str
+                and _REVISION.fullmatch(runtime_revision) is not None
+                and set(digests)
+                == {field.name for field in dataclasses.fields(cls)}
+                - {"evaluation_id", "runtime_revision"}
+                and all(
+                    type(value) is str and _DIGEST.fullmatch(value) is not None
+                    for value in digests.values()
+                ),
                 "attempt request invalid",
             )
-            for value in (
-                assignment_sha256,
-                probe_receipt_sha256,
-                evidence_wrapping_key_sha256,
-            ):
-                require(
-                    type(value) is str and _DIGEST.fullmatch(value) is not None,
-                    "attempt request invalid",
-                )
             return cls(
-                parsed,
-                assignment_sha256,
-                probe_receipt_sha256,
-                evidence_wrapping_key_sha256,
+                evaluation_id=parsed, runtime_revision=runtime_revision, **digests
             )
 
 
@@ -171,6 +216,8 @@ class HostLayout:
     """Fixed host locations; the CLI never accepts an override for any of them."""
 
     home: Path
+    inputs: Path
+    runtime_revision: str
     worker_executable: Path
     python_executable: Path
     prerequisites_file: Path
@@ -183,10 +230,6 @@ class HostLayout:
     @property
     def attempts(self) -> Path:
         return self.home / "attempts"
-
-    @property
-    def inbox(self) -> Path:
-        return self.home / "inbox"
 
     @property
     def private(self) -> Path:
@@ -203,18 +246,27 @@ class HostLayout:
     def release(self, registration_sha256: str) -> Path:
         return self.home / "release" / registration_sha256
 
+    def input(self, kind: str, digest: str) -> Path:
+        return self.inputs / f"{kind}-{digest}.json"
+
     def secrets(self) -> dict[str, tuple[Path, int]]:
         return {
             "postgres_environment_file": (
                 self.private / "postgres-environment.json",
-                128 << 10,
+                POSTGRES_ENVIRONMENT_MAX_BYTES,
             ),
             "hippius_environment_file": (
                 self.private / "hippius-environment.json",
-                65536,
+                HIPPIUS_ENVIRONMENT_MAX_BYTES,
             ),
-            "image_storage_file": (self.private / "image-storage.json", 65536),
-            "provider_key_file": (self.private / "provider-key", 4096),
+            "image_storage_file": (
+                self.private / "image-storage.json",
+                IMAGE_STORAGE_MAX_BYTES,
+            ),
+            "provider_key_file": (
+                self.private / "provider-key",
+                PROVIDER_KEY_MAX_BYTES,
+            ),
         }
 
 
@@ -225,6 +277,14 @@ class LaunchableAssignment:
     reader_authority_sha256: str
     catalog_index: int
     max_patch_bytes: int
+
+
+@dataclass(frozen=True)
+class StorageAuthorities:
+    """Non-secret digests the runtime derives from its Hippius environment."""
+
+    private_input_sha256: str
+    sealed_evidence_sha256: str
 
 
 def production_layout() -> HostLayout:
@@ -243,16 +303,17 @@ def production_layout() -> HostLayout:
         prefix = venv.parents[2]
         require(
             prefix.parent == RUNTIME_PARENT
-            and re.fullmatch(r"[0-9a-f]{40}", prefix.name) is not None
+            and _REVISION.fullmatch(prefix.name) is not None
             and venv == prefix / "apps/platform/.venv"
             and Path(__file__).resolve().is_relative_to(prefix),
             "hosted attempt host refused",
         )
-        worker = prefix / "bin" / WORKER_NAME
-        require_installed_worker(worker)
+        # The installed worker is admitted once, by verify_host.
         return HostLayout(
             home=HOME,
-            worker_executable=worker,
+            inputs=INPUTS,
+            runtime_revision=prefix.name,
+            worker_executable=prefix / "bin" / WORKER_NAME,
             python_executable=venv / "bin/python",
             prerequisites_file=PREREQUISITES,
             docker_executable=DOCKER,
@@ -262,7 +323,10 @@ def production_layout() -> HostLayout:
 
 
 def idle_units(listing: bytes) -> bool:
-    """`systemctl list-units --plain --no-legend` columns: UNIT LOAD ACTIVE SUB."""
+    """`systemctl list-units --plain --no-legend` columns: UNIT LOAD ACTIVE SUB.
+
+    The one liveness rule: only inactive or failed pass; unparseable lines refuse.
+    """
     for line in listing.decode("utf-8").splitlines():
         columns = line.split()
         if columns and (len(columns) < 4 or columns[2] not in {"inactive", "failed"}):
@@ -295,22 +359,26 @@ def refuse_live_units() -> None:
         )
 
 
-def unique_repository(digests: set[str], present: Callable[[str], bool]) -> str:
+def unique_repository(digests: set[str], held: set[str]) -> str:
     """The one approved local runtime repository holding every profile image."""
     matches = [
         repository
-        for repository in (
-            f"coding-runtime.invalid/{language}/runtime"
-            for language in EXECUTOR_LANGUAGES
-        )
-        if all(present(f"{repository}@{digest}") for digest in sorted(digests))
+        for repository in EXECUTOR_REPOSITORIES
+        if all(f"{repository}@{digest}" in held for digest in digests)
     ]
     require(len(matches) == 1, "hosted executor image unavailable")
     return matches[0]
 
 
 def docker_repository(layout: HostLayout, digests: set[str]) -> str:
-    def present(reference: str) -> bool:
+    references = [
+        f"{repository}@{digest}"
+        for repository in EXECUTOR_REPOSITORIES
+        for digest in sorted(digests)
+    ]
+    with refusal("hosted executor image unavailable"):
+        # One inspect over every candidate. A missing reference fails the command
+        # but every present image is still listed, one RepoDigests array per line.
         result = subprocess.run(
             [
                 str(layout.docker_executable),
@@ -318,7 +386,7 @@ def docker_repository(layout: HostLayout, digests: set[str]) -> str:
                 "inspect",
                 "--format",
                 "{{json .RepoDigests}}",
-                reference,
+                *references,
             ],
             env={
                 **_ENV,
@@ -331,13 +399,19 @@ def docker_repository(layout: HostLayout, digests: set[str]) -> str:
             timeout=30,
             check=False,
         )
-        if result.returncode != 0 or len(result.stdout) > 65536:
-            return False
-        value = json.loads(result.stdout)
-        return isinstance(value, list) and reference in value
-
-    with refusal("hosted executor image unavailable"):
-        return unique_repository(digests, present)
+        require(len(result.stdout) <= 65536, "hosted executor image unavailable")
+        held: set[str] = set()
+        for line in result.stdout.decode("utf-8").splitlines():
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            require(
+                value is None
+                or (isinstance(value, list) and all(type(v) is str for v in value)),
+                "hosted executor image unavailable",
+            )
+            held.update(value or ())
+        return unique_repository(digests, held & set(references))
 
 
 def secret_metadata(path: Path, maximum: int) -> None:
@@ -356,29 +430,36 @@ def secret_metadata(path: Path, maximum: int) -> None:
         raise ValueError("owner-only file metadata refused")
 
 
+def _trusted(condition: bool) -> None:
+    # A plain error: each caller's refusal names the stage.
+    if not condition:
+        raise ValueError("trusted host file refused")
+
+
 def trusted_path(path: Path, uid: int) -> os.stat_result:
-    """Installed public host file owned by the trusted principal, never replaceable."""
-    require(
-        path.is_absolute() and path.resolve() == path, "hosted attempt host refused"
-    )
+    """Installed public host file owned by the trusted principal, never replaceable.
+
+    Not coding_hosted_installed_worker.read_root_file: that admits one exact mode
+    for root only and returns a streamed digest, not the bytes. These files are
+    read whole, may be 0444 or group-readable 0440, and tests own them unprivileged.
+    """
+    _trusted(path.is_absolute() and path.resolve() == path)
     for parent in path.parents:
         info = parent.lstat()
-        require(
+        _trusted(
             stat.S_ISDIR(info.st_mode)
             and info.st_uid in {0, uid}
             and (
                 not info.st_mode & 0o022
                 or (info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX))
             ),
-            "hosted attempt host refused",
         )
     info = path.lstat()
-    require(
+    _trusted(
         stat.S_ISREG(info.st_mode)
         and info.st_uid == uid
         and info.st_nlink == 1
         and not info.st_mode & 0o022,
-        "hosted attempt host refused",
     )
     return info
 
@@ -388,16 +469,15 @@ def trusted_file(path: Path, uid: int, maximum: int) -> bytes:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     with os.fdopen(fd, "rb") as source:
         info = os.fstat(source.fileno())
-        require(
+        _trusted(
             stat.S_ISREG(info.st_mode)
             and info.st_uid == uid
             and info.st_nlink == 1
             and not info.st_mode & 0o022
             and 0 < info.st_size <= maximum,
-            "hosted attempt host refused",
         )
         body = source.read(maximum + 1)
-        require(len(body) == info.st_size, "hosted attempt host refused")
+        _trusted(len(body) == info.st_size)
         return body
 
 
@@ -471,8 +551,10 @@ def host_settings(document: object) -> dict[str, Any]:
 
 def verify_host(layout: HostLayout) -> dict[str, Any]:
     with refusal("hosted attempt host refused"):
-        for directory in (layout.home, layout.attempts, layout.inbox):
-            private_directory(directory)
+        private_directory(layout.home)
+        # Created by the worker itself, just before the exclusive reservation.
+        if os.path.lexists(layout.attempts):
+            private_directory(layout.attempts)
         protected_helper(layout.worker_executable)
         protected_helper(layout.unwrap_executable)
         require(
@@ -482,8 +564,12 @@ def verify_host(layout: HostLayout) -> dict[str, Any]:
             and layout.docker_executable.name == "docker",
             "hosted attempt host refused",
         )
-        docker = trusted_path(layout.docker_executable, layout.trusted_uid)
-        require(bool(docker.st_mode & stat.S_IXUSR), "hosted attempt host refused")
+        trusted_path(layout.docker_executable, layout.trusted_uid)
+        # The worker runs Docker: its own access, not the root owner's mode bits.
+        require(
+            os.access(layout.docker_executable, os.X_OK),
+            "hosted attempt host refused",
+        )
         socket = layout.docker_socket.lstat()
         require(
             layout.docker_socket.resolve() == layout.docker_socket
@@ -504,6 +590,14 @@ def refuse_live_custody(layout: HostLayout) -> None:
     )
 
 
+def storage_authorities(layout: HostLayout) -> StorageAuthorities:
+    """The runtime's own Hippius parse, in memory; only the digests are kept."""
+    path, maximum = layout.secrets()["hippius_environment_file"]
+    with refusal("hosted storage environment refused"):
+        reader, evidence = hippius_configs(read_json(path, maximum))
+        return StorageAuthorities(reader.authority_sha256, evidence.authority_sha256)
+
+
 @asynccontextmanager
 async def read_only_snapshot(
     sessions: async_sessionmaker[AsyncSession],
@@ -520,60 +614,33 @@ async def read_only_snapshot(
 
 
 async def read_launchable(
-    sessions: async_sessionmaker[AsyncSession],
-    *,
-    evaluation_id: UUID,
-    assignment_sha256: str,
-) -> tuple[LaunchableAssignment, datetime]:
+    sessions: async_sessionmaker[AsyncSession], request: AttemptRequest
+) -> LaunchableAssignment:
+    """The runtime's launch predicates (inspect_launch, _lock_authorities), unlocked."""
     async with asyncio.timeout(20), read_only_snapshot(sessions) as session:
         now = await _now(session)
-        row = await session.get(CodingHostedAssignment, evaluation_id)
+        row = await session.get(CodingHostedAssignment, request.evaluation_id)
         require(row is not None, "hosted assignment unavailable")
         assert row is not None
         with refusal("hosted assignment authority differs"):
-            names = HostedAssignmentAuthority.__dataclass_fields__
-            values = {name: row.authority[name] for name in names}
-            for name in names:
-                if name.endswith("_id"):
-                    values[name] = UUID(values[name])
-            authority = HostedAssignmentAuthority(**values)
+            authority = stored_authority(row)
+            # Every operator pin must equal the assignment's own digest.
             require(
-                authority.projection() == row.authority
-                and authority.digest() == row.assignment_sha256 == assignment_sha256
-                and (
-                    authority.evaluation_id,
-                    authority.attempt_id,
-                    authority.release_row_id,
-                    authority.registration_sha256,
-                    authority.agent_id,
-                    authority.validator_hotkey,
-                    authority.artifact_sha256,
-                    authority.screened_image_sha256,
-                )
-                == (
-                    row.evaluation_id,
-                    row.attempt_id,
-                    row.release_row_id,
-                    row.registration_sha256,
-                    row.agent_id,
-                    row.validator_hotkey,
-                    row.artifact_sha256,
-                    row.screened_image_sha256,
-                )
-                and row.expires_at.timestamp() == authority.deadline_unix
-                and row.shadow_only is True
-                and row.weight_eligible is False,
+                authority_bound(
+                    row,
+                    authority,
+                    assignment_sha256=request.assignment_sha256,
+                    attempt_id=row.attempt_id,
+                    policy_sha256=request.inference_policy_sha256,
+                    execution_profile_sha256=request.execution_profile_sha256,
+                    grading_profile_sha256=request.grading_profile_sha256,
+                ),
                 "hosted assignment authority differs",
             )
         # The runtime requires an admitted, unstarted assignment at start. A config
         # is written only for that state, never ahead of validator admission.
         require(
-            row.admitted_at is not None
-            and row.started_at is None
-            and row.worker_id is None
-            and MINIMUM_REMAINING_SECONDS
-            <= (row.expires_at - now).total_seconds()
-            <= 3600,
+            launch_pending(row, now, minimum_remaining=MINIMUM_REMAINING_SECONDS),
             "hosted assignment is not launchable",
         )
         release = await session.get(CodingPrivateV2Release, row.release_row_id)
@@ -585,65 +652,47 @@ async def read_launchable(
             )
         )
         require(
-            release is not None
-            and not inactive
-            and release.registration_sha256 == row.registration_sha256
-            and release.shadow_only is True
-            and release.weight_eligible is False,
+            release_available(
+                release, inactive=inactive, registration_sha=row.registration_sha256
+            ),
             "hosted assignment release unavailable",
         )
         assert release is not None
         with refusal("hosted assignment release unavailable"):
-            registration = CodingPrivateV2RegistrationAuthority.model_validate(
-                release.registration_authority
-            )
-            require(
-                registration.registration_sha256 == row.registration_sha256,
-                "hosted assignment release unavailable",
-            )
+            registration = launch_registration(release, authority)
+            require(registration is not None, "hosted assignment release unavailable")
+            assert registration is not None
         agent = await session.get(Agent, row.agent_id)
         require(
-            agent is not None
-            and agent.sha256 == row.artifact_sha256
-            and agent.screened_image_sha256 == row.screened_image_sha256
-            and agent.status in SCOREABLE_AGENT_STATUSES
-            and agent.screened_image_verified_at is not None
-            and agent.screened_image_upload_id is not None
-            and agent.screened_image_size_bytes is not None
-            and agent.screened_image_id is not None
-            and agent.screened_image_ref is not None
-            and agent.screening_policy_version is not None
-            and agent.screening_policy_version >= SCREENING_POLICY_VERSION,
+            artifact_available(
+                agent,
+                artifact_sha=row.artifact_sha256,
+                image_sha=row.screened_image_sha256,
+            )
+            and screened_image_ready(agent),
             "hosted assignment artifact unavailable",
         )
         task = await session.scalar(
             select(CodingHostedPrivateTask).where(
-                CodingHostedPrivateTask.evaluation_id == evaluation_id
+                CodingHostedPrivateTask.evaluation_id == request.evaluation_id
             )
         )
-        require(
-            task is not None
-            and task.closed_at is None
-            and task.frozen_at is None
-            and _selection_matches(task, row),
-            "hosted assignment task unavailable",
-        )
+        require(task_open(task, row), "hosted assignment task unavailable")
         assert task is not None
-        return (
-            LaunchableAssignment(
-                authority,
-                registration,
-                release.private_input_authority_sha256,
-                task.catalog_index,
-                task.max_patch_bytes,
-            ),
-            now,
+        return LaunchableAssignment(
+            authority,
+            registration,
+            release.private_input_authority_sha256,
+            task.catalog_index,
+            task.max_patch_bytes,
         )
 
 
-def _profile(path: Path, digest: str, maximum: int, stage: str) -> tuple[bytes, dict]:
+def _profile(
+    layout: HostLayout, path: Path, digest: str, maximum: int, stage: str
+) -> tuple[bytes, dict]:
     with refusal(stage):
-        body = read_private(path, maximum)
+        body = trusted_file(path, layout.trusted_uid, maximum)
         value = _decode_json_document(body, maximum_bytes=maximum)
         require(
             sha(body) == digest
@@ -656,13 +705,28 @@ def _profile(path: Path, digest: str, maximum: int, stage: str) -> tuple[bytes, 
         return body, value
 
 
-def _stable(path: Path, maximum: int, stage: str, parse: Callable[[Path], Any]):
+def _stable(
+    read: Callable[[Path, int], bytes],
+    path: Path,
+    maximum: int,
+    stage: str,
+    parse: Callable[[Path], Any],
+):
     """Bracket a path-based loader between identical protected reads."""
     with refusal(stage):
-        before = read_private(path, maximum)
+        before = read(path, maximum)
         parsed = parse(path)
-        require(read_private(path, maximum) == before, stage)
+        require(read(path, maximum) == before, stage)
         return before, parsed
+
+
+def probe_fresh(checked: float, now: float, deadline_unix: int) -> bool:
+    """Not future-dated, and young enough for every possible evidence publication."""
+    return (
+        0 <= now - checked < PROBE_RECEIPT_MAX_AGE_SECONDS
+        and checked + PROBE_RECEIPT_MAX_AGE_SECONDS
+        > deadline_unix + EVIDENCE_PUBLICATION_SECONDS
+    )
 
 
 @dataclass(frozen=True)
@@ -677,13 +741,17 @@ def verify_authorities(
     layout: HostLayout,
     request: AttemptRequest,
     launchable: LaunchableAssignment,
+    storage: StorageAuthorities,
     now: float,
 ) -> VerifiedAuthorities:
+    # read_launchable already required the execution, grading and policy pins to
+    # equal the assignment, so each input is selected by an assignment digest.
     authority = launchable.authority
     execution, execution_value = _profile(
-        layout.inbox / f"execution-profile-{authority.execution_profile_sha256}.json",
+        layout,
+        layout.input("execution-profile", authority.execution_profile_sha256),
         authority.execution_profile_sha256,
-        16384,
+        EXECUTION_PROFILE_MAX_BYTES,
         "hosted execution profile refused",
     )
     with refusal("hosted execution profile refused"):
@@ -693,17 +761,20 @@ def verify_authorities(
             "hosted execution profile refused",
         )
     grading, grading_value = _profile(
-        layout.inbox / f"grading-profile-{authority.grading_profile_sha256}.json",
+        layout,
+        layout.input("grading-profile", authority.grading_profile_sha256),
         authority.grading_profile_sha256,
-        65536,
+        GRADING_PROFILE_MAX_BYTES,
         "hosted grading profile refused",
     )
     with refusal("hosted inference policy refused"):
-        policy_body = read_private(
-            layout.inbox / f"inference-policy-{authority.policy_sha256}.json", 16384
+        policy_body = trusted_file(
+            layout.input("inference-policy", authority.policy_sha256),
+            layout.trusted_uid,
+            POLICY_MAX_BYTES,
         )
         policy = HostedInferencePolicy.model_validate(
-            _decode_json_document(policy_body, maximum_bytes=16384)
+            _decode_json_document(policy_body, maximum_bytes=POLICY_MAX_BYTES)
         )
         require(
             canonical(policy.model_dump(mode="json", by_alias=True)) == policy_body
@@ -712,8 +783,14 @@ def verify_authorities(
             "hosted inference policy refused",
         )
     with refusal("hosted budget profile refused"):
-        budget_body = read_private(
-            layout.inbox / f"budget-profile-{policy.runtime_profile_sha256}.json",
+        # The budget is bound by the policy; the operator pin must name that one.
+        require(
+            policy.runtime_profile_sha256 == request.budget_profile_sha256,
+            "hosted budget profile refused",
+        )
+        budget_body = trusted_file(
+            layout.input("budget-profile", request.budget_profile_sha256),
+            layout.trusted_uid,
             16384,
         )
         budget = parse_coding_inference_json(
@@ -729,8 +806,9 @@ def verify_authorities(
             "hosted budget profile refused",
         )
     probe_body, (probe, _) = _stable(
-        layout.inbox / f"probe-receipt-{request.probe_receipt_sha256}.json",
-        1 << 20,
+        lambda path, maximum: trusted_file(path, layout.trusted_uid, maximum),
+        layout.input("probe-receipt", request.probe_receipt_sha256),
+        PUBLIC_AUTHORITY_MAX_BYTES,
         "hosted probe receipt refused",
         load_hippius_probe_receipt,
     )
@@ -743,18 +821,24 @@ def verify_authorities(
             probe.checked_at.replace("Z", "+00:00")
         ).timestamp()
         require(
-            0 <= now - checked < PROBE_MAX_AGE_SECONDS
-            and checked + PROBE_MAX_AGE_SECONDS
-            > authority.deadline_unix + FINALIZATION_SECONDS,
+            probe_fresh(checked, now, authority.deadline_unix),
             "hosted probe receipt is stale",
         )
     require(
-        probe.private_input_authority_sha256 == launchable.reader_authority_sha256,
+        probe.private_input_authority_sha256
+        == launchable.reader_authority_sha256
+        == storage.private_input_sha256,
         "hosted probe receipt authority differs",
     )
+    # build_runtime_services refuses this only after platform-consumed is written.
+    require(
+        probe.sealed_evidence_authority_sha256 == storage.sealed_evidence_sha256,
+        "hosted sealed evidence authority differs",
+    )
     evidence_body, wrapper = _stable(
+        read_private,
         layout.evidence_public_key,
-        65536,
+        PUBLIC_AUTHORITY_MAX_BYTES,
         "hosted evidence key refused",
         RsaOaepHippiusEvidenceKeyWrapper,
     )
@@ -780,10 +864,22 @@ def verify_authorities(
 def verify_release(layout: HostLayout, launchable: LaunchableAssignment) -> dict:
     root = layout.release(launchable.authority.registration_sha256)
     files = {
-        "transport_manifest_file": (root / "transport-manifest.json", 16 << 20),
-        "payload_authority_file": (root / "payload-authority.json", 16 << 20),
-        "publication_receipt_file": (root / "publication-receipt.json", 16 << 20),
-        "curator_public_key_file": (root / "curator-public.pem", 65536),
+        "transport_manifest_file": (
+            root / "transport-manifest.json",
+            RELEASE_AUTHORITY_MAX_BYTES,
+        ),
+        "payload_authority_file": (
+            root / "payload-authority.json",
+            RELEASE_AUTHORITY_MAX_BYTES,
+        ),
+        "publication_receipt_file": (
+            root / "publication-receipt.json",
+            RELEASE_AUTHORITY_MAX_BYTES,
+        ),
+        "curator_public_key_file": (
+            root / "curator-public.pem",
+            PUBLIC_AUTHORITY_MAX_BYTES,
+        ),
     }
     with refusal("hosted release authorities refused"):
         for path, maximum in files.values():
@@ -820,23 +916,22 @@ def refuse_existing_attempt(layout: HostLayout, attempt_id: UUID) -> Path:
     return root
 
 
-def _fsync_directory(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def write_attempt(
     layout: HostLayout, root: Path, files: dict[str, bytes], body: bytes
 ) -> Path:
     """Reserve the attempt exclusively, then publish the config by no-clobber link."""
     try:
+        layout.attempts.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    else:
+        fsync_directory(layout.home)
+    private_directory(layout.attempts)
+    try:
         root.mkdir(mode=0o700)
     except FileExistsError:
         raise HostedAttemptConfigError("hosted attempt already materialized") from None
-    _fsync_directory(layout.attempts)
+    fsync_directory(layout.attempts)
     private_directory(root)
     for name in ("authority", "runtime", "unwrap"):
         (root / name).mkdir(mode=0o700)
@@ -846,8 +941,11 @@ def write_attempt(
     write_private(partial, body)
     os.link(partial, config, follow_symlinks=False)
     os.unlink(partial)
-    _fsync_directory(root)
-    require(read_private(config, 65536) == body, "hosted attempt config write failed")
+    fsync_directory(root)
+    require(
+        read_private(config, CONFIG_MAX_BYTES) == body,
+        "hosted attempt config write failed",
+    )
     return config
 
 
@@ -858,6 +956,12 @@ async def materialize(
     units: Callable[[], None] = refuse_live_units,
     repository: Callable[[HostLayout, set[str]], str] = docker_repository,
 ) -> dict[str, Any]:
+    # The config records this revision's worker and interpreter; the worker unit
+    # must run the same one.
+    require(
+        request.runtime_revision == layout.runtime_revision,
+        "hosted runtime revision differs",
+    )
     units()
     refuse_live_custody(layout)
     host = verify_host(layout)
@@ -865,6 +969,7 @@ async def materialize(
     for path, maximum in secrets.values():
         with refusal("hosted secret file metadata refused"):
             secret_metadata(path, maximum)
+    storage = storage_authorities(layout)
     postgres_path, postgres_maximum = secrets["postgres_environment_file"]
     with refusal("hosted database environment refused"):
         database, _ = postgres_config(read_json(postgres_path, postgres_maximum))
@@ -872,15 +977,11 @@ async def materialize(
     engine = create_db_engine(database)
     try:
         sessions = create_session_maker(engine)
-        launchable, _ = await read_launchable(
-            sessions,
-            evaluation_id=request.evaluation_id,
-            assignment_sha256=request.assignment_sha256,
-        )
+        launchable = await read_launchable(sessions, request)
         authority = launchable.authority
         root = refuse_existing_attempt(layout, authority.attempt_id)
         now = time.time()
-        verified = verify_authorities(layout, request, launchable, now)
+        verified = verify_authorities(layout, request, launchable, storage, now)
         release = verify_release(layout, launchable)
         executor_repository = repository(layout, verified.image_digests)
         worker = uuid4()
@@ -919,15 +1020,11 @@ async def materialize(
         }
         with refusal("hosted attempt config invalid"):
             HostedPlatformRuntimeInput.model_validate(wire)
-            body = canonical(wire, 65536)
+            body = canonical(wire, CONFIG_MAX_BYTES)
         # Recheck live state and authority immediately before the exclusive write.
         units()
         refuse_live_custody(layout)
-        again, _ = await read_launchable(
-            sessions,
-            evaluation_id=request.evaluation_id,
-            assignment_sha256=request.assignment_sha256,
-        )
+        again = await read_launchable(sessions, request)
         require(again == launchable, "hosted assignment changed during materialization")
     finally:
         await engine.dispose()
@@ -939,6 +1036,7 @@ async def materialize(
         "worker_id": str(worker),
         "assignment_sha256": authority.digest(),
         "deadline_unix": authority.deadline_unix,
+        "runtime_revision": layout.runtime_revision,
         "registration_sha256": authority.registration_sha256,
         "execution_profile_sha256": authority.execution_profile_sha256,
         "grading_profile_sha256": authority.grading_profile_sha256,

@@ -28,7 +28,13 @@ def main() -> int:
         "--materialize-attempt-config", action="store_true", required=True
     )
     parser.add_argument("--evaluation-id", required=True)
+    parser.add_argument("--runtime-revision", required=True)
+    # Each pin must equal what Platform, the policy or the verified input derives.
     parser.add_argument("--assignment-sha256", required=True)
+    parser.add_argument("--execution-profile-sha256", required=True)
+    parser.add_argument("--grading-profile-sha256", required=True)
+    parser.add_argument("--inference-policy-sha256", required=True)
+    parser.add_argument("--budget-profile-sha256", required=True)
     parser.add_argument("--probe-receipt-sha256", required=True)
     parser.add_argument("--evidence-wrapping-key-sha256", required=True)
     try:
@@ -36,8 +42,10 @@ def main() -> int:
     except ValueError:
         print(
             "requires --materialize-attempt-config --evaluation-id <uuid> "
-            "--assignment-sha256 <hex> --probe-receipt-sha256 <hex> "
-            "--evidence-wrapping-key-sha256 <hex>",
+            "--runtime-revision <hex> --assignment-sha256 <hex> "
+            "--execution-profile-sha256 <hex> --grading-profile-sha256 <hex> "
+            "--inference-policy-sha256 <hex> --budget-profile-sha256 <hex> "
+            "--probe-receipt-sha256 <hex> --evidence-wrapping-key-sha256 <hex>",
             file=sys.stderr,
         )
         return 2
@@ -55,7 +63,12 @@ def main() -> int:
     try:
         request = AttemptRequest.parse(
             evaluation_id=args.evaluation_id,
+            runtime_revision=args.runtime_revision,
             assignment_sha256=args.assignment_sha256,
+            execution_profile_sha256=args.execution_profile_sha256,
+            grading_profile_sha256=args.grading_profile_sha256,
+            inference_policy_sha256=args.inference_policy_sha256,
+            budget_profile_sha256=args.budget_profile_sha256,
             probe_receipt_sha256=args.probe_receipt_sha256,
             evidence_wrapping_key_sha256=args.evidence_wrapping_key_sha256,
         )
