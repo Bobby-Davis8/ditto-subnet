@@ -143,6 +143,17 @@ provisioned custody-owned and worker-owned PostgreSQL environment copies (each
 reader requires its own `0600` file in a `0700` directory it owns). It never opens private material and has
 no command, path, host, project or revision inputs.
 
+`host-policy.py verify` is the first-provisioning check and requires an empty
+daemon, so it can only pass before images are imported. Once a root-owned mode
+`0600` import receipt exists under a root-sealed
+`/opt/ditto-coding-hosted-images/<approval>/`, the verifier reports that check as
+not applicable instead of failing. Ownership and mode of the daemon home, socket
+directory and socket stay required in both phases. Imported image identities are
+the custodian's post-import preflight
+([coding-native-host-preflight-v2.md](coding-native-host-preflight-v2.md)), not
+this workflow. Any receipt that isn't sealed that way counts as no import, so the
+empty-daemon check stays required.
+
 The identity is root-capable on that one host (OS Login admin), so the job always
 uses the `coding-hosted-operate` environment with `prevent_self_review: true`:
 whoever dispatches cannot approve. The same identity must never serve an

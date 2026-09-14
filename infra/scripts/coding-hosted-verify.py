@@ -4,7 +4,11 @@
 Runs as root through the protected coding-hosted-operate workflow. It never opens
 a private key, secret, or environment file: private paths are checked with lstat
 metadata only, the custody key is identified from its public half, and the
-rootless daemon is checked by the preinstalled non-root host-policy verifier.
+rootless daemon is checked by the preinstalled non-root host-policy verifier
+until images are imported. That verifier is the first-provisioning check and
+requires an empty daemon; after a root-sealed import receipt exists, imported
+images are verified by the custodian's post-import preflight instead
+(infra/docs/coding-native-host-preflight-v2.md).
 The report carries only pass/fail, counts, and path metadata, never host identity
 records, revisions, or approvals, because the workflow publishes it.
 """
@@ -27,6 +31,8 @@ EXPECTED_CUSTODY_SPKI_SHA256 = (
 RUNTIME_USER = "ditto-coding-hosted"
 CUSTODY_USER = "ditto-coding-custody"
 HOST_POLICY = "/usr/local/lib/ditto-coding-hosted/host-policy.py"
+DAEMON_HOME = "/var/lib/ditto-coding-hosted"
+DAEMON_SOCKET = "/run/ditto-coding-hosted/docker.sock"
 CUSTODY_PUBLIC_KEY = "/var/lib/ditto-coding-custody/keys/private-input-rsa-public.pem"
 CUSTODY_PRIVATE_KEY = "/var/lib/ditto-coding-custody/keys/private-input-rsa.pem"
 CUSTODY_RECEIPT = "/var/lib/ditto-coding-custody/keys/private-input-rsa-receipt.json"
@@ -127,7 +133,65 @@ def check_units() -> None:
     record("rootless docker daemon active", state == "active", {"state": state})
 
 
-def check_host_policy() -> None:
+def sealed(info: dict[str, object], kind: str) -> bool:
+    """Root-owned and not writable by group or others."""
+    return (
+        info.get("type") == kind
+        and info.get("owner") == "root"
+        and not int(str(info.get("mode", "0777")), 8) & 0o022
+    )
+
+
+def verified_imports() -> int:
+    """Count root-sealed image import receipts; anything unexpected counts as none."""
+    if not sealed(metadata(IMAGE_ROOT), "directory"):
+        return 0
+    try:
+        entries = sorted(os.scandir(IMAGE_ROOT), key=lambda entry: entry.name)
+    except OSError:
+        return 0
+    count = 0
+    for entry in entries:
+        receipt = metadata(os.path.join(entry.path, "import-receipt.json"))
+        if (
+            sealed(metadata(entry.path), "directory")
+            and sealed(receipt, "file")
+            and receipt.get("mode") == "0600"
+            and receipt.get("links") == 1
+        ):
+            count += 1
+    return count
+
+
+def check_host_policy(imports: int) -> None:
+    for name, path, kind, mode in (
+        ("rootless daemon home", DAEMON_HOME, "directory", "0700"),
+        (
+            "rootless daemon socket directory",
+            os.path.dirname(DAEMON_SOCKET),
+            "directory",
+            "0700",
+        ),
+        ("rootless daemon socket", DAEMON_SOCKET, "socket", "0600"),
+    ):
+        info = metadata(path)
+        record(
+            f"{name} is private to the daemon account",
+            info.get("type") == kind
+            and info.get("owner") == RUNTIME_USER
+            and info.get("mode") == mode,
+            info,
+        )
+    if imports:
+        # The bootstrap verifier requires zero images, so it cannot pass once
+        # approved images are imported; never treat that as a host failure.
+        record(
+            "preinstalled non-root host policy verify (socket, paths, empty daemon)",
+            False,
+            {"applicable": False, "verified_imports": imports},
+            required=False,
+        )
+        return
     policy = run(
         [
             "runuser",
@@ -184,7 +248,7 @@ def check_custody() -> None:
         )
 
 
-def check_runtime() -> None:
+def check_runtime(imports: int) -> None:
     root = metadata(RUNTIME_ROOT)
     record(
         "runtime root is root-owned and not group/world writable",
@@ -208,20 +272,10 @@ def check_runtime() -> None:
         {"installer": bundle, "installed_revisions": len(revisions)},
         required=False,
     )
-    try:
-        imports = sorted(
-            entry.name
-            for entry in os.scandir(IMAGE_ROOT)
-            if entry.is_dir(follow_symlinks=False)
-            and metadata(os.path.join(entry.path, "import-receipt.json")).get("type")
-            == "file"
-        )
-    except OSError:
-        imports = []
     record(
         "verified image imports",
-        bool(imports),
-        {"verified_imports": len(imports)},
+        imports > 0,
+        {"verified_imports": imports},
         required=False,
     )
 
@@ -251,10 +305,11 @@ def main() -> int:
     expected_host = socket.gethostname() == EXPECTED_HOSTNAME
     record("host identity", expected_host, {"expected": expected_host})
     if expected_host:
+        imports = verified_imports()
         check_units()
-        check_host_policy()
+        check_host_policy(imports)
         check_custody()
-        check_runtime()
+        check_runtime(imports)
         check_postgres_environment()
     ok = all(check["ok"] for check in checks if check["required"])
     json.dump(

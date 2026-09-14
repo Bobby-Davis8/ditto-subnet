@@ -265,3 +265,155 @@ def test_review_ruleset_covers_every_root_capable_surface() -> None:
         "infra/terraform/stacks/gcp-platform/coding-hosted*.tf",
         "infra/terraform/modules/coding-hosted-host/**",
     }
+
+
+def _simulated_host(
+    monkeypatch,
+    *,
+    receipt_owner: str | None,
+    policy_exit: int,
+    receipt_mode: str = "0600",
+    socket_owner: str = "ditto-coding-hosted",
+):
+    """Load the verifier against an in-memory healthy host."""
+    import importlib.util
+    import types
+
+    spec = importlib.util.spec_from_file_location("coding_hosted_verify", VERIFIER)
+    assert spec is not None and spec.loader is not None
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+
+    def entry(kind: str, owner: str, mode: str) -> dict:
+        return {"exists": True, "type": kind, "owner": owner, "mode": mode, "links": 1}
+
+    daemon, custody = verifier.RUNTIME_USER, verifier.CUSTODY_USER
+    image = verifier.IMAGE_ROOT + "/" + "a" * 64
+    tree = {
+        verifier.DAEMON_HOME: entry("directory", daemon, "0700"),
+        "/run/ditto-coding-hosted": entry("directory", daemon, "0700"),
+        verifier.DAEMON_SOCKET: entry("socket", socket_owner, "0600"),
+        verifier.CUSTODY_PUBLIC_KEY: entry("file", custody, "0644"),
+        verifier.CUSTODY_PRIVATE_KEY: entry("file", custody, "0600"),
+        verifier.CUSTODY_RECEIPT: entry("file", custody, "0600"),
+        verifier.RUNTIME_ROOT: entry("directory", "root", "0755"),
+        verifier.RUNTIME_BUNDLE: entry("file", "root", "0444"),
+        verifier.IMAGE_ROOT: entry("directory", "root", "0755"),
+        image: entry("directory", "root", "0755"),
+    }
+    if receipt_owner is not None:
+        tree[image + "/import-receipt.json"] = entry(
+            "file", receipt_owner, receipt_mode
+        )
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        if argv[:2] == ["systemctl", "is-active"] and len(argv) == 3:
+            return subprocess.CompletedProcess(argv, 0, b"active\n", b"")
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 3, b"inactive\ninactive\n", b"")
+        if argv[0] == "openssl":
+            return subprocess.CompletedProcess(argv, 0, b"der", b"")
+        if argv[-1] == "verify":
+            body = json.dumps({"schema": "dittobench-coding-hosted-daemon-check-v2"})
+            return subprocess.CompletedProcess(argv, policy_exit, body.encode(), b"")
+        return subprocess.CompletedProcess(argv, 0, b"active\n", b"")
+
+    monkeypatch.setattr(
+        verifier, "metadata", lambda path: tree.get(path, {"exists": False})
+    )
+    monkeypatch.setattr(verifier, "run", run)
+    monkeypatch.setattr(
+        verifier.socket, "gethostname", lambda: verifier.EXPECTED_HOSTNAME
+    )
+    monkeypatch.setattr(
+        verifier.pwd, "getpwnam", lambda _name: types.SimpleNamespace(pw_uid=1001)
+    )
+    monkeypatch.setattr(
+        verifier.hashlib,
+        "sha256",
+        lambda _body: types.SimpleNamespace(
+            hexdigest=lambda: verifier.EXPECTED_CUSTODY_SPKI_SHA256
+        ),
+    )
+    monkeypatch.setattr(
+        verifier.os,
+        "scandir",
+        lambda path: (
+            [types.SimpleNamespace(name="a" * 64, path=image)]
+            if path == verifier.IMAGE_ROOT
+            else []
+        ),
+    )
+    monkeypatch.setattr(verifier.sys, "stdout", __import__("io").StringIO())
+    status = verifier.main()
+    report = json.loads(verifier.sys.stdout.getvalue())
+    return status, report, calls
+
+
+def _check(report: dict, name: str) -> dict:
+    return next(check for check in report["checks"] if check["name"] == name)
+
+
+POLICY_CHECK = "preinstalled non-root host policy verify (socket, paths, empty daemon)"
+
+
+def test_verify_requires_the_empty_daemon_check_before_image_import(monkeypatch):
+    status, report, calls = _simulated_host(
+        monkeypatch, receipt_owner=None, policy_exit=0
+    )
+    assert status == 0 and report["ok"] is True
+    assert _check(report, POLICY_CHECK)["required"] is True
+    assert any(argv[-1] == "verify" for argv in calls)
+    # The bootstrap verifier failing (e.g. an unexpected image) fails verify.
+    status, report, _ = _simulated_host(monkeypatch, receipt_owner=None, policy_exit=1)
+    assert status == 1 and report["ok"] is False
+
+
+def test_verify_stays_usable_after_a_root_sealed_image_import(monkeypatch):
+    status, report, calls = _simulated_host(
+        monkeypatch, receipt_owner="root", policy_exit=1
+    )
+    assert status == 0 and report["ok"] is True
+    skipped = _check(report, POLICY_CHECK)
+    assert skipped["required"] is False and skipped["ok"] is False
+    assert skipped["detail"] == {"applicable": False, "verified_imports": 1}
+    assert not any(argv[-1] == "verify" for argv in calls)
+    for name in (
+        "rootless daemon home is private to the daemon account",
+        "rootless daemon socket directory is private to the daemon account",
+        "rootless daemon socket is private to the daemon account",
+    ):
+        assert _check(report, name)["required"] is True
+        assert _check(report, name)["ok"] is True
+
+
+def test_unsealed_import_receipt_never_relaxes_the_empty_daemon_check(monkeypatch):
+    status, report, calls = _simulated_host(
+        monkeypatch, receipt_owner="ditto-coding-hosted", policy_exit=1
+    )
+    assert status == 1 and report["ok"] is False
+    assert _check(report, POLICY_CHECK)["required"] is True
+    assert _check(report, "verified image imports")["detail"] == {"verified_imports": 0}
+    assert any(argv[-1] == "verify" for argv in calls)
+
+
+def test_import_phase_still_fails_closed_on_daemon_paths_and_loose_receipts(
+    monkeypatch,
+):
+    # A socket not owned by the daemon account fails verify even after import.
+    status, report, _ = _simulated_host(
+        monkeypatch, receipt_owner="root", policy_exit=1, socket_owner="root"
+    )
+    assert status == 1 and report["ok"] is False
+    assert (
+        _check(report, "rootless daemon socket is private to the daemon account")["ok"]
+        is False
+    )
+    # A root-owned receipt that is not mode 0600 does not count as an import.
+    status, report, calls = _simulated_host(
+        monkeypatch, receipt_owner="root", policy_exit=1, receipt_mode="0644"
+    )
+    assert status == 1 and _check(report, POLICY_CHECK)["required"] is True
+    assert any(argv[-1] == "verify" for argv in calls)
