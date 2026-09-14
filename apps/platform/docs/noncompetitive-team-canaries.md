@@ -78,9 +78,10 @@ winner projection:
 
 ## Visibility
 
-- **Public leaderboard.** Entries carry `team_canary: true`, `rank: null`,
-  `eligible: false` and `emission_eligible: false`. The dashboard shows a
-  "team canary" chip.
+- **Public leaderboard.** Entries carry `team_canary: true`, `rank: null` and
+  `eligible: false`. `emission_eligible` is `false`, or `null` when chain
+  registration is unknown (as for every agent); it is never `true`. The
+  dashboard shows a "team canary" chip.
 - **Operators.** `GET /api/v1/admin/noncompetitive-canaries` and the read-only
   Backroom tool `list_team_canaries` list every exclusion. Each entry shows its
   audit fields and the exact agents it currently removes, with their state.
