@@ -412,6 +412,44 @@ def test_playbook_group_connection_and_ci_registration() -> None:
     assert "tests/coding-hosted-postgres-environment.yml" in workflow
 
 
+def test_rehearsal_runs_only_in_the_infra_ansible_job() -> None:
+    workflows = ROOT / ".github/workflows"
+    infra = yaml.safe_load((workflows / "infra-ci.yml").read_text())
+    this_file = str(Path(__file__).relative_to(ROOT))
+    for trigger in ("pull_request", "push"):
+        assert this_file in infra[True][trigger]["paths"]
+    # Other role rehearsals may share the gate; exactly one step runs this file.
+    (step,) = [
+        step
+        for job in infra["jobs"].values()
+        for step in job["steps"]
+        if REHEARSAL_GATE in step.get("env", {}) and this_file in step["run"]
+    ]
+    assert step in infra["jobs"]["ansible"]["steps"]
+    assert step["env"] == {REHEARSAL_GATE: "1"}
+    assert step["working-directory"] == "${{ github.workspace }}"
+    # Lock-pinned pytest plugins plus the locked PyYAML version; no project install.
+    assert step["run"].split() == [
+        "uv",
+        "run",
+        "--locked",
+        "--only-group",
+        "dev",
+        "--with",
+        "pyyaml==6.0.3",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-rs",
+        this_file,
+    ]
+    uses = [step.get("uses", "") for step in infra["jobs"]["ansible"]["steps"]]
+    assert any(action.startswith("astral-sh/setup-uv@") for action in uses)
+    for other in workflows.glob("*.yml"):
+        if other.name != "infra-ci.yml":
+            assert REHEARSAL_GATE not in other.read_text(), other.name
+
+
 def test_docs_describe_every_forgery_guard() -> None:
     docs = (ROOT / "infra/docs/coding-hosted-postgres-v2.md").read_text()
     section = _flat(
@@ -430,6 +468,7 @@ def test_docs_describe_every_forgery_guard() -> None:
         "`refreshing`",
         "`maintenance`",
         "An empty listing",
+        f"`{REHEARSAL_GATE}=1`",
     ):
         assert phrase in section, phrase
 

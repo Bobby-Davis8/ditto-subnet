@@ -163,6 +163,13 @@ The role behaves as follows:
 - It starts nothing. Admission still depends on the separately reviewed HBA and
   firewall rules above.
 
+Root tests check the guard structure. With `DITTO_ANSIBLE_REHEARSAL=1` they
+also run the enabled tasks through ansible-core 2.21.2 against a temporary tree
+with a stand-in password. That rehearsal proves that preset results and document
+variables, forged `ansible_facts`, `refreshing`, `maintenance` and unknown unit
+states, and trailing-newline inputs are refused before anything is written. The
+infra CI Ansible job runs it.
+
 The `role_coding_hosted` group connects through IAP only
 (`group_vars/role_coding_hosted.yml`). Every native host role therefore reaches
 the private address the same way the Platform PostgreSQL VM is reached.
