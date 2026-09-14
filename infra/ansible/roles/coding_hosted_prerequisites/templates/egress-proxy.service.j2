@@ -6,7 +6,7 @@ Description=Native Coding candidate egress proxy (empty allowlist, refuses every
 [Service]
 Type=exec
 DynamicUser=yes
-ExecStart=/usr/bin/python3 -I -B /usr/local/lib/ditto-coding-hosted/egress-proxy.py {{ coding_hosted_prerequisites_host_address }} 18090
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/ditto-coding-hosted/egress-proxy.py {{ coding_hosted_prerequisites_host_address }} {{ coding_hosted_prerequisites_proxy_port }}
 Restart=no
 TimeoutStartSec=30
 TimeoutStopSec=30
@@ -36,7 +36,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_INET
 SocketBindDeny=any
-SocketBindAllow=ipv4:tcp:18090
+SocketBindAllow=ipv4:tcp:{{ coding_hosted_prerequisites_proxy_port }}
 IPAddressDeny=any
 IPAddressAllow={{ coding_hosted_prerequisites_host_address }}/32
 TasksMax=128

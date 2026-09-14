@@ -20,6 +20,8 @@
   connection: local
   gather_facts: false
   become: false
+  vars_files:
+    - ../roles/coding_hosted_prerequisites/vars/main.yml
   vars:
     valid:
       confirmation: CONVERGE NATIVE CODING HOST PREREQUISITES

@@ -8,6 +8,7 @@ There is no upstream connection code; the unit also denies other IP peers.
 
 import ipaddress
 import re
+import socket
 import socketserver
 import sys
 import time
@@ -18,6 +19,10 @@ PRIVATE = tuple(
 )
 MAX_HEAD = 8192
 DEADLINE_SECONDS = 5.0
+# Closing with unread request bytes sends RST, which can discard the refusal
+# before the client reads it. Discard at most this much after half-closing.
+DRAIN_BYTES = 65536
+DRAIN_SECONDS = 1.0
 FORBIDDEN = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 NOT_ALLOWED = (
     b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -59,12 +64,32 @@ class Refusal(socketserver.BaseRequestHandler):
                 head += chunk
             self.request.settimeout(DEADLINE_SECONDS)
             self.request.sendall(response(head))
+            self.request.shutdown(socket.SHUT_WR)
+            self.drain()
         except OSError:
             return
 
+    def drain(self):
+        """Read and discard a bounded remainder so close sends FIN, not RST."""
+        deadline = time.monotonic() + DRAIN_SECONDS
+        remaining = DRAIN_BYTES
+        while remaining > 0:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                return
+            self.request.settimeout(timeout)
+            chunk = self.request.recv(min(remaining, MAX_HEAD))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+
 
 class Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = False
+    # Each refusal closes first, leaving the port in TIME_WAIT; SO_REUSEADDR lets
+    # a stopped proxy restart at once. Linux still refuses a second listener on
+    # the same address without SO_REUSEPORT, which stays off.
+    allow_reuse_address = True
+    allow_reuse_port = False
     daemon_threads = True
     request_queue_size = 64
 
