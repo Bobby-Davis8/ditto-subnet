@@ -298,8 +298,11 @@ describe('Backroom MCP tools', () => {
     // inline execute) plus the bounded board projection; its tutorials live in
     // get_backroom_tool_help. The two policy-v13 decision-record reads add one
     // uuid input and one outcome-filtered page input (the decision record
-    // itself is a response).
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(130_000)
+    // itself is a response). Raised from 130_000 to 132_000 when the
+    // screener fan-out shadow read (#1893) landed on main between those two
+    // reads being measured and merged: 131_168 with all three, none of them
+    // a tutorial.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(132_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. 24_500 admits the screener
