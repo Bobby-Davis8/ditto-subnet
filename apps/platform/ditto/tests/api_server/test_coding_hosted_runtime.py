@@ -456,6 +456,7 @@ async def test_factory_and_generated_go_config_complete_native_flow(
         serialized = read_private(path, 65536)
         # The default remains the existing host-namespace router listener.
         assert b'"router_namespace":"host"' in serialized
+        assert b"router_expires_at_unix" not in serialized
         for secret in (
             b"synthetic-provider-key",
             b"synthetic-reader-secret",
@@ -696,15 +697,39 @@ def test_router_namespace_defaults_to_host_and_accepts_only_known_modes():
     default = HostedRuntimeHostSettings.model_validate(host)
     assert default.router_namespace == "host"
     assert default.model_dump()["router_namespace"] == "host"
+    assert default.router_expires_at_unix is None
+    assert "router_expires_at_unix" not in default.model_dump(exclude_none=True)
     rootless = HostedRuntimeHostSettings.model_validate(
-        {**host, "router_namespace": "rootless-netns"}
+        {
+            **host,
+            "router_namespace": "rootless-netns",
+            "router_expires_at_unix": 2000000600,
+        }
     )
-    assert rootless.model_dump()["router_namespace"] == "rootless-netns"
+    assert rootless.model_dump(exclude_none=True)["router_namespace"] == (
+        "rootless-netns"
+    )
+    assert rootless.model_dump(exclude_none=True)["router_expires_at_unix"] == (
+        2000000600
+    )
     for value in ("", "Host", "rootless", "slirp4netns", " rootless-netns", 1, None):
         with pytest.raises(ValidationError):
             HostedRuntimeHostSettings.model_validate(
                 {**host, "router_namespace": value}
             )
+    # The worker-enforced router window exists exactly in rootless-netns mode.
+    for changes in (
+        {"router_namespace": "rootless-netns"},
+        {"router_namespace": "rootless-netns", "router_expires_at_unix": None},
+        {"router_namespace": "rootless-netns", "router_expires_at_unix": 0},
+        {"router_namespace": "rootless-netns", "router_expires_at_unix": "2000000600"},
+        {"router_namespace": "rootless-netns", "router_expires_at_unix": True},
+        {"router_namespace": "rootless-netns", "router_expires_at_unix": 2**32},
+        {"router_expires_at_unix": 2000000600},
+        {"router_namespace": "host", "router_expires_at_unix": 2000000600},
+    ):
+        with pytest.raises(ValidationError):
+            HostedRuntimeHostSettings.model_validate({**host, **changes})
 
 
 async def test_runtime_rejects_stale_probe_without_start(
