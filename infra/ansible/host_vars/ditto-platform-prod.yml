@@ -15,6 +15,13 @@ platform_domain: platform-api.heyditto.ai
 # the matching ditto-subnet value. No trailing slash.
 platform_inference_public_base_url: https://dittobench.ai
 
+# Validator-facing API origin for signed coding grant exchanges. Validators
+# require the offered exchange_url to start with their own
+# VALIDATOR_PLATFORM_API_URL (https://platform-api.heyditto.ai/, trailing slash
+# stripped), so this must not follow the inference origin above. Rendered only
+# while platform_coding_shadow_enabled is true, which this host does not set.
+platform_coding_validator_api_base_url: https://platform-api.heyditto.ai
+
 platform_alias_domains:
   - subnet.heyditto.ai
   - dittobench.ai
