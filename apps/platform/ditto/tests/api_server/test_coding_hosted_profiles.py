@@ -165,7 +165,9 @@ def test_profiles_pass_launch_checks_and_platform_canonical_loaders(
     assert receipt["catalog_index"] == INDEX
     assert receipt["task_commitment_sha256"] == task["task_commitment_sha256"]
     assert receipt["grader_bundle_sha256"] == task["artifacts"]["grader_bundle"]
-    assert receipt["test_manifest_sha256"] == task["artifacts"]["grader_bundle"]
+    # Hosted v2 binds no test manifest, and never reuses the grader bundle digest.
+    assert "test_manifest_sha256" not in receipt
+    assert b"test_manifest" not in grading
     assert receipt["max_patch_bytes"] == LIMITS["MaxPatchBytes"]
     assert receipt["launch_checks_passed"] is True
     assert receipt["approved"] is False

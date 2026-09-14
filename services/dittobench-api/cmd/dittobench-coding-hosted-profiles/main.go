@@ -207,9 +207,7 @@ func run(ctx context.Context, requestPath, payloadPath, objectsPath, outputPath 
 		Schema: "dittobench-coding-hosted-grading-profile-v2", ImageDigest: req.ImageDigest,
 		GraderContractSHA256: codinggrader.HostedGraderContractSHA256(),
 		GraderBundleSHA256:   task.Artifacts["grader_bundle"],
-		// No hosted-v2 source of truth exists; follow the public canary precedent.
-		TestManifestSHA256: task.Artifacts["grader_bundle"],
-		ResourcePolicy:     policy, Build: build, TestGroups: groups,
+		ResourcePolicy:       policy, Build: build, TestGroups: groups,
 		ExecutionTimeout: time.Duration(req.ExecutionTimeoutMilliseconds) * time.Millisecond,
 	}
 	gradingBody, err := codinghostedworker.GradingProfileBytes(grading)
@@ -238,8 +236,8 @@ func run(ctx context.Context, requestPath, payloadPath, objectsPath, outputPath 
 		"request_sha256": sha(requestBody), "image_digest": req.ImageDigest,
 		"execution_profile_sha256": executionSHA, "grading_profile_sha256": sha(gradingBody),
 		"max_patch_bytes": policy.CandidateLimits.MaxPatchBytes, "grader_bundle_sha256": grading.GraderBundleSHA256,
-		"test_manifest_sha256": grading.TestManifestSHA256, "grader_contract_sha256": grading.GraderContractSHA256,
-		"launch_checks_passed": true, "approved": false, "shadow_only": true, "weight_eligible": false,
+		"grader_contract_sha256": grading.GraderContractSHA256,
+		"launch_checks_passed":   true, "approved": false, "shadow_only": true, "weight_eligible": false,
 	})
 	if err != nil {
 		return nil, errRejected

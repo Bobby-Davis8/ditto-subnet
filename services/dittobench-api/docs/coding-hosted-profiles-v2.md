@@ -43,10 +43,19 @@ equal. The grader contract digest is the compiled
 `HostedGraderContractSHA256`. The grader bundle digest comes from the payload
 authority.
 
-No hosted-v2 source of truth exists for `test_manifest_sha256`; only its format
-is checked. Following the public canary precedent (`codingcanary`), it is set to
-the grader bundle digest. Reviewers should confirm or replace that choice
-before approving a digest.
+Hosted v2 binds no `test_manifest_sha256`. Nothing in the private task or
+release authority enumerates tests, and a grader archive is not a test manifest,
+so no other digest stands in for one. The grading profile, grader plan, hosted
+grader contract field lists and grader evidence all omit the key. The worker,
+executor and Platform reject a profile, manifest or evidence that carries one.
+v1 still requires its curator test manifest unchanged.
+
+What hosted v2 does bind is the grader bundle digest, whose extracted tree must
+equal the task's `hidden_grader_tree_sha256`, and the reviewed `test_groups`
+commands and expected counts inside `grading_profile_sha256`. A canonical test
+manifest committed into the private task authority needs a new private corpus
+release. It remains a prerequisite for weighted activation
+(`docs/coding-memory-v2-weighted-activation.md`).
 
 ## Checks
 
@@ -78,8 +87,7 @@ writes three mode-`0600` files: `execution-profile.json`,
 `grading-profile.json` and `receipt.json`. It prints only the receipt.
 
 The receipt records the task identity, payload and request digests, both profile
-digests, `max_patch_bytes`, image, grader bundle, test manifest and grader
-contract digests. It also sets `launch_checks_passed=true` and `approved=false`.
+digests, `max_patch_bytes`, image, grader bundle and grader contract digests. It also sets `launch_checks_passed=true` and `approved=false`.
 It contains no argv, suite path, source or private object bytes.
 
 ## What this does not establish
@@ -89,7 +97,8 @@ It contains no argv, suite path, source or private object bytes.
   private compatibility matrix, and that matrix must be repeated against the
   imported native images before a canary (see `coding_runtime/qualification`).
 - **Approval.** Launch checks passing is not approval. The profile digests,
-  limits, budgets and the test-manifest choice still need independent review.
+  limits, budgets, driver commands and expected counts still need independent
+  review.
   The approved digests must then be bound together with a current inference
   policy and budget profile.
 - **Activation.** It changes no Platform, host, release, assignment or reward

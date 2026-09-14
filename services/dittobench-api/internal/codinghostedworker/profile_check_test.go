@@ -23,7 +23,7 @@ func profileCheckFixture() GradingProfile {
 	command := func(group string) codingrunner.CommandSpec {
 		return codingrunner.CommandSpec{ID: group, Argv: []string{"dittobench-test-driver", "--group", group, "--suite", "tests/" + group + ".py"}, Timeout: time.Minute}
 	}
-	return GradingProfile{Schema: "dittobench-coding-hosted-grading-profile-v2", ImageDigest: "sha256:" + strings.Repeat("a", 64), GraderContractSHA256: codinggrader.HostedGraderContractSHA256(), GraderBundleSHA256: strings.Repeat("b", 64), TestManifestSHA256: strings.Repeat("b", 64), ResourcePolicy: policy, Build: codinggrader.BuildSpec{Command: codingrunner.CommandSpec{ID: "build", Argv: []string{"python", "-m", "compileall", "app.py"}, Timeout: time.Minute}}, TestGroups: []codinggrader.TestGroupSpec{{Group: "hidden", Command: command("hidden"), ExpectedTotal: 3}, {Group: "visible", Command: command("visible"), ExpectedTotal: 2}}, ExecutionTimeout: 10 * time.Minute}
+	return GradingProfile{Schema: "dittobench-coding-hosted-grading-profile-v2", ImageDigest: "sha256:" + strings.Repeat("a", 64), GraderContractSHA256: codinggrader.HostedGraderContractSHA256(), GraderBundleSHA256: strings.Repeat("b", 64), ResourcePolicy: policy, Build: codinggrader.BuildSpec{Command: codingrunner.CommandSpec{ID: "build", Argv: []string{"python", "-m", "compileall", "app.py"}, Timeout: time.Minute}}, TestGroups: []codinggrader.TestGroupSpec{{Group: "hidden", Command: command("hidden"), ExpectedTotal: 3}, {Group: "visible", Command: command("visible"), ExpectedTotal: 2}}, ExecutionTimeout: 10 * time.Minute}
 }
 
 func tarBundle(t *testing.T, names ...string) []byte {
@@ -49,6 +49,9 @@ func TestGradingProfileBytesAreExactCanonicalAndContractBound(t *testing.T) {
 	body, err := GradingProfileBytes(profile)
 	if err != nil || codingcontract.RequireExactCanonicalJSON(body) != nil {
 		t.Fatal("valid profile did not produce canonical bytes")
+	}
+	if bytes.Contains(body, []byte("test_manifest")) {
+		t.Fatal("hosted grading profile names a test manifest")
 	}
 	again, err := GradingProfileBytes(profile)
 	if err != nil || !bytes.Equal(body, again) {
