@@ -248,14 +248,44 @@ def test_command_line_never_opens_the_seed(tmp_path):
     )
 
 
-def test_update_script_runs_this_entry_point_before_touching_pm2():
-    updater = (PLATFORM_ROOT / "scripts" / "update.sh").read_text()
-    command = f"uv run python -m {MODULE} --check-metadata"
+def test_a_process_that_does_not_own_the_seed_is_refused(tmp_path, monkeypatch):
+    """deploy (or a relay) cannot use a ditto-api-owned placement.
 
-    assert updater.count(command) == 1
-    check = updater.index(command)
-    assert updater.index("\n. ./.env.deploy\n") < check
-    assert check < updater.index('deploy_stage="infra"')
-    assert check < updater.index("uv run alembic upgrade head")
-    assert check < updater.index("pm2 jlist 2>/dev/null | node scripts/pm2_deploy_plan")
+    The loader and the metadata check compare every owner with the effective
+    UID of the process, so a seed that belongs to ditto-api fails closed for any
+    other user even if its file permissions were widened. Only the effective
+    UID is simulated here; nothing is opened.
+    """
+    seed = _placement(tmp_path)
+    config = HostedControlSignerConfig(True, seed, KEY.ss58_address)
+    owner = os.geteuid()
+    real_open = os.open
+
+    def guarded_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(seed):
+            pytest.fail("a non-owner opened the seed")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    monkeypatch.setattr(os, "open", guarded_open)
+
+    with pytest.raises(ApiServerConfigError):
+        preflight.check_hosted_signer_seed_metadata(config)
+    with pytest.raises(ApiServerConfigError):
+        load_hosted_control_signer(config, process_role="platform")
+
+
+def test_update_script_never_checks_or_opens_the_seed_as_the_deploy_user():
+    """The metadata preflight runs as ditto-api, never from update.sh."""
+    updater = (PLATFORM_ROOT / "scripts" / "update.sh").read_text()
+
+    assert MODULE not in updater
+    assert "DITTO_CODING_HOSTED_SIGNER_SEED_FILE" not in updater
+    refusal = updater.index("ditto-api would run under pm2")
+    assert updater.index("\n. ./.env.deploy\n") < refusal
+    assert refusal < updater.index('deploy_stage="infra"')
+    assert refusal < updater.index("uv run alembic upgrade head")
+    assert refusal < updater.index(
+        "pm2 jlist 2>/dev/null | node scripts/pm2_deploy_plan"
+    )
     assert 'case "${DITTO_CODING_HOSTED_CONTROL_ENABLED-false}" in' in updater

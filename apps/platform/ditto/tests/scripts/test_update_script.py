@@ -149,6 +149,7 @@ def _run_update(
     npm_source: str | None = None,
     diverged_migrations: bool = False,
     last_deploy_record: str | None = None,
+    control: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, str, int]:
     repo = tmp_path / "repo"
     scripts = repo / "scripts"
@@ -179,6 +180,9 @@ def _run_update(
         (repo / ".env.deploy").write_text(initial_deploy_env)
 
     (repo / "jlist.json").write_text(jlist if jlist is not None else _jlist(repo))
+    # Behaviour switches for the recording sudo/systemctl/docker fakes below.
+    for name, body in (control or {}).items():
+        (repo / name).write_text(body)
 
     # `git rev-parse HEAD` reads a file the fake `git reset --hard <sha>`
     # rewrites, so a test can observe update.sh rolling the checkout back.
@@ -208,7 +212,37 @@ def _run_update(
         (repo / "dashboard").mkdir()
         (repo / "dashboard" / "package.json").write_text("{}\n")
         _write_executable(fake_bin / "npm", npm_source)
-    _write_executable(fake_bin / "docker", ":\n")
+    _write_executable(
+        fake_bin / "docker",
+        f'printf "%s\\n" "docker $*" >> "{repo}/docker-actions.log"\n',
+    )
+    # sudo records its argument vector and, for the release installer, the
+    # request it would read on stdin. It never runs anything.
+    _write_executable(
+        fake_bin / "sudo",
+        f'printf "%s\\n" "sudo $*" >> "{repo}/sudo-actions.log"\n'
+        'case "${3:-}" in\n'
+        f'  install|activate) cat > "{repo}/sudo-stdin-$3.log" ;;\n'
+        "esac\n"
+        f'if [ -e "{repo}/sudo-${{3:-}}-exit" ]; then\n'
+        f'  [ "${{3:-}}" = logs ] && echo "synthetic journal line"\n'
+        f'  exit "$(cat "{repo}/sudo-${{3:-}}-exit")"\n'
+        "fi\n"
+        f'[ "${{3:-}}" = logs ] && echo "synthetic journal line"\n'
+        "exit 0\n",
+    )
+    _write_executable(
+        fake_bin / "systemctl",
+        f'printf "%s\\n" "systemctl $*" >> "{repo}/systemctl-actions.log"\n'
+        'case "${1:-}" in\n'
+        f'  show) cat "{repo}/systemctl-show" 2>/dev/null ||'
+        " printf 'ActiveState=active\\nMainPID=5151\\nNRestarts=0\\n' ;;\n"
+        f'  is-enabled) cat "{repo}/systemctl-is-enabled" 2>/dev/null ||'
+        " echo disabled ;;\n"
+        f'  is-active) cat "{repo}/systemctl-is-active" 2>/dev/null ||'
+        " echo inactive ;;\n"
+        "esac\n",
+    )
     _write_executable(
         fake_bin / "pm2",
         f'if [ "${{1:-}}" = "jlist" ]; then cat "{repo}/jlist.json"; fi\n'
@@ -238,6 +272,9 @@ def _run_update(
             "DITTO_DEPLOY_BRANCH",
             "DITTO_DEPLOY_COMMIT",
             "DITTO_HEALTH_TIMEOUT",
+            "DITTO_PLATFORM_API_SUPERVISOR",
+            "DITTO_PLATFORM_API_UNIT_FILE",
+            "DITTO_PLATFORM_PYLON_UNIT",
             "DITTO_TAOSTATS_API_KEY",
             "DITTO_TAOSTATS_SECRET_ID",
             "DITTO_TAOSTATS_SECRET_PROJECT",
@@ -253,6 +290,9 @@ def _run_update(
     env.update(deploy_env_vars or {})
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
     env["DITTO_HEALTH_TIMEOUT"] = health_timeout
+    # A unit file left by an earlier dedicated-identity deploy; absent unless a
+    # test creates it.
+    env["DITTO_PLATFORM_API_UNIT_FILE"] = str(repo / "ditto-platform-api.service")
 
     with ExitStack() as stack:
         port = stack.enter_context(_health_server(health_status, health_commit))
@@ -774,57 +814,61 @@ def test_update_records_and_announces_the_deployed_commit(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Hosted-v2 control signer: ditto-api refuses to start on a missing or unsafe
-# seed, so an enabled environment is metadata-checked before pm2 is touched.
+# Process supervision and the hosted-v2 control signer.
+#
+# Default: ditto-api under this user's pm2 and Pylon through its docker compose,
+# with no sudo at all. DITTO_PLATFORM_API_SUPERVISOR=systemd runs ditto-api as
+# the dedicated ditto-api user from a sealed release, reached only through the
+# root installer's four exact sudo commands. The deploy user never checks,
+# stats or opens the control-signer seed in either mode.
 
-SIGNER_CHECK = (
-    "run python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata"
-)
+INSTALLER = "/usr/local/sbin/ditto-platform-api-release"
+SYSTEMD_ENV = "BASE_SETTING=kept\nDITTO_PLATFORM_API_SUPERVISOR=systemd\n"
 
 
-def _recording_uv(tmp_path: Path, *, signer_check_exit: int = 0) -> str:
+def _log(tmp_path: Path, name: str) -> list[str]:
+    path = tmp_path / "repo" / f"{name}-actions.log"
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def _recording_uv(tmp_path: Path) -> str:
     log = tmp_path / "repo" / "uv-actions.log"
-    return (
-        'printf "%s|%s\\n" "$*" "${DITTO_CODING_HOSTED_CONTROL_ENABLED-unset}"'
-        f' >> "{log}"\n'
-        'case "$*" in\n'
-        f"  *coding_hosted_signer_preflight*) exit {signer_check_exit} ;;\n"
-        "esac\n"
-    )
+    return f'printf "%s\\n" "$*" >> "{log}"\n'
 
 
 def _uv_actions(tmp_path: Path) -> list[str]:
-    return (tmp_path / "repo" / "uv-actions.log").read_text().splitlines()
+    path = tmp_path / "repo" / "uv-actions.log"
+    return path.read_text().splitlines() if path.exists() else []
 
 
-@pytest.mark.parametrize(
-    "initial_env",
-    [
-        "BASE_SETTING=kept\n",
-        "BASE_SETTING=kept\nDITTO_CODING_HOSTED_CONTROL_ENABLED=false\n",
-        "DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n"
-        "DITTO_CODING_HOSTED_CONTROL_ENABLED=0\n",
-    ],
-)
-def test_update_skips_the_signer_check_while_the_env_disables_it(
-    tmp_path: Path, initial_env: str
+def test_default_supervision_uses_pm2_and_compose_without_sudo(
+    tmp_path: Path,
 ) -> None:
     result, _, _, _ = _run_update(
         tmp_path,
         gcloud_source="exit 1\n",
-        initial_env=initial_env,
-        uv_source=_recording_uv(tmp_path, signer_check_exit=1),
+        initial_env="BASE_SETTING=kept\nDITTO_PLATFORM_API_SUPERVISOR=pm2\n"
+        "DITTO_PLATFORM_PYLON_UNIT=\n",
+        uv_source=_recording_uv(tmp_path),
     )
 
     assert result.returncode == 0, result.stderr
-    assert not any(SIGNER_CHECK in action for action in _uv_actions(tmp_path))
-    assert "hosted-v2 control signer" not in result.stdout
+    assert _log(tmp_path, "sudo") == []
+    assert _log(tmp_path, "systemctl") == []
+    assert _log(tmp_path, "docker") == [
+        "docker compose up -d --wait postgres minio pylon"
+    ]
+    assert "pm2 reload scripts/ecosystem.config.js --only ditto-api" in _actions(
+        tmp_path
+    )
+    assert not any("coding_hosted_signer" in action for action in _uv_actions(tmp_path))
 
 
 @pytest.mark.parametrize("value", ["true", "1", "TRUE", ""])
-def test_update_checks_signer_metadata_before_infra_migrations_and_pm2(
+def test_update_refuses_an_enabled_signer_while_ditto_api_would_run_as_deploy(
     tmp_path: Path, value: str
 ) -> None:
+    """Only ditto-api may read the seed: pm2 would run it as this user."""
     result, _, _, _ = _run_update(
         tmp_path,
         gcloud_source="exit 1\n",
@@ -833,36 +877,273 @@ def test_update_checks_signer_metadata_before_infra_migrations_and_pm2(
             f"DITTO_CODING_HOSTED_CONTROL_ENABLED={value}\n"
         ),
         uv_source=_recording_uv(tmp_path),
-    )
-
-    assert result.returncode == 0, result.stderr
-    actions = _uv_actions(tmp_path)
-    check = actions.index(f"{SIGNER_CHECK}|{value}")
-    assert actions[check - 1].startswith("sync ")
-    assert actions[check + 1].startswith("run alembic upgrade head|")
-    assert "seed not read" in result.stdout
-    assert "pm2 reload scripts/ecosystem.config.js" in _actions(tmp_path)
-
-
-def test_update_refuses_an_enabled_signer_that_fails_its_metadata_check(
-    tmp_path: Path,
-) -> None:
-    """ditto-api would crash-loop, so the old process must keep serving."""
-    result, _, _, _ = _run_update(
-        tmp_path,
-        gcloud_source="exit 1\n",
-        initial_env="DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n",
-        uv_source=_recording_uv(tmp_path, signer_check_exit=1),
         health_commit=RUNNING_SHA,
     )
 
     assert result.returncode != 0
-    assert "failed the" in result.stderr
-    assert "metadata check, so ditto-api would not start" in result.stderr
+    assert "ditto-api would run under pm2" in result.stderr
+    assert "platform_api_service_identity_enabled" in result.stderr
+    assert not any(action.startswith("run ") for action in _uv_actions(tmp_path))
+    assert _log(tmp_path, "sudo") == []
+    assert _log(tmp_path, "docker") == []
+    assert not (tmp_path / "repo" / "pm2-actions.log").exists()
+    assert f"git reset --hard {RUNNING_SHA}" in _git_actions(tmp_path)
+    record = _deploy_record(tmp_path)
+    assert (record["result"], record["stage"], record["rolled_back"]) == (
+        "failed",
+        "signer-preflight",
+        "yes",
+    )
+
+
+@pytest.mark.parametrize(
+    "initial_env",
+    [
+        "BASE_SETTING=kept\n",
+        "DITTO_CODING_HOSTED_CONTROL_ENABLED=false\n",
+        "DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n"
+        "DITTO_CODING_HOSTED_CONTROL_ENABLED=0\n",
+    ],
+)
+def test_a_disabled_signer_deploys_under_pm2_as_before(
+    tmp_path: Path, initial_env: str
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path, gcloud_source="exit 1\n", initial_env=initial_env
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "hosted-v2 control signer" not in result.stdout
+    assert _log(tmp_path, "sudo") == []
+
+
+@pytest.mark.parametrize("signer", ["false", "true"])
+def test_dedicated_identity_installs_migrates_then_activates_the_sealed_release(
+    tmp_path: Path, signer: str
+) -> None:
+    payment = "5G6fGXnXFYdLM3ZyAm9whUbCY4ziQzcbMiTEqZB5c9KekTtR"
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source=(
+            'case "$*" in\n'
+            '  *platform-taostats-api-key*) printf "%s\\n" "tao-test:example" ;;\n'
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        ),
+        initial_env=(
+            f"{SYSTEMD_ENV}DITTO_CODING_HOSTED_CONTROL_ENABLED={signer}\n"
+            "DITTO_ADMIN_API_TOKEN=base-secret-never-forwarded\n"
+        ),
+        deploy_env_vars={"DITTO_UPLOAD_PAYMENT_ADDRESS": payment},
+        uv_source=_recording_uv(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _log(tmp_path, "sudo") == [
+        f"sudo -n {INSTALLER} install",
+        f"sudo -n {INSTALLER} activate",
+    ]
+    repo = tmp_path / "repo"
+    # Only the revision and the deploy-owned keys cross into root, on stdin.
+    install_request = (repo / "sudo-stdin-install.log").read_text()
+    assert install_request.splitlines() == [
+        f"revision={TARGET_SHA}",
+        f"DITTO_UPLOAD_PAYMENT_ADDRESS={payment}",
+        "DITTO_TAOSTATS_API_KEY=tao-test:example",
+        "DITTO_TAOSTATS_VALIDATOR_NAMES_URL="
+        "https://api.taostats.io/api/dtao/validator/available/v1?netuid=118",
+    ]
+    assert "base-secret" not in install_request
+    assert (repo / "sudo-stdin-activate.log").read_text() == f"revision={TARGET_SHA}\n"
+    assert "tao-test:example" not in result.stdout + result.stderr
+
+    # The install precedes Pylon and migrations; activation follows both.
+    order = result.stdout
+    assert (
+        order.index("==> installing the sealed ditto-api release")
+        < order.index("==> ensuring infra")
+        < order.index("==> applying migrations")
+        < order.index("==> activating ditto-api release")
+    )
+    # pm2 keeps only the cleanup job; its old ditto-api copy is retired.
+    actions = _actions(tmp_path)
+    assert "--only ditto-api," not in actions and "--only ditto-api " not in actions
+    assert (
+        "pm2 reload scripts/ecosystem.config.js --only ditto-screened-image-cleanup"
+        in (actions)
+    )
+    assert "pm2 delete ditto-api" in actions
+    assert "managed by ditto-platform-api.service" in result.stdout
+    assert "ditto-api: online and serving 200" in result.stdout
+    assert "systemctl show --property=ActiveState" in "\n".join(
+        _log(tmp_path, "systemctl")
+    )
+    # The deploy user never runs the seed preflight itself.
+    assert not any("coding_hosted_signer" in action for action in _uv_actions(tmp_path))
+    assert result.stdout.rstrip().endswith(f"deployed-commit={TARGET_SHA}")
+
+
+def test_dedicated_identity_does_not_retire_a_pm2_app_it_never_had(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    jlist = json.loads(_jlist(repo))
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=SYSTEMD_ENV,
+        jlist=json.dumps([app for app in jlist if app["name"] != "ditto-api"]),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "pm2 delete ditto-api" not in _actions(tmp_path)
+
+
+def test_a_failed_release_install_rolls_back_before_anything_serves(
+    tmp_path: Path,
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=f"{SYSTEMD_ENV}DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n",
+        uv_source=_recording_uv(tmp_path),
+        control={"sudo-install-exit": "1"},
+        health_commit=RUNNING_SHA,
+    )
+
+    assert result.returncode != 0
+    assert "sealed ditto-api release could not be" in result.stderr
+    assert _log(tmp_path, "sudo") == [f"sudo -n {INSTALLER} install"]
+    assert _log(tmp_path, "docker") == []
     assert not any(action.startswith("run alembic") for action in _uv_actions(tmp_path))
     assert not (tmp_path / "repo" / "pm2-actions.log").exists()
     assert f"git reset --hard {RUNNING_SHA}" in _git_actions(tmp_path)
     record = _deploy_record(tmp_path)
-    assert record["result"] == "failed"
-    assert record["stage"] == "signer-preflight"
-    assert record["rolled_back"] == "yes"
+    assert (record["stage"], record["rolled_back"]) == ("api-release", "yes")
+
+
+def test_a_unit_that_fails_to_start_fails_the_deploy_with_its_journal(
+    tmp_path: Path,
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=SYSTEMD_ENV,
+        control={"systemctl-show": "ActiveState=failed\nMainPID=0\nNRestarts=10\n"},
+        health_timeout="4",
+    )
+
+    assert result.returncode != 0
+    assert "ditto-api is in ditto-platform-api.service state 'errored'" in result.stderr
+    assert "ditto-platform-api.service status/pid/restarts: errored\t0\t10" in (
+        result.stderr
+    )
+    assert "synthetic journal line" in result.stderr
+    assert _log(tmp_path, "sudo")[-1] == f"sudo -n {INSTALLER} logs"
+    # The serving process was replaced, so the checkout stays put.
+    assert _deploy_record(tmp_path)["rolled_back"] == "no"
+
+
+def test_returning_to_pm2_stops_the_dedicated_unit_first(tmp_path: Path) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        control={
+            "ditto-platform-api.service": "[Unit]\n",
+            "systemctl-is-enabled": "enabled\n",
+            "systemctl-is-active": "active\n",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _log(tmp_path, "sudo") == [f"sudo -n {INSTALLER} stop"]
+    stop = result.stdout.index("==> stopping ditto-platform-api.service")
+    assert stop < result.stdout.index("==> reloading:")
+    assert _deploy_record(tmp_path)["result"] == "ok"
+
+
+def test_a_leftover_disabled_unit_is_left_alone(tmp_path: Path) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        control={"ditto-platform-api.service": "[Unit]\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _log(tmp_path, "sudo") == []
+
+
+def test_the_pylon_unit_replaces_deploy_docker_access(tmp_path: Path) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env="BASE_SETTING=kept\nDITTO_PLATFORM_PYLON_UNIT=ditto-platform-pylon.service\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _log(tmp_path, "docker") == []
+    assert _log(tmp_path, "sudo") == [
+        "sudo -n /usr/bin/systemctl restart ditto-platform-pylon.service"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        (
+            "DITTO_PLATFORM_PYLON_UNIT",
+            "evil.service",
+            "DITTO_PLATFORM_PYLON_UNIT must be",
+        ),
+        (
+            "DITTO_PLATFORM_API_SUPERVISOR",
+            "root",
+            "DITTO_PLATFORM_API_SUPERVISOR must be",
+        ),
+    ],
+)
+def test_unknown_supervision_values_stop_the_deploy(
+    tmp_path: Path, key: str, value: str, message: str
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=f"{key}={value}\n",
+        health_commit=RUNNING_SHA,
+    )
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert _log(tmp_path, "sudo") == []
+    assert _log(tmp_path, "docker") == []
+    assert not (tmp_path / "repo" / "pm2-actions.log").exists()
+
+
+def test_update_script_fixes_every_privileged_command() -> None:
+    """sudoers allows exact argument vectors; the script may not vary them."""
+    updater = (ROOT / "scripts" / "update.sh").read_text()
+    assert (
+        "readonly api_release_command=/usr/local/sbin/ditto-platform-api-release\n"
+        in (updater)
+    )
+    assert "readonly api_unit=ditto-platform-api.service\n" in updater
+    assert "readonly pylon_unit=ditto-platform-pylon.service\n" in updater
+    sudo_lines = sorted(
+        line.strip()
+        for line in updater.splitlines()
+        if "sudo -n" in line and not line.lstrip().startswith("#")
+    )
+    assert sudo_lines == sorted(
+        [
+            'if ! api_release_request | sudo -n "$api_release_command" install; then',
+            'sudo -n /usr/bin/systemctl restart "$pylon_unit"',
+            'sudo -n "$api_release_command" stop',
+            "printf 'revision=%s\\n' \"$deploy_target\" | "
+            'sudo -n "$api_release_command" activate',
+            'sudo -n "$api_release_command" logs >&2 || \\',
+        ]
+    )
+    # No journalctl or docker as root from this script, and no seed check.
+    assert "journalctl" not in updater
+    assert "coding_hosted_signer_preflight" not in updater
+    assert "DITTO_CODING_HOSTED_SIGNER_SEED_FILE" not in updater

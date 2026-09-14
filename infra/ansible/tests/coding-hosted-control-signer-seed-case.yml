@@ -41,7 +41,7 @@
     - name: Exercise the seed guard
       ansible.builtin.import_tasks: ../roles/platform_app/tasks/coding_hosted_signer_seed_stat.yml
       vars:
-        platform_owner: "{{ seed_case.owner | default(fixture_user) }}"
+        platform_api_process_user: "{{ seed_case.owner | default(fixture_user) }}"
         platform_coding_hosted_signer_guard_ancestors: >-
           {{ ['/'] if seed_case.root_ancestor_only | default(false) else [seed_case_root.path] }}
         platform_coding_hosted_signer_guard_directory: "{{ seed_case_root.path }}/signer"
@@ -68,8 +68,8 @@
   vars:
     expected_guard:
       ancestor: Require safe hosted-v2 control signer seed ancestors
-      directory: Require the Platform-owned 0700 seed directory
-      seed: Require the pre-placed single-link 0600 32-byte seed owned by the Platform user
+      directory: Require the ditto-api-owned 0700 seed directory
+      seed: Require the pre-placed single-link 0600 32-byte seed owned by ditto-api
   ansible.builtin.assert:
     that:
       - seed_case_accepted == seed_case.accept

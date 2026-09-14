@@ -33,6 +33,9 @@ GUARD_VARS = {
 ACTIVATION_FLAGS = (
     "platform_coding_hosted_control_enabled",
     "validator_stack_coding_hosted_control_enabled",
+    # The signer's isolation prerequisites are reviewed activations too.
+    "platform_api_service_identity_enabled",
+    "platform_pylon_root_unit_enabled",
 )
 # Activation is a reviewed change: a host_vars (or workflow) file that sets an
 # activation flag truthy must be listed here, in the same reviewed pull request.
@@ -231,13 +234,14 @@ def test_disabled_platform_converge_never_reaches_the_seed_path() -> None:
             "when": "platform_coding_hosted_control_enabled | bool",
         }
     ]
-    # Runs straight after preflight: before any other platform_app task. The
-    # playbook's base role runs before this role, so it is not "first on the host".
+    # Runs straight after preflight and the fact naming the API user: before
+    # any other platform_app task. The playbook's base role runs before this
+    # role, so it is not "first on the host".
     include = names.index(references[0]["name"])
-    assert (
-        names[include - 1]
-        == "Validate env-sourced configuration before rendering anything"
-    )
+    assert names[include - 2 : include] == [
+        "Validate env-sourced configuration before rendering anything",
+        "Resolve the user that runs ditto-api",
+    ]
     assert include < names.index("Render .env")
     playbook = _load(ANSIBLE / "playbooks/gcp-platform-app.yml")[0]
     assert playbook["roles"][:2] == ["base", "platform_app"]
@@ -261,7 +265,14 @@ def test_disabled_platform_converge_never_reaches_the_seed_path() -> None:
         "platform_coding_hosted_signer_hotkey != "
         "(platform_screener_hotkey | default('', true) | string | trim)"
     ) in profile
-    assert "platform_owner != 'root'" in profile
+    # Only ditto-api may read the seed: the dedicated identity and the root
+    # Pylon unit (deploy outside the docker group) are both required.
+    assert {
+        "platform_api_service_identity_enabled | bool",
+        "platform_pylon_root_unit_enabled | bool",
+        "platform_api_process_user == 'ditto-api'",
+        "platform_owner not in ['root', 'ditto-api']",
+    } <= set(profile)
 
     # The guard checks exactly the literal path platform.env.j2 renders.
     assert signer[1]["ansible.builtin.import_tasks"] == (
@@ -292,48 +303,58 @@ def test_seed_guard_mirrors_the_platform_private_file_contract() -> None:
         for task in guard
         if "ansible.builtin.assert" in task
     }
+    # Owner rules name the ditto-api process user, never platform_owner:
+    # a deploy-owned directory, seed or ancestor fails the guard.
     assert conditions["Require safe hosted-v2 control signer seed ancestors"] == [
         "item.stat.exists",
         "item.stat.isdir",
         "not item.stat.islnk",
-        "item.stat.pw_name | default('') in ['root', platform_owner]",
+        "item.stat.pw_name | default('') in ['root', platform_api_process_user]",
         "not item.stat.wgrp",
         "not item.stat.woth",
     ]
     directory = "platform_coding_hosted_signer_directory_stat.stat"
-    assert conditions["Require the Platform-owned 0700 seed directory"] == [
+    assert conditions["Require the ditto-api-owned 0700 seed directory"] == [
         f"{directory}.exists",
         f"{directory}.isdir",
         f"not {directory}.islnk",
-        f"{directory}.pw_name | default('') == platform_owner",
+        f"{directory}.pw_name | default('') == platform_api_process_user",
         f"{directory}.mode == '0700'",
     ]
     seed = "platform_coding_hosted_signer_seed_stat.stat"
     seed_guard = (
-        "Require the pre-placed single-link 0600 32-byte seed "
-        "owned by the Platform user"
+        "Require the pre-placed single-link 0600 32-byte seed owned by ditto-api"
     )
     assert conditions[seed_guard] == [
         f"{seed}.exists",
         f"{seed}.isreg",
         f"not {seed}.islnk",
-        f"{seed}.pw_name | default('') == platform_owner",
+        f"{seed}.pw_name | default('') == platform_api_process_user",
         f"{seed}.mode == '0600'",
         f"{seed}.nlink == 1",
         f"{seed}.size == 32",
     ]
+    assert (
+        "platform_owner"
+        not in (PLATFORM_ROLE / "tasks/coding_hosted_signer_seed_stat.yml").read_text()
+    )
 
 
-def test_platform_owner_is_the_pm2_api_user() -> None:
+def test_deploy_runs_pm2_and_ditto_api_runs_as_itself_when_isolated() -> None:
     defaults = _load(PLATFORM_ROLE / "defaults/main.yml")
     all_vars = _load(ANSIBLE / "group_vars/all.yml")
     main = (PLATFORM_ROLE / "tasks/main.yml").read_text()
     deploy = (ROOT / ".github/workflows/platform-deploy.yml").read_text()
+    unit = (PLATFORM_ROLE / "templates/ditto-platform-api.service.j2").read_text()
 
+    # deploy still owns pm2 (relays, cleanup, and ditto-api by default) and
+    # runs update.sh; with the identity enabled ditto-api runs as ditto-api.
     assert defaults["platform_owner"] == "{{ deploy_user | default('deploy') }}"
     assert all_vars["deploy_user"] == "deploy"
     assert "pm2 startup systemd -u {{ platform_owner }}" in main
     assert "sudo -iu deploy bash -lc" in deploy
+    assert "\nUser=ditto-api\nGroup=ditto-api\n" in unit
+    assert "platform_owner" not in unit
 
 
 def test_validator_trust_registration_is_default_off_and_distinct() -> None:
@@ -555,13 +576,22 @@ def test_ceremony_doc_keeps_key_custody_out_of_automation() -> None:
         "hosted_control_configured",
         "Rotation",
         "Revocation",
-        "Risks and open decisions",
-        "Any process running as `deploy` can read the seed",
+        "Residual risks",
         "REVIEWED_ACTIVATIONS",
         "coding_hosted_signer_preflight --check-metadata",
+        # Peyton's 2026-09-15 decision, stated in the doc it governs.
+        "The only non-root identity that can open it",
+        "completely separate from the offline curator Ed25519",
+        "Neither seed, online or curator, may ever be placed in CI, Git, Telegram,\n"
+        "workflow artifacts, command arguments or logs.",
+        "owner `ditto-api`",
+        "Immediate",
+        "Reviewed activation",
+        "the CI identity is\n  root on the host",
     ):
         assert required in doc, required
-    # Nothing may claim relays, CI or deploy tooling are kept out by the OS.
+    # Root, CI and deploy tooling are named as residual paths; nothing claims
+    # an absolute boundary against them.
     for claim in ("cannot read", "cannot reach", "can't read", "before anything"):
         assert claim not in doc, claim
     platform_doc = (
