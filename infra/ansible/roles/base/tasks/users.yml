@@ -43,10 +43,13 @@
     comment: "Ditto Deploy"
     password: "*"  # disabled password
 
-- name: Ensure team members exist with sudo + ditto group
+# systemd-journal gives team members read-only journal access without sudo, so
+# `journalctl` runs as the member and no pager or journalctl option runs as
+# root. The deploy service account is deliberately not a member.
+- name: Ensure team members exist with sudo, ditto and read-only journal groups
   ansible.builtin.user:
     name: "{{ item }}"
-    groups: "{{ [deploy_group | default('ditto'), 'sudo'] }}"
+    groups: "{{ [deploy_group | default('ditto'), 'sudo', 'systemd-journal'] }}"
     shell: /bin/bash
     state: present
     create_home: true
@@ -74,6 +77,16 @@
   loop_control:
     label: "{{ item.0.key }}"
 
+# Every member of the ditto group gets these rules, and that includes the
+# deploy service account. Two grants were removed because they gave root:
+#   * `/bin/journalctl *` accepted any option as root, for example
+#     --cursor-file= (writes a root-owned file at any path), --vacuum-*,
+#     --setup-keys, and the pager, which has a shell escape wherever systemd's
+#     secure pager mode is not in effect.
+#   * `/bin/systemctl status ditto-*` also ran the pager as root.
+# Neither command needs root to read: team members are in systemd-journal
+# (above) and run `journalctl -u <unit>` and `systemctl status <unit>` without
+# sudo. Operators with OS Login admin keep their own full sudo, as before.
 - name: Ensure team sudoers grant
   ansible.builtin.copy:
     dest: /etc/sudoers.d/ditto-team
@@ -83,14 +96,14 @@
     validate: /usr/sbin/visudo -cf %s
     content: |
       # Managed by infra/ansible/roles/base. Edits here are wiped on next run.
-      # Service management without password
+      # Service management without password. There is deliberately no
+      # journalctl or systemctl status rule: both ran a pager and arbitrary
+      # options as root. Read logs through the systemd-journal group instead.
       %ditto ALL=(ALL) NOPASSWD: /bin/systemctl restart ditto-*
       %ditto ALL=(ALL) NOPASSWD: /bin/systemctl stop ditto-*
       %ditto ALL=(ALL) NOPASSWD: /bin/systemctl start ditto-*
-      %ditto ALL=(ALL) NOPASSWD: /bin/systemctl status ditto-*
       %ditto ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
       %ditto ALL=(ALL) NOPASSWD: /bin/systemctl reload caddy
-      %ditto ALL=(ALL) NOPASSWD: /bin/journalctl *
 
       # Switch to deploy user
       %ditto ALL=(deploy) NOPASSWD: ALL
