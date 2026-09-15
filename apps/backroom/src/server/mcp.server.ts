@@ -706,6 +706,17 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   // repeating the excerpt semantics that get_backroom_tool_help carries.
   read_screening_source_file:
     'Read a bounded line range (max 400 lines) from one file in a screened submission. Get the line first from search_screening_source, or from flagged path:line evidence. Requires backroom:artifact:read.',
+  // Concise catalog lines for four reads whose full notes previously rode in
+  // every session's catalog. The notes stay verbatim in get_backroom_tool_help;
+  // this reclaims whole-payload headroom instead of raising the budget.
+  get_screening_quarantine_contexts:
+    'Review context for up to 50 quarantines; each item returns its context or its own error. Never returns source or artifact URLs.',
+  get_copy_review_source_diff:
+    'Per-file diff manifest between a held agent and its matched agent: added, removed, modified, identical or renamed, line counts, and normalized-identical copies. Requires backroom:artifact:read.',
+  list_screening_submissions:
+    'Page SN118 submissions newest first. generation=active (default) is the current benchmark admission set; all is the cross-benchmark audit view. detail=full returns every attempt.',
+  get_benchmark_contract_refresh:
+    'Inspect whether one submission\'s stale benchmark contract can be safely rebuilt, with any blocking reason. Read-only.',
 }
 
 export function createBackroomMcpServer(props: McpGrantProps) {

@@ -295,7 +295,9 @@ describe('Backroom MCP tools', () => {
     // history read tool adds one more small input schema. The batched ATH
     // rulings triple adds the rulings-document schema twice (inline preview and
     // inline execute) plus the bounded board projection; its tutorials live in
-    // get_backroom_tool_help.
+    // get_backroom_tool_help. Four long read notes (quarantine contexts, copy
+    // diff manifest, submissions page, contract refresh) moved to concise
+    // catalog lines to reclaim ~1,050 chars rather than raise this budget.
     expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(130_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
@@ -970,6 +972,20 @@ describe('Backroom MCP tools', () => {
     expect(payload.guidance.length).toBeGreaterThan(3_000)
     expect(payload.guidance).toContain('APPLY QUEUE POLICY SETTINGS')
     expect(payload.guidance).toContain('deferred_source_review')
+
+    // Reads whose catalog line was shortened keep their full notes verbatim.
+    for (const [tool, needle] of [
+      ['list_screening_submissions', 'get_screening_submission is the exact one-row detail path'],
+      ['get_copy_review_source_diff', 'a reformatted copy'],
+      ['get_screening_quarantine_contexts', 'one stale queue row does not hide the rest'],
+      ['get_benchmark_contract_refresh', 'accepted-score count, active-screening state'],
+    ] as const) {
+      const help = readJsonResult(
+        await client.callTool({ name: 'get_backroom_tool_help', arguments: { tool } }),
+      ) as { summary: string; guidance: string }
+      expect(help.guidance).toContain(needle)
+      expect(help.summary.length).toBeLessThan(help.guidance.length)
+    }
 
     await client.close()
     await server.close()
