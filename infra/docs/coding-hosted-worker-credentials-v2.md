@@ -180,7 +180,7 @@ adding an operation never edits the script or a shared registry. It:
   `ANSIBLE_*` and `_ANSIBLE_*` variable (including `ANSIBLE_CONFIG`,
   `ANSIBLE_KEEP_REMOTE_FILES`, `ANSIBLE_DEBUG`, `ANSIBLE_VERBOSITY`,
   `ANSIBLE_LOG_PATH`, callback, strategy, plugin and library paths and
-  `ANSIBLE_REMOTE_TEMP`), `LD_*`, `DYLD_*`, `OPENSSL_*`, `GCONV_*`, `GLIBC_*`, `UV_PYTHON*`,
+  `ANSIBLE_REMOTE_TEMP`), `LD_*`, `DYLD_*`, `OPENSSL_*`, `GCONV_*`, `GLIBC_*`, `UV_PYTHON` and its install mirrors,
   `CLOUDSDK_PYTHON*`, `SSL_CERT_FILE`/`SSL_CERT_DIR`, `UV_NO_VERIFY_HASHES`,
   `UV_INSECURE_HOST`, `UV_CONFIG_FILE`, every `PYTHON*` variable except
   `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `PYTHONIOENCODING`,
