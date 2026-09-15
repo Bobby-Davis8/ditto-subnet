@@ -128,6 +128,11 @@ root-owned ancestors, no links) and `nsenter`, then applies the topology check
 before creating private state, the router listener or the control socket, re-verifies the listener after construction,
 and creates the control socket last.
 
+`POST /v1/coding/certifier/canary` re-runs checks 2–4 before touching the
+backend and answers `503 placement` if any fails, so a stale listener or swapped
+socket after claim is an infrastructure refusal, never a failed certification
+attributed to the candidate.
+
 The validator worker calls readiness before issuing a lease and again between
 issue and claim. It refuses (and aborts an issued lease) unless every flag is
 true, the reported runtime image digest and canary manifest digest equal its
