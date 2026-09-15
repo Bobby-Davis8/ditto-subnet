@@ -4,6 +4,67 @@
 # guard below reads only values this run produced, and the write goes through a
 # role-local module that carries the secrets as a no_log parameter.
 
+# main.yml refuses preset internal names before it freezes the gate, but
+# --start-at-task can begin at the gate freeze and skip that static task.
+# --start-at-task cannot enter this dynamically included file, so this first
+# in-include guard repeats the refusal where it cannot be skipped: only the
+# three inputs and the gate main.yml froze may carry the prefix (so a preset
+# register, capture or document is refused), no DITTO_CODING_WORKER_* or
+# DITTO_CODING_HIPPIUS_* variable may be defined, and the raw enabled flag must
+# itself be boolean true, so a preset gate fact alone (with enabled false or
+# unset) cannot open the run. default(false, true) turns an undefined-class
+# template error into false rather than leaking it; varnames lists names without
+# rendering their values.
+- name: Refuse a preset internal name, a preset gate or a credential-named variable
+  ansible.builtin.assert:
+    that:
+      - (coding_hosted_worker_credentials_enabled | default(false, true)) is sameas true
+      - >-
+        lookup('ansible.builtin.varnames', '^coding_hosted_worker_credentials_(?!cleanup_)', wantlist=True)
+        | sort == ['coding_hosted_worker_credentials_confirmation',
+        'coding_hosted_worker_credentials_enabled',
+        'coding_hosted_worker_credentials_gate',
+        'coding_hosted_worker_credentials_source_revision']
+      - >-
+        lookup('ansible.builtin.varnames',
+        '(?i)^(DITTO_CODING_WORKER_|DITTO_CODING_HIPPIUS_)', wantlist=True) | length == 0
+    fail_msg: >-
+      Enable this run only with coding_hosted_worker_credentials_enabled=true and the three
+      documented inputs; a preset gate, capture, registered result or a credential-named Ansible
+      variable is set, or --start-at-task skipped the enable flag. Nothing was written.
+    quiet: true
+
+# hosts: role_coding_hosted makes an inventory_hostname/group check tautological,
+# and the host reports its own name, so without --limit any VM labelled
+# role=coding_hosted that reports this hostname would receive the credentials.
+# ansible_play_batch is computed from the run's actual targeting and is not
+# overridable by -e; require the batch to be exactly the one dedicated host.
+- name: Require the run to target exactly the one dedicated host
+  ansible.builtin.assert:
+    that:
+      - ansible_play_batch == ['ditto-coding-hosted-v2']
+    fail_msg: >-
+      Run this only against the single dedicated host with
+      --limit ditto-coding-hosted-v2; the play batch is not exactly that host. Nothing was written.
+    quiet: true
+
+# The write module carries the credentials to the host. With SSH pipelining off
+# the AnsiballZ module file is written to the login user's remote tmp during the
+# run and can persist on interrupt; ANSIBLE_KEEP_REMOTE_FILES keeps it on
+# purpose. Refuse before any secret-carrying task unless pipelining is on and no
+# remote files are kept. (ansible_pipelining reflects the effective connection
+# setting; the repo ansible.cfg turns pipelining on for the SSH connection.)
+- name: Require SSH pipelining on and no kept remote files before carrying secrets
+  ansible.builtin.assert:
+    that:
+      - (ansible_pipelining | default(false)) is sameas true
+      - not (lookup('config', 'DEFAULT_KEEP_REMOTE_FILES') is sameas true)
+    fail_msg: >-
+      Run with SSH pipelining on (the repo ansible.cfg sets it) and without
+      ANSIBLE_KEEP_REMOTE_FILES, so the module carrying the credentials is never left in the
+      host's remote temp directory. Nothing was written.
+    quiet: true
+
 # Enabled materialization must inspect the real host; the disabled localhost
 # fixture covers check mode. Refusing it keeps the write and verification below
 # unconditional, with no check-mode branch a forged fact could steer.
@@ -53,7 +114,6 @@
 - name: Require the dedicated host
   ansible.builtin.assert:
     that:
-      - inventory_hostname in groups.get('role_coding_hosted', [])
       - coding_hosted_worker_credentials_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_worker_credentials_identity.ansible_facts.ansible_architecture == 'x86_64'
       - coding_hosted_worker_credentials_identity.ansible_facts.ansible_distribution == 'Debian'

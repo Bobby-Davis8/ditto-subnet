@@ -60,6 +60,10 @@ def _split(private_dir):
 
 
 def _require_reader_dir(fd, uid, label):
+    # Cleanup requires the expected owner and no group/other write, but --
+    # unlike the write module -- does not require mode 0700, so a directory
+    # left at a wrong mode can still be cleaned up. The observed mode is
+    # reported for the operator to reconcile; see docs for this asymmetry.
     info = os.fstat(fd)
     if not stat.S_ISDIR(info.st_mode):
         raise Unsafe(f"the {label} is not a directory")
@@ -67,18 +71,20 @@ def _require_reader_dir(fd, uid, label):
         raise Unsafe(f"the {label} is not owned by the worker")
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise Unsafe(f"the {label} is writable by group or others")
+    return info
 
 
 def _open_private(private_dir, uid):
     components = _split(private_dir)
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    mode = None
     try:
         for index, component in enumerate(components):
             try:
                 child = os.open(component, _DIR_FLAGS, dir_fd=fd)
             except FileNotFoundError:
                 os.close(fd)
-                return None
+                return None, None
             except OSError as error:
                 if error.errno in (errno.ENOTDIR, errno.ELOOP):
                     raise Unsafe("a private directory component is a symlink") from None
@@ -87,11 +93,12 @@ def _open_private(private_dir, uid):
             fd = child
             if index == len(components) - 2:
                 _require_reader_dir(fd, uid, "worker home")
-        _require_reader_dir(fd, uid, "private directory")
+        info = _require_reader_dir(fd, uid, "private directory")
+        mode = format(stat.S_IMODE(info.st_mode), "04o")
     except BaseException:
         os.close(fd)
         raise
-    return fd
+    return fd, mode
 
 
 def _unlink_name(dir_fd, name, uid, check_mode):
@@ -129,36 +136,55 @@ def _remove_leftover_temps(dir_fd, uid, check_mode):
 
 
 def remove_all(private_dir, owner_uid, *, check_mode=False):
-    dir_fd = _open_private(private_dir, owner_uid)
+    dir_fd, dir_mode = _open_private(private_dir, owner_uid)
     if dir_fd is None:
         return {
             "changed": False,
             "removed": [],
             "already_absent": list(NAMES),
+            "refused": [],
+            "not_attempted": [],
             "leftover_temps": [],
+            "private_dir_present": False,
+            "private_dir_mode": None,
         }
+    removed = []
+    already_absent = []
+    refused = []
+    not_attempted = []
+    temps = []
     try:
-        states = {
-            name: _unlink_name(dir_fd, name, owner_uid, check_mode) for name in NAMES
-        }
-        temps = _remove_leftover_temps(dir_fd, owner_uid, check_mode)
-        if not check_mode:
-            os.fsync(dir_fd)
-            for name in NAMES:
-                try:
-                    os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                raise Unsafe(f"{name} is still present after removal")
+        for index, name in enumerate(NAMES):
+            try:
+                state = _unlink_name(dir_fd, name, owner_uid, check_mode)
+            except Unsafe as error:
+                # Report every path: what was removed, what refused and why, and
+                # what was not attempted after the refusal. Do not continue.
+                refused.append(f"{name}: {error}")
+                not_attempted = list(NAMES[index + 1 :])
+                break
+            (already_absent if state == "absent" else removed).append(name)
+        else:
+            temps = _remove_leftover_temps(dir_fd, owner_uid, check_mode)
+            if not check_mode:
+                os.fsync(dir_fd)
+                for name in NAMES:
+                    try:
+                        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    refused.append(f"{name}: still present after removal")
     finally:
         os.close(dir_fd)
-    removed = [n for n in NAMES if states[n] in ("removed", "would_remove")]
-    absent = [n for n in NAMES if states[n] == "absent"]
     return {
         "changed": bool(removed or temps),
         "removed": removed,
-        "already_absent": absent,
+        "already_absent": already_absent,
+        "refused": refused,
+        "not_attempted": not_attempted,
         "leftover_temps": temps,
+        "private_dir_present": True,
+        "private_dir_mode": dir_mode,
     }
 
 
@@ -175,17 +201,32 @@ def main():
     try:
         account = pwd.getpwnam(module.params["owner"])
     except KeyError:
-        module.fail_json(msg="Refused: the worker account does not exist.")
+        module.fail_json(msg="Refused: the worker account does not exist.", removed=[])
+    empty = {
+        "removed": [],
+        "already_absent": [],
+        "not_attempted": list(NAMES),
+        "leftover_temps": [],
+    }
     try:
         result = remove_all(
             module.params["private_dir"], account.pw_uid, check_mode=module.check_mode
         )
     except Unsafe as error:
-        module.fail_json(msg=f"Refused: {error}; nothing further was removed.")
+        # A directory-level refusal (symlinked component, wrong owner): nothing
+        # was removed. Report every list so the operator sees the full picture.
+        module.fail_json(
+            msg=f"Refused: {error}; nothing was removed.", refused=[str(error)], **empty
+        )
     except OSError as error:
         module.fail_json(
-            msg=f"Failed: {os.strerror(error.errno or 0)}; reconcile by hand."
+            msg=f"Failed: {os.strerror(error.errno or 0)}; reconcile by hand.",
+            refused=["unexpected error"],
+            **empty,
         )
+    # A per-name refusal is a failure that still reports what was removed first.
+    if result["refused"]:
+        module.fail_json(msg="Refused: " + "; ".join(result["refused"]), **result)
     module.exit_json(**result)
 
 

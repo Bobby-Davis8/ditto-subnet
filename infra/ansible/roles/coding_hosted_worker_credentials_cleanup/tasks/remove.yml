@@ -4,6 +4,42 @@
 # input is interpolated into a fail_msg, and the only interpolation is the
 # validated, non-secret source revision in the final report.
 
+# --start-at-task can begin at main.yml's gate freeze and skip its static preset
+# refusal, but it cannot enter this dynamically included file, so this first
+# in-include guard repeats it: only the three inputs and the gate may carry the
+# prefix, no credential-named variable may be defined, and the raw enabled flag
+# must itself be boolean true, so a preset gate fact alone cannot open removal.
+- name: Refuse a preset internal name, a preset gate or a credential-named variable
+  ansible.builtin.assert:
+    that:
+      - (coding_hosted_worker_credentials_cleanup_enabled | default(false, true)) is sameas true
+      - >-
+        lookup('ansible.builtin.varnames', '^coding_hosted_worker_credentials_cleanup_', wantlist=True)
+        | sort == ['coding_hosted_worker_credentials_cleanup_confirmation',
+        'coding_hosted_worker_credentials_cleanup_enabled',
+        'coding_hosted_worker_credentials_cleanup_gate',
+        'coding_hosted_worker_credentials_cleanup_source_revision']
+      - >-
+        lookup('ansible.builtin.varnames',
+        '(?i)^(DITTO_CODING_WORKER_|DITTO_CODING_HIPPIUS_)', wantlist=True) | length == 0
+    fail_msg: >-
+      Enable removal only with coding_hosted_worker_credentials_cleanup_enabled=true and the
+      documented inputs; a preset gate, registered result or a credential-named Ansible variable
+      is set, or --start-at-task skipped the enable flag. Nothing was removed.
+    quiet: true
+
+# ansible_play_batch is computed from the run's targeting and is not overridable
+# by -e; require exactly the one dedicated host so a role=coding_hosted VM that
+# merely reports this hostname cannot be reached without --limit.
+- name: Require the run to target exactly the one dedicated host
+  ansible.builtin.assert:
+    that:
+      - ansible_play_batch == ['ditto-coding-hosted-v2']
+    fail_msg: >-
+      Run this only against the single dedicated host with
+      --limit ditto-coding-hosted-v2; the play batch is not exactly that host. Nothing was removed.
+    quiet: true
+
 - name: Refuse check mode for an enabled removal
   ansible.builtin.assert:
     that:
@@ -42,7 +78,6 @@
 - name: Require the dedicated host
   ansible.builtin.assert:
     that:
-      - inventory_hostname in groups.get('role_coding_hosted', [])
       - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_architecture == 'x86_64'
       - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_distribution == 'Debian'
@@ -125,11 +160,12 @@
 - name: Require the module to have removed or confirmed absent all three files
   ansible.builtin.assert:
     that:
-      - coding_hosted_worker_credentials_cleanup_helper.removed is defined
+      - coding_hosted_worker_credentials_cleanup_helper.refused | default(['no receipt']) | length == 0
     fail_msg: >-
       The worker credential removal module refused; it names only filenames and states, never a
-      value: {{ coding_hosted_worker_credentials_cleanup_helper.msg
-      | default('no receipt; reconcile the host by hand') }}
+      value. refused={{ coding_hosted_worker_credentials_cleanup_helper.refused | default([]) | to_json }};
+      removed={{ coding_hosted_worker_credentials_cleanup_helper.removed | default([]) | to_json }};
+      not_attempted={{ coding_hosted_worker_credentials_cleanup_helper.not_attempted | default([]) | to_json }}.
     quiet: true
 
 - name: Re-list live worker and custody units after removing
@@ -159,4 +195,5 @@
       removed={{ coding_hosted_worker_credentials_cleanup_helper.removed | to_json }};
       already_absent={{ coding_hosted_worker_credentials_cleanup_helper.already_absent | to_json }};
       leftover_temps_removed={{ coding_hosted_worker_credentials_cleanup_helper.leftover_temps | to_json }};
+      private_dir_mode={{ coding_hosted_worker_credentials_cleanup_helper.private_dir_mode | to_json }};
       directories_kept=true; services_stopped=false; credentials_read=false; credentials_revoked=false.
