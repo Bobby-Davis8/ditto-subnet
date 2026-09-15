@@ -748,11 +748,13 @@ def test_validated_revision_is_reported_after_the_host_check_only() -> None:
         "directories_kept=true; services_stopped=false; password_read=false."
     )
     assert report == _flat(expected)
-    # The removed/vanished facts are built from the module's per-copy state.
+    # removed= comes from the module's 'removed' state in a real run and from the
+    # pre-unlink stat only in check mode; vanished from the module's 'absent'
+    # state, and is empty in check mode.
     facts = _task(RECORD)["ansible.builtin.set_fact"]
-    assert "selectattr('state', 'in', ['removed', 'would_remove'])" in _flat(
-        facts[f"{PREFIX}removed"]
-    )
+    removed_expr = _flat(facts[f"{PREFIX}removed"])
+    assert "if ansible_check_mode" in removed_expr
+    assert "selectattr('state', 'equalto', 'removed')" in removed_expr
     assert "selectattr('state', 'equalto', 'absent')" in _flat(
         facts[f"{PREFIX}vanished"]
     )
@@ -1826,8 +1828,9 @@ def test_rehearsal_extra_vars_cannot_preset_forge_or_lazily_open_the_gate(
             {f"{PREFIX}source_revision": f"{{{{ {{}}[{PASSWORD_LOOKUP}] }}}}"},
             HOST,
         ),
-        # Presetting the frozen gate only enables removal; every guard still runs.
-        ("forged_gate", {FROZEN_GATE: True, f"{PREFIX}confirmation": ""}, HOST),
+        # Presetting the frozen gate reached via -e is caught by the raw-enabled
+        # assert inside the include, which re-checks the raw flag.
+        ("forged_gate", {FROZEN_GATE: True}, RAW_GATE),
     ]
     for name, extra_vars, refused_at in runs:
         root = tmp_path / "hosts" / name

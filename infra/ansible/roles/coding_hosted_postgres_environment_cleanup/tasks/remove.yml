@@ -233,17 +233,26 @@
 # reported absent means a parent was renamed between the inspection and the
 # unlink, so the copy survives under the moved parent: fail loudly rather than
 # claim a removal that did not happen.
+# removed= lists the copies the module confirmed removed. In check mode nothing
+# is removed and the module reports no state, so the would-remove preview falls
+# back to the copies the pre-unlink stat saw present. vanished lists copies the
+# pre-unlink stat saw present but the module reported absent, meaning a parent
+# was renamed between the inspection and the unlink; it is meaningful only in a
+# real run.
 - name: Record which copies the module removed and which vanished before removal
   ansible.builtin.set_fact:
     coding_hosted_postgres_environment_cleanup_removed: >-
-      {{ coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
-      | selectattr('state', 'defined')
-      | selectattr('state', 'in', ['removed', 'would_remove'])
-      | map(attribute='item.path') | list }}
+      {{ (coding_hosted_postgres_environment_cleanup_copies.results
+      | selectattr('stat.exists') | map(attribute='item.path') | list)
+      if ansible_check_mode
+      else (coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
+      | selectattr('state', 'defined') | selectattr('state', 'equalto', 'removed')
+      | map(attribute='item.path') | list) }}
     coding_hosted_postgres_environment_cleanup_vanished: >-
-      {{ coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
+      {{ [] if ansible_check_mode
+      else (coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
       | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent')
-      | map(attribute='item.path') | list }}
+      | map(attribute='item.path') | list) }}
 
 - name: Refuse if a copy present before removal vanished instead of being removed
   ansible.builtin.assert:
