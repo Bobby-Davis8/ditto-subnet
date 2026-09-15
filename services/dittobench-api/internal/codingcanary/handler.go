@@ -190,6 +190,18 @@ func (service *Service) readinessResult(ctx context.Context) ReadinessResponse {
 	return result
 }
 
+// placed reports whether the host certification service's topology probe
+// proves all three placement facts now. Without a probe it is never placed.
+func (service *Service) placed(parent context.Context) bool {
+	if service.topology == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(parent, readinessTimeout)
+	defer cancel()
+	check := service.topology(ctx)
+	return ctx.Err() == nil && check.RootlessTopology && check.ListenerNamespace && check.ControlSocket
+}
+
 // validImageDigest accepts exactly sha256:<64 lowercase hex>, never a tag.
 func validImageDigest(value string) bool {
 	digest, found := strings.CutPrefix(value, "sha256:")
@@ -238,6 +250,13 @@ func (service *Service) Handler() http.Handler {
 		value, err := parseRequest(body, now)
 		if err != nil {
 			writeError(response, http.StatusBadRequest, "invalid")
+			return
+		}
+		// Re-prove placement before any harness, route or grant use. A stale
+		// router listener would otherwise turn an infrastructure fault into a
+		// failed certification attributed to the candidate.
+		if !service.placed(request.Context()) {
+			writeError(response, http.StatusServiceUnavailable, "placement")
 			return
 		}
 		backend, beginErr := service.begin(value.LeaseID)
