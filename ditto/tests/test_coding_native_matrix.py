@@ -1056,7 +1056,7 @@ def test_private_read_refuses_a_file_changed_while_read(monkeypatch, tmp_path):
 CATALOG_DIR = ROOT / "services/dittobench-api/internal/codingenforcement/catalog"
 # Pinned identically in catalog/approval_test.go.
 APPROVAL_VECTOR_SHA256 = (
-    "45f741a12547a8d79cc659abc63217b4f045729e4bf009cffd18251615fa7e19"
+    "c5d49e2f49dede8b95ebe6fd8e9253dd86b1be80e401ac68887cdeff8c2f7ed7"
 )
 
 

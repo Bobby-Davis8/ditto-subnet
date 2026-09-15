@@ -187,7 +187,8 @@ EXECUTION_PROFILE: dict[str, Any] = {
 GROUP_TIMEOUTS_MS = {"hidden": 300000, "visible": 60000}
 GRADING_PROFILE: dict[str, Any] = {
     "schema": EVIDENCE.GRADING_PROFILE_SCHEMA,
-    "image_digest": "sha256:" + digest("grading-image"),
+    # The approved grading profile belongs to the released python image.
+    "image_digest": "sha256:" + digest("python-manifest"),
     "grader_contract_sha256": digest("grader-contract"),
     "grader_bundle_sha256": digest("grader-bundle"),
     "resource_policy": GRADING_POLICY,
@@ -243,8 +244,51 @@ GRADING_SHA256 = hashlib.sha256(go_canonical(GRADING_PROFILE)).hexdigest()
 CONNECTIVITY_SHA256 = hashlib.sha256(
     json.dumps(CONNECTIVITY_PROFILE, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
+
+
+def enforcement_images_value() -> dict:
+    """Every released image; python is the profile's own, with its commands."""
+
+    commands = {
+        "go": (
+            ["go", "build", "./..."],
+            ["--package-path", "example.invalid/subject"],
+        ),
+        "node": (["node", "--check", "subject.js"], ["--module", "subject.js"]),
+        "rust": (["cargo", "build", "--offline"], ["--crate", "subject"]),
+    }
+    images = {
+        language: {
+            "image_digest": "sha256:" + digest(language + "-manifest"),
+            "build_argv": build,
+            "test_argv": {
+                group: ["dittobench-test-driver", "--group", group, *extra]
+                for group in ("hidden", "visible")
+            },
+        }
+        for language, (build, extra) in commands.items()
+    }
+    images["python"] = {
+        "image_digest": GRADING_PROFILE["image_digest"],
+        "build_argv": GRADING_PROFILE["build"]["Command"]["Argv"],
+        "test_argv": {
+            group["Group"]: group["Command"]["Argv"]
+            for group in GRADING_PROFILE["test_groups"]
+        },
+    }
+    return {
+        "schema": "dittobench-coding-native-enforcement-images-v1",
+        "grading_profile_sha256": GRADING_SHA256,
+        "images": images,
+    }
+
+
+ENFORCEMENT_IMAGES_SHA256 = hashlib.sha256(
+    EVIDENCE.canonical_bytes(enforcement_images_value())
+).hexdigest()
 INPUTS = {
     "connectivity_profile_sha256": CONNECTIVITY_SHA256,
+    "enforcement_images_sha256": ENFORCEMENT_IMAGES_SHA256,
     "execution_profile_sha256": EXECUTION_SHA256,
     "grading_profile_sha256": GRADING_SHA256,
 }
@@ -271,6 +315,7 @@ def endpoint_set_sha256(profile: dict) -> str:
 ENDPOINT_SET_SHA256 = endpoint_set_sha256(CONNECTIVITY_PROFILE)
 PINS = {
     "connectivity_endpoint_set_sha256": ENDPOINT_SET_SHA256,
+    "enforcement_images_sha256": ENFORCEMENT_IMAGES_SHA256,
     "execution_profile_sha256": EXECUTION_SHA256,
     "grading_profile_sha256": GRADING_SHA256,
 }
@@ -557,7 +602,11 @@ class World:
             "connectivity_profile_sha256": profiles / "connectivity.json",
             "execution_profile_sha256": profiles / "execution-profile.json",
             "grading_profile_sha256": profiles / "grading-profile.json",
+            "enforcement_images_sha256": profiles / "enforcement-images.json",
         }
+        self.profile_paths["enforcement_images_sha256"].write_bytes(
+            EVIDENCE.canonical_bytes(enforcement_images_value())
+        )
         self.profile_paths["connectivity_profile_sha256"].write_text(
             json.dumps(CONNECTIVITY_PROFILE, indent=2)
         )
@@ -2389,6 +2438,129 @@ def test_release_builder_records_what_the_verifier_reads():
     assert '"bin/dittobench-coding-enforcement-probe"' in builder
 
 
+# B5 PR 3b: every released language image, each with its own recorded commands.
+
+ENFORCEMENT_VECTOR = json.loads(
+    (CATALOG_DIR / "testdata/enforcement-images-vector-v1.json").read_bytes()
+)
+
+
+def test_enforcement_images_vector_agrees_with_go():
+    valid = ENFORCEMENT_VECTOR["valid"].encode()
+    parsed = EVIDENCE.parse_enforcement_images(valid)
+    assert parsed["sha256"] == ENFORCEMENT_VECTOR["valid_sha256"]
+    assert "--crate" in parsed["images"]["rust"]["test_argv"]["hidden"]
+    with pytest.raises(EVIDENCE.Refusal, match="not canonical"):
+        EVIDENCE.parse_enforcement_images(ENFORCEMENT_VECTOR["noncanonical"].encode())
+    assert len(ENFORCEMENT_VECTOR["refused"]) >= 10
+    for name, document in ENFORCEMENT_VECTOR["refused"].items():
+        with pytest.raises(EVIDENCE.Refusal):
+            EVIDENCE.parse_enforcement_images(document.encode())
+            pytest.fail(name)
+    go_test = (CATALOG_DIR / "enforcement_images_test.go").read_text()
+    assert "enforcementImagesVectorFile" in go_test
+
+
+def write_images(world, value):
+    world.profile_paths["enforcement_images_sha256"].write_bytes(
+        EVIDENCE.canonical_bytes(value)
+    )
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    record["inputs"]["enforcement_images_sha256"] = hashlib.sha256(
+        EVIDENCE.canonical_bytes(value)
+    ).hexdigest()
+    return world.verify_record(record)
+
+
+def test_each_language_keeps_its_own_recorded_commands(world):
+    value = enforcement_images_value()
+    argvs = [tuple(image["test_argv"]["hidden"]) for image in value["images"].values()]
+    assert len(set(argvs)) == len(argvs), "no argv is forced to be common"
+    assert write_images(world, value) is None
+    # Rust-specific arguments are fine when they are pinned in the image set.
+    value["images"]["rust"]["test_argv"]["visible"] += ["--out-dir", "/out"]
+    assert write_images(world, value) is None
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            lambda v: v.update(grading_profile_sha256=digest("another profile")),
+            "name another grading profile",
+        ),
+        (
+            lambda v: v["images"]["go"].update(image_digest="sha256:" + digest("x")),
+            "go enforcement image is not the released image",
+        ),
+        (
+            lambda v: v["images"]["python"]["test_argv"].update(
+                hidden=["dittobench-test-driver", "--group", "hidden", "--forced"]
+            ),
+            "python enforcement commands differ from the approved grading profile",
+        ),
+        (
+            lambda v: v["images"]["python"].update(build_argv=["go", "build"]),
+            "python enforcement commands differ from the approved grading profile",
+        ),
+        (
+            # Identical argv passes only because each language records it.
+            lambda v: (
+                [
+                    image.update(
+                        test_argv={
+                            group: ["dittobench-test-driver", group]
+                            for group in ("hidden", "visible")
+                        }
+                    )
+                    for image in v["images"].values()
+                ]
+                and None
+            ),
+            None,
+        ),
+    ],
+)
+def test_enforcement_images_bind_release_profile_and_commands(world, change, reason):
+    value = enforcement_images_value()
+    change(value)
+    failure = write_images(world, value)
+    if reason is None:
+        assert failure is None
+    else:
+        assert failure is not None and reason in failure
+
+
+def test_the_grading_profile_image_must_be_a_released_language(world):
+    profile = {**GRADING_PROFILE, "image_digest": "sha256:" + digest("unreleased")}
+    world.profile_paths["grading_profile_sha256"].write_bytes(go_canonical(profile))
+    value = enforcement_images_value()
+    value["grading_profile_sha256"] = hashlib.sha256(go_canonical(profile)).hexdigest()
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    record["inputs"]["grading_profile_sha256"] = value["grading_profile_sha256"]
+    world.profile_paths["enforcement_images_sha256"].write_bytes(
+        EVIDENCE.canonical_bytes(value)
+    )
+    record["inputs"]["enforcement_images_sha256"] = hashlib.sha256(
+        EVIDENCE.canonical_bytes(value)
+    ).hexdigest()
+    failure = world.verify_record(record)
+    assert failure is not None and "not a released language" in failure
+
+
+def test_resource_and_preexec_records_need_the_image_set(world):
+    catalog_value = catalog()
+    for kind in ("resource_enforcement", "preexec_confinement"):
+        assert "enforcement_images_sha256" in catalog_value["kinds"][kind]["inputs"]
+    world.profile_paths["enforcement_images_sha256"] = None
+    failure = world.verify_record(copy.deepcopy(world.records["resource_enforcement"]))
+    assert failure is not None and "needs the enforcement_images_sha256 document" in (
+        failure
+    )
+    with pytest.raises(EVIDENCE.Refusal, match="every profile document"):
+        world.review()
+
+
 def test_runner_hash_covers_the_real_runner_command_and_library():
     for root in EVIDENCE.RUNNER_ROOTS:
         assert any((ROOT / root).glob("*.go")), root
@@ -3197,6 +3369,7 @@ def test_check_approval_refuses_inconsistent_approvals(signed, change, reason):
     ("name", "reason"),
     [
         ("connectivity_endpoint_set_sha256", "connectivity endpoint set differs"),
+        ("enforcement_images_sha256", "review enforcement_images_sha256 differs"),
         ("execution_profile_sha256", "review execution_profile_sha256 differs"),
         ("grading_profile_sha256", "review grading_profile_sha256 differs"),
     ],
