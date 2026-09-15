@@ -69,29 +69,41 @@ differences are the two `.env` lines `DITTO_PLATFORM_API_SUPERVISOR=pm2` and
 
 ## Deploy access
 
-### Immediate: no root journalctl or pager for the `ditto` group
+### Immediate: exact team sudo rules, none for deploy
 
 `deploy` is a member of `ditto`, so it had every `%ditto` rule in
-`/etc/sudoers.d/ditto-team` (`roles/base/tasks/users.yml`). Two gave root:
+`/etc/sudoers.d/ditto-team` (`roles/base/tasks/users.yml`). They gave root:
 
 - `/bin/journalctl *` accepted any option as root, for example `--cursor-file=`
   (writes a root-owned file at any path), `--vacuum-*`, `--setup-keys`, and the
   pager, which has a shell escape wherever systemd's secure pager mode is not in
   effect;
-- `/bin/systemctl status ditto-*` ran the same pager as root.
+- `/bin/systemctl status ditto-*` ran the same pager as root;
+- `(ALL) ... systemctl start|stop|restart ditto-*`: in sudoers a `*` matches any
+  further arguments, so it allowed extra units (`stop ditto-x docker.service`),
+  pager-opening options, stopping isolation guards such as the coding executor
+  egress guard, and any run-as user.
 
-Both rules are removed. Team members join `systemd-journal` and run
-`journalctl -u <unit>` and `systemctl status <unit>` without sudo, as
-themselves, so no pager or option runs as root. `deploy` is not a member and has
-no journal access. The remaining rules are `systemctl start|stop|restart ditto-*`,
-`daemon-reload`, `reload caddy` and `(deploy) ALL`. Operators with OS Login
+The rules are now one alias of exact argument vectors,
+`/bin/systemctl start|stop|restart <unit>`, for a reviewed list of 15 service
+units (each with and without `.service`) and 6 timers, plus `daemon-reload` and
+`reload caddy`. They run as `(root)` only and are granted to `%ditto,!deploy`,
+so `deploy` gets none of them. Isolation guards are not in the list: the coding
+executor and hosted egress units, the sandbox firewall, the IMDS guard, the
+egress proxy and rootless Docker daemons. `%ditto ALL=(deploy) NOPASSWD: ALL`
+stays. `visudo` parses the file in tests.
+
+Team members join `systemd-journal` and run `journalctl -u <unit>` and
+`systemctl status <unit>` without sudo, as themselves. `deploy` is not a member.
+Its only journal read is the exact Pylon rule below. Operators with OS Login
 admin keep their own full sudo, which the skill scripts use.
 
-No automation used either removed rule: `update.sh`, the Deploy Platform
-workflow and the relay release never call `journalctl` or `systemctl status`
-through sudo. This part is therefore not gated. It takes effect on the next
-converge of any playbook that runs the `base` role, and no such converge has
-been run.
+No automation used any removed rule: `update.sh`, the Deploy Platform workflow,
+the relay release and the validator and screener services never call
+`systemctl` or `journalctl` through the `ditto` rules. This part is therefore
+not gated. It takes effect on the next converge of any playbook that runs the
+`base` role, and no such converge has been run. A team member who restarts a
+unit outside the list needs OS Login admin or a reviewed addition.
 
 ### Gated: Pylon without the docker group
 
@@ -110,24 +122,54 @@ role:
 1. installs `/etc/ditto-platform/pylon/compose.yml` (root, `0600`). Its `pylon`
    service is byte-for-byte equal in YAML to `apps/platform/docker-compose.yml`,
    and `ditto/tests/test_platform_deploy_access.py` fails on drift;
-2. renders `/etc/ditto-platform/pylon/pylon.env` (root, `0600`) with exactly the
-   values compose used to interpolate from the exported `.env`:
-   `SUBTENSOR_NETWORK`, `PYLON_OPEN_ACCESS_TOKEN` and
-   `BITTENSOR_WALLET_PATH=/home/deploy/.bittensor/wallets`. The other `pylon`
-   variables keep their compose defaults, as before;
+2. renders `/etc/ditto-platform/pylon/pylon.env` (root, `0600`) with the
+   `SUBTENSOR_NETWORK` and `PYLON_OPEN_ACCESS_TOKEN` compose used to interpolate
+   from the exported `.env`. The other `pylon` variables keep their compose
+   defaults, as before, except the wallet mount source. That was
+   `/home/deploy/.bittensor/wallets`; dockerd resolves a bind source as root, so
+   `deploy` could have pointed it at any host path with a symlink. It is now
+   `BITTENSOR_WALLET_PATH=/etc/ditto-platform/pylon/wallets`, an empty
+   root-owned directory. The Platform's Pylon serves reads only
+   (`PYLON_IDENTITY_TOKEN` is empty), and the converge refuses when deploy's old
+   wallet path is a link, not a directory, or not empty. Changing the mount
+   source recreates the container once;
 3. installs `ditto-platform-pylon.service`, a root `oneshot` that runs
    `docker compose --project-name ditto-platform ... up --detach --wait pylon`
    with an empty root-owned `DOCKER_CONFIG`. It is not enabled; the container's
    `restart: unless-stopped` still restores Pylon after a reboot;
-4. adds `/etc/sudoers.d/ditto-platform-pylon` with the single exact rule
-   `deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart ditto-platform-pylon.service`;
+4. adds `/etc/sudoers.d/ditto-platform-pylon` with two exact rules:
+   `systemctl restart ditto-platform-pylon.service` and
+   `journalctl --no-pager --quiet --output=short-iso --lines=80 --unit=ditto-platform-pylon.service`.
+   The second lets `update.sh` print the unit's journal when it fails. It is a
+   separate rule, not part of the release installer's `logs`, because the Pylon
+   unit can be enabled without the dedicated identity;
 5. renders `DITTO_PLATFORM_PYLON_UNIT=ditto-platform-pylon.service`, so
-   `update.sh` restarts the unit instead of calling compose;
+   `update.sh` and `start.sh` restart the unit instead of calling compose;
 6. removes `deploy` from `docker` with `gpasswd --delete`.
 
-This is gated because it cannot be proven without a live host: the project name
-must adopt the running `ditto-platform-pylon-1` without recreating it, and the
-pm2 daemon keeps its old supplementary groups until it restarts.
+This is gated because it cannot be proven without a live host. The new mount
+source recreates `ditto-platform-pylon-1` once, and the pm2 daemon keeps its old
+supplementary groups until it restarts. The signer does not trust the switch for
+that last point: see [the live Docker check](#live-docker-check).
+
+### Live Docker check
+
+The switch changes files, but Docker access lives in running processes: the
+`deploy` pm2 daemon and its children keep the `docker` group until
+`pm2-deploy.service` restarts, so `pm2 start -- docker run -v /etc/ditto-platform:...`
+would still work. `files/deploy-docker-access.py` checks the live host as root
+and fails closed:
+
+- for the `docker` group and for whichever group owns `/run/docker.sock`, deploy
+  is not a member and it is not deploy's primary group;
+- no process whose real, effective, saved or filesystem UID is deploy holds such
+  a GID (read from every `/proc/<pid>/status`);
+- the socket is owned by root, grants nothing to other users, and has no POSIX
+  ACL.
+
+It runs in the signer converge guard (after the stat guard), in the release
+installer's `install` and `activate` whenever the root-owned environment enables
+the signer, and, as an early advisory stop, in `update.sh` before the install.
 
 ## Dedicated `ditto-api` identity
 
@@ -162,10 +204,12 @@ touch the seed.
 `ditto-platform-api.service` runs as `User=ditto-api`, `Group=ditto-api` with an
 empty `SupplementaryGroups=`. It has no root pm2 daemon and no second pm2 home:
 
-- `ExecStartPre=launch preflight` runs
+- `ExecStart=launch serve` is one launcher run. It resolves `current` once, runs
   `python -I -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`
-  as `ditto-api`. `ExecStart=launch serve` runs `python -I -m ditto.api_server`.
-- The launcher refuses any user but `ditto-api`. It resolves `current` once,
+  from that release as `ditto-api`, stops on failure, then execs
+  `python -I -m ditto.api_server` from the same release. There is no separate
+  `ExecStartPre` that could resolve `current` differently.
+- The launcher refuses any user but `ditto-api`. It
   requires `/opt/ditto-platform-api/releases/<40-hex>`, sources only
   `/etc/ditto-platform/api/platform.env` and `deploy.env`, and exports
   `DITTO_BUILD_COMMIT=<revision>` so `/health` reports the sealed revision.
@@ -214,17 +258,29 @@ Instead, `ditto-api` runs only from sealed root-owned releases.
    be a single-link regular file or directory owned by `deploy`, within file
    count, size and depth bounds. A link, a special file, or a file `deploy` does
    not own (such as the seed) fails the install instead of being published.
-5. Builds the environment with
-   `uv sync --frozen --no-dev --project <release>/apps/platform` as
-   `ditto-api-build`, inside a transient `systemd-run` unit that has the same
-   sandbox plus `ReadWritePaths=` only its `.venv` and cache. It uses the pinned
-   root-owned interpreter (`platform_api_release_python`, default
-   `/usr/bin/python3.13`), `UV_PYTHON_DOWNLOADS=never` and `UV_LINK_MODE=copy`.
-   The unit's cgroup is stopped when uv exits, so no builder process outlives
-   the build.
+5. Builds the environment as `ditto-api-build` in three transient `systemd-run`
+   units. Each has the same sandbox plus `ReadWritePaths=` only for its `.venv`
+   and cache:
+   - `uv venv`;
+   - `uv pip install --require-hashes --no-build -r apps/platform/release-build-requirements.txt`,
+     the reviewed, hash-pinned build backends (hatchling, hatch-vcs, editables
+     and their requirements) as wheels only;
+   - `uv sync --frozen --no-dev --no-build-isolation`.
+
+   The sync builds the project, the shared protocol and the pinned
+   bittensor-pylon-client Git dependency with exactly those backends, never
+   resolving one from an index, then removes them. Runtime packages are verified
+   against `uv.lock`. It uses the pinned root-owned interpreter
+   (`platform_api_release_python`, default `/usr/bin/python3.13`),
+   `UV_PYTHON_DOWNLOADS=never`, `UV_LINK_MODE=copy` and
+   `UV_COMPILE_BYTECODE=1`. Each unit's cgroup is stopped when uv exits, so no
+   builder process outlives the build. A local rehearsal against a read-only
+   source tree showed nothing outside `.venv` is written.
 6. Seals the tree: every entry root-owned, directories `0755`, files `0644` or
-   `0755`. It refuses hard links, special files and links that leave the release,
-   except `.venv/bin/python*` to the pinned interpreter.
+   `0755`. It refuses hard links and special files. It resolves every link hop
+   by hop and refuses any whose resolution leaves the release at any step, so a
+   chain of individually harmless relative links cannot escape. The only
+   exception is `.venv/bin/python*` ending at the pinned interpreter.
 7. Writes a receipt with the SHA-256 of a manifest over every path, owner, mode,
    content digest and link target.
 8. Runs the metadata preflight from the sealed release as `ditto-api`, in a
@@ -234,7 +290,9 @@ Instead, `ditto-api` runs only from sealed root-owned releases.
 
 `activate` re-verifies the whole manifest, moves the staged values to
 `deploy.env`, atomically points `current` at the release, and runs
-`systemctl enable` and `systemctl restart`. It keeps the running and previous
+`systemctl enable`, `systemctl reset-failed` (so a unit that hit its start limit
+does not block a rollback) and `systemctl restart`. The manifest is hashed once
+when sealed and once per activation, plus once when `install` reuses a release. It keeps the running and previous
 releases and deletes older ones. A release that fails its manifest is rebuilt,
 unless it is the running one, which is never deleted. `stop` runs
 `systemctl disable --now`. `logs` prints the unit's last 80 journal lines with
@@ -249,16 +307,18 @@ Trade-offs:
 - The dashboard bundle is built by `deploy` and copied as data. `ditto-api`
   serves those bytes but never executes them, so `deploy` still controls what
   browsers load, as today.
-- Python dependencies are pinned by `uv.lock` hashes. Build backends such as
-  hatchling are resolved at build time. They run as `ditto-api-build`, which
-  holds no secret and cannot write a sealed tree.
+- Runtime dependencies are pinned by `uv.lock` hashes, build backends by
+  `release-build-requirements.txt` hashes. Changing either is a reviewed commit
+  on `main`. Backends run as `ditto-api-build`, which holds no secret and cannot
+  write a sealed tree, but their output lands in the environment `ditto-api`
+  imports, so they are part of the reviewed code.
 
 ### What automation does
 
 | | Every switch off (default) | Pylon unit and identity on, signer off | All three on |
 |---|---|---|---|
-| `platform_app` converge | As before; signer tasks skipped, the seed path never inspected | Adds the Pylon unit and the identity as above. No unit started | Profile guard (hotkey, both switches, `platform_api_process_user == 'ditto-api'`), then the stat-only guard on the fixed path with `follow: false` and `get_checksum: false` |
-| `update.sh` | pm2 as `deploy`, compose as `deploy`, no sudo | `install` before Pylon and migrations; the pm2 copy of `ditto-api` is removed; `activate` after migrations; verify through `systemctl show` and `/health` | The same. The metadata preflight runs as `ditto-api` inside `install` and again as `ExecStartPre`. `deploy` never stats or opens the seed |
+| `platform_app` converge | As before; signer tasks skipped, the seed path never inspected | Adds the Pylon unit and the identity as above. No unit started | Profile guard (hotkey, both switches, `platform_api_process_user == 'ditto-api'`), then the stat-only guard on the fixed path with `follow: false` and `get_checksum: false`, then the live Docker check |
+| `update.sh` | pm2 as `deploy`, compose as `deploy`, no sudo | `install` before Pylon and migrations; the pm2 copy of `ditto-api` is removed and `pm2 save`d before `activate`, which runs after migrations; an activation failure reports the unit state and journal; verify through `systemctl show` and `/health` | The same, after the advisory live Docker check. The metadata preflight runs as `ditto-api` inside `install` and again in the unit's launcher. `deploy` never stats or opens the seed |
 | Enabled signer while `ditto-api` would run under pm2 | — | — | Converge fails at the profile guard; `update.sh` stops at stage `signer-preflight` before Pylon, migrations or pm2, and rolls the checkout back |
 | `validator_stack` converge | Trust off and empty | Same | Unchanged: exact SS58 checks, then render |
 
@@ -323,9 +383,10 @@ authorized by this pull request.
    `REVIEWED_ACTIVATIONS` entry, and converge
    `gcp-platform-app.yml --limit ditto-platform-<env>`. Run the Deploy Platform
    workflow for the revision in service; `update.sh` restarts the unit, which
-   must adopt the existing container without recreating it. Restart the pm2
-   daemon in a maintenance window (`systemctl restart pm2-deploy`), then confirm
-   that `deploy` and the pm2 processes no longer carry the `docker` group.
+   recreates the Pylon container once on the root-owned wallet mount. Restart
+   the pm2 daemon in a maintenance window (`systemctl restart pm2-deploy`). The
+   signer converge in step 4, the installer and `update.sh` all refuse until no
+   `deploy` process holds the `docker` group.
 2. **Identity, signer off.** Set `platform_api_service_identity_enabled: true`
    with its entry, and converge. Run the Deploy Platform workflow. It builds and
    activates the first sealed release and removes the pm2 copy of `ditto-api`.
@@ -442,18 +503,22 @@ These remain after every switch is on.
 - **GitHub host key.** The installer's `known_hosts` comes from
   `ssh-keyscan` at converge, the same trust-on-first-use the checkout already
   uses.
-- **Availability, not confidentiality.** `ditto` members, including `deploy`,
-  may still `systemctl start|stop|restart ditto-*`. That wildcard also accepts
-  additional unit names, so they can stop services such as the firewall. None
-  of this reads the seed.
+- **Availability, not confidentiality.** Team members may still start, stop or
+  restart the listed units, including `ditto-platform-api.service`. `deploy` may
+  stop it through the installer. None of this reads the seed.
+- **Docker check scope.** The live check covers group membership, process GIDs
+  and the root daemon's socket permissions. A rootless Docker daemon that
+  `deploy` started itself could mount only what `deploy` can already read.
 - **Operations that changed.** Under the unit, `ditto-api` logs go to the
-  journal, not `apps/platform/logs`. `scripts/profile-python.sh` and the
-  `read_platform_logs.sh` skill still assume pm2 and need a follow-up before
-  step 2.
+  journal, not `apps/platform/logs`. `start.sh`, `stop.sh`,
+  `scripts/profile-python.sh` and `update.sh` follow the supervisor; the
+  `read_platform_logs.sh` skill still reads pm2 files and needs a follow-up
+  before step 2.
 - **Not rehearsed on a host.** The unit sandbox (for example `skopeo` under
-  `RestrictNamespaces`), `uv sync` against a read-only source tree, and Pylon
-  adoption are covered only by synthetic tests. Steps 1 and 2 must be rehearsed
-  on dev.
+  `RestrictNamespaces`), the sandboxed transient builds and Pylon's container
+  recreation are covered only by synthetic tests. The hash-pinned
+  `--no-build-isolation` build was rehearsed locally against a read-only copy of
+  the source, not on a Platform host. Steps 1 and 2 must be rehearsed on dev.
 
 ### Other open decisions
 

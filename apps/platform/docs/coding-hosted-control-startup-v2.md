@@ -41,13 +41,16 @@ enabled it renders the fixed seed path
 Enabling also requires two reviewed isolation switches. The first runs
 `ditto-api` as the dedicated `ditto-api` user from sealed root-owned releases
 through `ditto-platform-api.service`. The second moves Pylon to a root-owned
-unit so `deploy` leaves the `docker` group.
+unit so `deploy` leaves the `docker` group; because running processes keep old
+groups, the converge guard, the release installer and `update.sh` also check the
+live host and refuse while any `deploy` process can still reach the Docker
+daemon.
 
 Right after the role's preflight, the converge stat-verifies without reading
 that the seed and its `0700` directory are owned by `ditto-api`. The metadata
 entry point `python -m ditto.api_server.coding_hosted_signer_preflight --check-metadata`
 runs as `ditto-api`, from the sealed release, before `scripts/update.sh`
-activates it and again as the unit's `ExecStartPre`. It applies `read_private`'s
+activates it and again in the unit's launcher before every start. It applies `read_private`'s
 location and file checks through `lstat` and never opens the seed, so only
 startup detects a hotkey mismatch. `update.sh` itself never checks or opens the
 seed, and it refuses to deploy an enabled signer while `ditto-api` would still
