@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"strings"
+	"regexp"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/ditto-assistant/dittobench-api/internal/codingattempt"
 	"github.com/ditto-assistant/dittobench-api/internal/codinggrader"
@@ -103,22 +101,17 @@ func (factory *PhaseFactory) executorConfig(manifest codinggrader.Manifest, auth
 	}
 }
 
+// dockerRepositoryName is the Docker reference grammar for a repository name,
+// restricted to lowercase: an optional registry host[:port] component followed
+// by one or more path components separated by single slashes. A tag or digest
+// is never part of the repository; the executor appends the verified digest.
+var dockerRepositoryName = regexp.MustCompile(
+	`^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?/)?` +
+		`[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$`,
+)
+
 func validImageRepository(value string) bool {
-	if value == "" || len(value) > 255 || !utf8.ValidString(value) ||
-		strings.HasPrefix(value, "/") || strings.HasPrefix(value, "-") ||
-		strings.HasSuffix(value, "/") || strings.Contains(value, "@") ||
-		strings.Contains(value, "..") {
-		return false
-	}
-	for _, character := range value {
-		if unicode.IsSpace(character) || unicode.IsControl(character) ||
-			!(character == '/' || character == '.' || character == '_' || character == '-' ||
-				character == ':' || character >= 'a' && character <= 'z' ||
-				character >= '0' && character <= '9') {
-			return false
-		}
-	}
-	return true
+	return len(value) <= 255 && dockerRepositoryName.MatchString(value)
 }
 
 func (factory *PhaseFactory) String() string   { return "CodingExecutorPhaseFactory{private}" }
