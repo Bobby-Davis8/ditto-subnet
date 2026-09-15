@@ -5249,24 +5249,40 @@ describe('Backroom MCP tools', () => {
       }
       expect(fetchMock).not.toHaveBeenCalled()
 
-      fetchMock.mockResolvedValueOnce(Response.json(reserved, { status: 201 }))
+      // Each write is followed by one re-read of the durable list, and the
+      // result is what Platform stores, not what the write response claimed.
+      fetchMock
+        .mockResolvedValueOnce(Response.json(reserved, { status: 201 }))
+        .mockResolvedValueOnce(Response.json({ total: 1, exclusions: [reserved] }))
       const reservedResult = await client.callTool({ name: 'set_team_canary', arguments: reserve })
       expect(reservedResult.isError, readTextResult(reservedResult)).not.toBe(true)
       expect(readJsonResult(reservedResult)).toMatchObject({
-        exclusion_id: exclusionId,
-        agent_id: null,
-        created_by: 'peyton@omniaura.ai',
+        exclusion: { exclusion_id: exclusionId, agent_id: null, created_by: 'peyton@omniaura.ai' },
+        total: 1,
       })
 
-      fetchMock.mockResolvedValueOnce(Response.json(bound))
+      fetchMock
+        .mockResolvedValueOnce(Response.json({ ...bound, bound_reason: 'stale write response' }))
+        .mockResolvedValueOnce(Response.json({ total: 1, exclusions: [bound] }))
       const boundResult = await client.callTool({ name: 'set_team_canary', arguments: bind })
       expect(boundResult.isError, readTextResult(boundResult)).not.toBe(true)
       expect(readJsonResult(boundResult)).toMatchObject({
-        agent_id: agentId,
-        matched_agents: [{ state: 'bound', competition_excluded: true }],
+        exclusion: {
+          agent_id: agentId,
+          bound_reason: bound.bound_reason,
+          matched_agents: [{ state: 'bound', competition_excluded: true }],
+        },
+        total: 1,
       })
 
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenCalledTimes(4)
+      for (const index of [1, 3]) {
+        const [rereadUrl, rereadInit] = fetchMock.mock.calls[index] as [string, RequestInit]
+        expect(rereadUrl).toBe(
+          'https://platform-api.heyditto.ai/api/v1/admin/noncompetitive-canaries?limit=200&offset=0',
+        )
+        expect(rereadInit.method ?? 'GET').toBe('GET')
+      }
       const [reserveUrl, reserveInit] = fetchMock.mock.calls[0] as [string, RequestInit]
       expect(reserveUrl).toBe('https://platform-api.heyditto.ai/api/v1/admin/noncompetitive-canaries')
       expect(reserveInit.method).toBe('POST')
@@ -5280,7 +5296,7 @@ describe('Backroom MCP tools', () => {
         reason: reserved.reason,
         confirmation: reserve.confirmation,
       })
-      const [bindUrl, bindInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+      const [bindUrl, bindInit] = fetchMock.mock.calls[2] as [string, RequestInit]
       expect(bindUrl).toBe(
         `https://platform-api.heyditto.ai/api/v1/admin/noncompetitive-canaries/${exclusionId}/bind`,
       )
@@ -5319,6 +5335,65 @@ describe('Backroom MCP tools', () => {
       expect(missing.isError).toBe(true)
       expect(readTextResult(missing)).toContain('team canary was not found')
       expect(fetchMock).toHaveBeenCalledTimes(3)
+
+      // Once a write was sent, a failed re-read, an unparseable write response or
+      // a list that lacks the exclusion reports an unknown outcome and never
+      // retries the write.
+      const unconfirmed: Array<[string, Record<string, unknown>, Response[]]> = [
+        [
+          'failed re-read',
+          bind,
+          [Response.json(bound), Response.json({ detail: 'database unavailable' }, { status: 503 })],
+        ],
+        ['unparseable write response', reserve, [Response.json({ ok: true }, { status: 201 })]],
+        [
+          'exclusion missing from the re-read',
+          bind,
+          [Response.json(bound), Response.json({ total: 0, exclusions: [] })],
+        ],
+        [
+          'short re-read',
+          reserve,
+          [
+            Response.json(reserved, { status: 201 }),
+            Response.json({ total: 2, exclusions: [reserved] }),
+            Response.json({ total: 2, exclusions: [] }),
+          ],
+        ],
+      ]
+      for (const [label, argumentsForCall, responses] of unconfirmed) {
+        fetchMock.mockReset()
+        for (const response of responses) fetchMock.mockResolvedValueOnce(response)
+        const outcome = await client.callTool({ name: 'set_team_canary', arguments: argumentsForCall })
+        expect(outcome.isError, label).toBe(true)
+        expect(readTextResult(outcome), label).toContain('The write may have succeeded. It was not retried')
+        expect(fetchMock, label).toHaveBeenCalledTimes(responses.length)
+        expect(
+          fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST'),
+          label,
+        ).toHaveLength(1)
+      }
+      fetchMock.mockReset()
+      fetchMock
+        .mockResolvedValueOnce(Response.json(bound))
+        .mockResolvedValueOnce(Response.json({ detail: 'database unavailable' }, { status: 503 }))
+      const failedReread = await client.callTool({ name: 'set_team_canary', arguments: bind })
+      expect(readTextResult(failedReread)).toContain(`bind for team canary ${exclusionId}`)
+
+      // The re-read pages through a list longer than one Platform page.
+      fetchMock.mockReset()
+      const earlier = Array.from({ length: 200 }, (_, index) => ({
+        ...reserved,
+        exclusion_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      }))
+      fetchMock
+        .mockResolvedValueOnce(Response.json(reserved, { status: 201 }))
+        .mockResolvedValueOnce(Response.json({ total: 201, exclusions: earlier }))
+        .mockResolvedValueOnce(Response.json({ total: 201, exclusions: [reserved] }))
+      const paged = await client.callTool({ name: 'set_team_canary', arguments: reserve })
+      expect(paged.isError, readTextResult(paged)).not.toBe(true)
+      expect(readJsonResult(paged)).toMatchObject({ exclusion: { exclusion_id: exclusionId }, total: 201 })
+      expect(String(fetchMock.mock.calls[2]?.[0])).toContain('limit=200&offset=200')
     } finally {
       await client.close()
       await server.close()

@@ -236,7 +236,11 @@ any other key, including `actor`:
 Shape and confirmation errors are refused before any Platform call, and Platform
 checks the same confirmation again. The signed-in operator email is always the
 `X-Admin-Actor`. Platform refusals (409 or 404) are returned as tool errors and
-never retried. Exclusions are append-only; there is no tool or endpoint that
+never retried. After a write, the tool re-reads Platform, like `unban_hotkey`,
+and returns the durable `exclusion` plus the full list (`total`, `exclusions`).
+If the write response cannot be parsed or the re-read fails, the tool reports
+that the write may have succeeded and does not retry; read `list_team_canaries`
+before acting again. Exclusions are append-only; there is no tool or endpoint that
 lifts one.
 
 ## Reading miner source

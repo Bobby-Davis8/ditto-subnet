@@ -1862,11 +1862,16 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         'Reserve or bind one audited noncompetitive team canary. The exclusion only removes that exact identity from ranking, weights and emissions: it never changes agent status, screening, copy detection or any other gate, it is append-only, and there is no tool or endpoint that lifts it. Read list_team_canaries first. Arguments are one of two exact shapes; any other key, including actor, is refused. ' +
         'action="reserve": minerHotkey (SS58), artifactSha256 (64 lowercase hex), reason (at least 8 characters), and confirmation exactly "RESERVE TEAM CANARY <minerHotkey> <artifactSha256>". Reserve before upload: Platform refuses the reservation if that hotkey + artifact pair already has any score, or is already reserved. ' +
         'action="bind": exclusionId and agentId (lowercase UUIDs), minerHotkey, artifactSha256, screenedImageSha256 (64 lowercase hex), reason, and confirmation exactly "BIND TEAM CANARY <exclusionId> <agentId>". Bind after screening: Platform binds a reservation once, and only when the hotkey and artifact equal the reservation and the agent row, and that agent\'s screened image digest equals screenedImageSha256; a mismatch, an unscreened agent, an already-bound reservation, an agent bound to another canary, or an unknown exclusion or agent is refused. ' +
-        'Invalid shapes and a wrong confirmation are refused before any Platform call, and Platform checks the confirmation again. The signed-in operator email is the audit actor. Returns the exclusion with its matched agents. Requires backroom:write.',
+        'Invalid shapes and a wrong confirmation are refused before any Platform call, and Platform checks the confirmation again. The signed-in operator email is the audit actor. After the write it re-reads Platform, like unban_hotkey, and returns the durable exclusion with its matched agents plus the full team canary list. If that response or re-read fails, it reports that the write may have succeeded and never retries; check list_team_canaries before acting again. Requires backroom:write.',
       inputSchema: setTeamCanaryMcpInputSchema,
       annotations: toolAnnotations('write', true),
     },
-    async (input) => write(() => setTeamCanary(input, props.session.email)),
+    async (input) =>
+      write(async () =>
+        compacted(await setTeamCanary(input, props.session.email), {
+          exclusions: { pin: ['exclusion_id', 'miner_hotkey'] },
+        }),
+      ),
   )
 
   registerTool(
