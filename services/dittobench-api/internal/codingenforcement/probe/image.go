@@ -25,22 +25,24 @@ type imageInspection struct {
 	} `json:"Config"`
 }
 
-// ResolvedImage is an approved runtime image pinned by its local content id.
+// ResolvedImage is an approved runtime image present in the local daemon.
 type ResolvedImage struct {
 	// Reference is the registry@sha256 reference the approval named.
 	Reference string
-	// ID is the local content-addressed image id to launch by, so no code path
-	// can fall back to a pull of a mutable tag.
+	// ID is the local content-addressed image id, recorded in the report.
 	ID string
 	// RepoDigest is the matched approved digest (registry@sha256:...).
 	RepoDigest string
 }
 
 // ResolveApprovedImage inspects a locally present image and refuses unless one
-// of its RepoDigests equals the approved reference. It never pulls: the sandbox
-// launch path omits `--pull never`, so a missing image would otherwise fall
-// back to a registry pull that only the egress deny guard blocks. Resolving to
-// the content-addressed id first removes that path entirely.
+// of its RepoDigests carries the approved digest. It never pulls, so a missing
+// image is refused before any launch is attempted.
+//
+// It is a pre-check, not the launch guard. The executor launches by the same
+// repository@sha256 reference with `docker create --pull never` and its policy
+// inspection requires the container's image to equal the image id its own
+// preflight resolved. The resolved id is not passed into that launch.
 func ResolveApprovedImage(ctx context.Context, cli DockerCLI, approvedReference string) (ResolvedImage, error) {
 	at := strings.LastIndex(approvedReference, "@")
 	if at <= 0 || !ociDigest.MatchString(approvedReference[at+1:]) {

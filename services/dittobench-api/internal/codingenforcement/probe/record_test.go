@@ -42,8 +42,16 @@ func goldenEnv() Env {
 		},
 		ProfileInputs:                map[string]string{"execution_profile_sha256": "f94c52f808d5df347becd9fd4cc184a15d5b6c181140c897467405d769c50bae"},
 		PreCollectionPreflightSHA256: "82998cdb86201643e69090056ad333315285b557d7fb3447ca040a525f977027",
-		StartedAtUnix:                2000000000,
-		CompletedAtUnix:              2000000017,
+		Preconditions: map[string]any{
+			"custody_active": false, "custody_socket_present": false,
+			"daemon_containers": int64(0), "daemon_job_networks": int64(0), "worker_active": false,
+		},
+		Residue: map[string]any{
+			"containers": int64(0), "custody_socket_present": false, "job_networks": int64(0),
+			"processes": int64(0), "volumes": int64(0), "worker_active": false,
+		},
+		StartedAtUnix:   2000000000,
+		CompletedAtUnix: 2000000017,
 	}
 }
 
@@ -78,12 +86,12 @@ func goldenCleanupPhases() []Phase {
 	}
 }
 
-func TestAssembleRecordReproducesTheGoldenRecordBytes(t *testing.T) {
+func TestSyntheticRecordReproducesTheGoldenRecordBytes(t *testing.T) {
 	cat, err := catalog.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := AssembleRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, goldenCleanupPhases())
+	result, err := assembleSyntheticRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, goldenCleanupPhases())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +104,7 @@ func TestAssembleRecordReproducesTheGoldenRecordBytes(t *testing.T) {
 	}
 }
 
-func TestAssembleRecordRecomputesMatchedFromObservations(t *testing.T) {
+func TestSyntheticRecordRecomputesMatchedFromObservations(t *testing.T) {
 	cat, err := catalog.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +113,7 @@ func TestAssembleRecordRecomputesMatchedFromObservations(t *testing.T) {
 	// A weakened absence observation (a container survived) must be recomputed
 	// as unmatched, never trusted from the runner.
 	phases[0].Observations[0].Observed = map[string]any{"containers": int64(1), "networks": int64(0), "processes": int64(0), "volumes": int64(0)}
-	result, err := AssembleRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, phases)
+	result, err := assembleSyntheticRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, phases)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,28 +122,45 @@ func TestAssembleRecordRecomputesMatchedFromObservations(t *testing.T) {
 	}
 }
 
-func TestAssembleRecordRefusesAnIncompleteCollection(t *testing.T) {
+func TestSyntheticRecordRefusesAnIncompleteCollection(t *testing.T) {
 	cat, err := catalog.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	phases := goldenCleanupPhases()
 	phases[7].Observations = nil // drop the rerun consumed marker
-	_, err = AssembleRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, phases)
+	_, err = assembleSyntheticRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, phases)
 	if err == nil {
 		t.Fatal("assembling an incomplete collection must fail")
 	}
 }
 
-func TestAssembleRecordRefusesAnUnexpectedProbe(t *testing.T) {
+func TestSyntheticRecordRefusesAnUnexpectedProbe(t *testing.T) {
 	cat, err := catalog.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	phases := goldenCleanupPhases()
 	phases[0].Observations = append(phases[0].Observations, Observation{ID: "cleanup.normal_stop.extra", Observed: absent()})
-	_, err = AssembleRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, phases)
+	_, err = assembleSyntheticRecord(cat, goldenEnv(), "cleanup_recovery", catalog.Endpoints{}, phases)
 	if err == nil {
 		t.Fatal("assembling an unexpected probe must fail")
+	}
+}
+
+func TestSyntheticRecordRefusesMissingPreconditionsOrResidue(t *testing.T) {
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, strip := range []func(*Env){
+		func(env *Env) { env.Preconditions = nil },
+		func(env *Env) { env.Residue = nil },
+	} {
+		env := goldenEnv()
+		strip(&env)
+		if _, err := assembleSyntheticRecord(cat, env, "cleanup_recovery", catalog.Endpoints{}, goldenCleanupPhases()); err == nil {
+			t.Fatal("unmeasured preconditions or residue must never default to clear")
+		}
 	}
 }

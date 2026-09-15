@@ -1,5 +1,12 @@
 package probe
 
+// Test-only synthetic record assembly. It proves the Go canonical record form
+// equals the pinned golden evidence bytes the offline verifier hashes. It lives
+// in a _test file on purpose: no production binary can assemble a record in
+// PR2, because no evidence kind is measured end to end. A future collector must
+// measure every required instance, preconditions and residue itself before any
+// record-writing path exists.
+
 import (
 	"fmt"
 	"slices"
@@ -7,6 +14,70 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/internal/codingenforcement/catalog"
 )
+
+// HostBinding is the record's host identity. The collector fills it from the
+// post-collection preflight; the runner treats it as opaque.
+type HostBinding struct {
+	MachineIDSHA256      string
+	BootID               string
+	KernelRelease        string
+	DaemonIdentitySHA256 string
+	Subordinate          catalog.SubordinateIDs
+	RouterNamespace      string
+}
+
+// ReleaseBinding is the record's release identity.
+type ReleaseBinding struct {
+	SourceRevision        string
+	ReleaseManifestSHA256 string
+	RuntimeArchiveSHA256  string
+	ImageApprovalSHA256   map[string]string
+}
+
+// Env is the invariant context every record in one collection shares. It is
+// supplied explicitly by the caller.
+type Env struct {
+	Host                         HostBinding
+	Release                      ReleaseBinding
+	Tools                        map[string]string
+	ProfileInputs                map[string]string
+	PreCollectionPreflightSHA256 string
+	// Preconditions and Residue are supplied explicitly; nothing defaults them
+	// to clear.
+	Preconditions   map[string]any
+	Residue         map[string]any
+	StartedAtUnix   int64
+	CompletedAtUnix int64
+}
+
+// Observation is one probe occurrence's measured result. Observed carries only
+// int64, bool, string, and []string leaves, exactly the closed shapes the
+// verifier accepts; matched is recomputed from the catalog, never stored here.
+type Observation struct {
+	ID             string
+	Language       string
+	EndpointSHA256 string
+	Observed       map[string]any
+}
+
+// key identifies the required catalog instance an observation satisfies.
+func (o Observation) key() instanceKey {
+	return instanceKey{ID: o.ID, Language: o.Language, EndpointSHA256: o.EndpointSHA256}
+}
+
+type instanceKey struct {
+	ID             string
+	Language       string
+	EndpointSHA256 string
+}
+
+// Phase is one catalog phase's observations with its measured wall-clock bounds.
+type Phase struct {
+	Name            string
+	StartedAtUnix   int64
+	CompletedAtUnix int64
+	Observations    []Observation
+}
 
 // RecordResult is one assembled evidence record and its recomputed outcome.
 type RecordResult struct {
@@ -21,15 +92,15 @@ type RecordResult struct {
 	Unmatched []string
 }
 
-// AssembleRecord builds one kind's record from a runner's phases. It fills each
+// assembleSyntheticRecord builds one kind's record from a runner's phases. It fills each
 // probe's expect from the embedded catalog, requires exactly the catalog's
 // required instances, recomputes matched with catalog.Evaluate (the same rule
 // the offline verifier reruns), and canonically encodes the result. The runner
 // supplies observed values only; it can neither assert a matched nor omit a
 // probe without AssembleRecord refusing.
-func AssembleRecord(cat *catalog.Catalog, env Env, kind string, endpoints catalog.Endpoints, phases []Phase) (RecordResult, error) {
-	if cat == nil {
-		return RecordResult{}, fmt.Errorf("probe: catalog is required")
+func assembleSyntheticRecord(cat *catalog.Catalog, env Env, kind string, endpoints catalog.Endpoints, phases []Phase) (RecordResult, error) {
+	if cat == nil || env.Preconditions == nil || env.Residue == nil {
+		return RecordResult{}, fmt.Errorf("probe: catalog, preconditions and residue are required")
 	}
 	entry, ok := cat.Kinds[kind]
 	if !ok {
@@ -138,9 +209,9 @@ func AssembleRecord(cat *catalog.Catalog, env Env, kind string, endpoints catalo
 		"inputs":                          inputsValue(entry.Inputs, env.ProfileInputs),
 		"endpoints":                       endpointValues(endpoints),
 		"tools":                           toAnyMap(env.Tools),
-		"preconditions":                   clearPreconditions,
+		"preconditions":                   env.Preconditions,
 		"phases":                          phaseValues,
-		"residue":                         clearResidue,
+		"residue":                         env.Residue,
 		"started_at_unix":                 env.StartedAtUnix,
 		"completed_at_unix":               env.CompletedAtUnix,
 	}

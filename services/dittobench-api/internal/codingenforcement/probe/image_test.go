@@ -75,12 +75,18 @@ func TestResolveApprovedImageRefusesADigestMismatch(t *testing.T) {
 	}
 }
 
-func TestSessionRequiresRootlessIsolatedDaemon(t *testing.T) {
-	docker := &fakeDocker{responses: map[string][]byte{
-		"info --format {{json .SecurityOptions}}": []byte(`["name=seccomp"]`),
-	}}
-	_, err := NewSession(context.Background(), docker, nil, Env{})
-	if err == nil {
-		t.Fatal("a nil catalog must be refused")
+func TestDaemonPostureRefusesRootfulOrUnlabelledDaemons(t *testing.T) {
+	for name, docker := range map[string]*fakeDocker{
+		"rootful": {responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=seccomp"]`),
+		}},
+		"unlabelled": {responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
+			"info --format {{json .Labels}}":          []byte(`[]`),
+		}},
+	} {
+		if err := requireRootlessIsolatedDaemon(context.Background(), docker); err == nil {
+			t.Fatalf("%s daemon was accepted", name)
+		}
 	}
 }
