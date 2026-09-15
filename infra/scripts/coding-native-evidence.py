@@ -131,7 +131,13 @@ BIND_FIELDS = {
     "profile_equal": "profile",
     "bounded": "limit",
     "supervisor_timeout": "deadline_ms",
+    "zero_retained": "limit",
 }
+# Peyton, 2026-09-15: hosted grading intentionally retains zero bytes of
+# candidate output, so its log probe is an exact zero-byte assertion, not a
+# per-mille floor. The candidate must have emitted at least the bound limit,
+# so an idle or crashed writer, which also retains nothing, never counts.
+ZERO_RETAINED_PROBE = "executor_grading.log_bound"
 # Rootless Docker maps container uid 0 to the daemon user and uid c >= 1 to
 # subordinate id start + c - 1.
 SUBORDINATE_MIN_START = 100000
@@ -333,6 +339,7 @@ EXPECT_KEYS = {
     "supervisor_timeout": {"type", "tolerance"},
     "control": {"type", "result"},
     "subordinate_ids": {"type", "uid", "gid"},
+    "zero_retained": {"type"},
 }
 SCOPES = ("host", "language", "trusted_endpoint", "router_endpoint", "proxy_endpoint")
 SCOPE_ROLES = {
@@ -1143,6 +1150,12 @@ def _validate_expect(expect: object, outcomes: set[str], label: str) -> None:
 def _validate_bind(probe: dict[str, Any], kind: str) -> None:
     bind = probe["bind"]
     require(type(bind) is dict, f"{probe['id']} bind is malformed")
+    zero_retained = probe["expect"]["type"] == "zero_retained"
+    require(
+        zero_retained == (probe["id"] == ZERO_RETAINED_PROBE)
+        and (not zero_retained or kind == "resource_enforcement"),
+        f"{probe['id']} zero-byte retention fits only grading output",
+    )
     field = BIND_FIELDS.get(probe["expect"]["type"])
     if kind != "resource_enforcement" or field is None:
         require(not bind, f"{probe['id']} must not bind limits")
@@ -1168,6 +1181,10 @@ def _validate_bind(probe: dict[str, Any], kind: str) -> None:
     require(
         group is None or probe["id"] == f"{container}.supervisor_timeout.{group}",
         f"{probe['id']} names another test group",
+    )
+    require(
+        not zero_retained or source == "log_limit_bytes",
+        f"{probe['id']} zero-byte retention must bind the output limit",
     )
 
 
@@ -1291,6 +1308,14 @@ def load_catalog(raw: bytes) -> dict[str, Any]:
         timeouts == set(COMMAND_TIMEOUT_SOURCES),
         "catalog does not evidence every grading test group timeout",
     )
+    require(
+        any(
+            probe["id"] == ZERO_RETAINED_PROBE
+            and probe["expect"]["type"] == "zero_retained"
+            for probe in kinds["resource_enforcement"]["probes"]
+        ),
+        "catalog grading output retention is not an exact zero-byte assertion",
+    )
     return catalog
 
 
@@ -1337,6 +1362,18 @@ def evaluate(
             "observed value is malformed",
         )
         return value["profile"] >= 1 and value["cgroup"] == value["profile"]
+    if kind == "zero_retained":
+        value = closed(
+            observed, {"emitted_bytes", "limit", "retained_bytes"}, "observed"
+        )
+        require(
+            all(is_int(item) for item in value.values()), "observed value is malformed"
+        )
+        return (
+            value["limit"] >= 1
+            and value["emitted_bytes"] >= value["limit"]
+            and value["retained_bytes"] == 0
+        )
     if kind == "bounded":
         value = closed(observed, {"enforced", "limit", "measured"}, "observed")
         require(
