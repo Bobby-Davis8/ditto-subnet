@@ -1,12 +1,11 @@
-"""End-to-end: the Go probe runner's records pass the offline PR1 verifier.
+"""The Go probe runner never produces evidence it did not measure.
 
-The runner binary assembles records from collected observations; this test feeds
-its output back through the exact offline verifier and asserts it is accepted,
-and that a weakened observation is refused. It reuses the PR1 evidence tests'
-synthetic World (reviewed checkout, store and profiles) so no host, daemon,
-custody path or credential is touched. A Docker-gated case proves the runner
-refuses a missing approved image instead of pulling it; it skips cleanly when
-Docker is unavailable.
+In PR2 the runner writes no evidence record. Its only output is a requested
+configuration observation report, which the offline verifier must refuse as a
+record. When the rootless CI job provides a live report, it is compared with
+limits the offline verifier derives from the committed approved grading
+profile, not with values taken from the report. No host, custody path or
+credential is touched.
 """
 
 import importlib.util
@@ -21,6 +20,20 @@ import pytest
 ROOT = Path(__file__).parents[2]
 API = ROOT / "services/dittobench-api"
 CMD = "./cmd/dittobench-coding-enforcement-probe"
+CI_PROFILE = API / "internal/codingenforcement/probe/testdata/ci-grading-profile.json"
+REPORT_SCHEMA = "dittobench-coding-native-probe-observations-v1"
+# CI sets this so a missing toolchain or failed build fails instead of skipping.
+REQUIRE_RUNNER = "DITTOBENCH_REQUIRE_PROBE_RUNNER"
+LIVE_REPORT = "DITTOBENCH_NATIVE_PROBE_REPORT"
+# Only the rootless probe job sets this; without it a missing report skips.
+REQUIRE_LIVE = "DITTOBENCH_REQUIRE_LIVE_PROBE_REPORT"
+
+_spec = importlib.util.spec_from_file_location(
+    "native_evidence_for_runner_tests", ROOT / "infra/scripts/coding-native-evidence.py"
+)
+assert _spec is not None and _spec.loader is not None
+EVIDENCE = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(EVIDENCE)
 
 PR1_TESTS = Path(__file__).parent / "test_coding_native_enforcement_evidence.py"
 _pr1_spec = importlib.util.spec_from_file_location("pr1_evidence_tests", PR1_TESTS)
@@ -29,145 +42,57 @@ PR1 = importlib.util.module_from_spec(_pr1_spec)
 _pr1_spec.loader.exec_module(PR1)
 
 
-def _go() -> str | None:
-    return shutil.which("go")
+def _unavailable(reason: str):
+    if os.environ.get(REQUIRE_RUNNER) == "1":
+        pytest.fail(f"{REQUIRE_RUNNER}=1 but {reason}")
+    pytest.skip(reason)
 
 
 @pytest.fixture(scope="module")
 def runner_binary(tmp_path_factory) -> Path:
-    go = _go()
+    go = shutil.which("go")
     if go is None:
-        pytest.skip("go toolchain is unavailable")
+        _unavailable("go toolchain is unavailable")
     out = tmp_path_factory.mktemp("probe-runner") / "enforcement-probe"
     build = subprocess.run(
-        [go, "build", "-o", str(out), CMD],
+        [str(go), "build", "-o", str(out), CMD],
         cwd=API,
         capture_output=True,
         text=True,
         check=False,
     )
     if build.returncode != 0:
-        pytest.skip(f"probe runner did not build: {build.stderr}")
+        _unavailable(f"probe runner did not build: {build.stderr}")
     return out
 
 
-def _env_file(record: dict) -> dict:
-    return {
-        "host": record["host"],
-        "release": record["release"],
-        "tools": record["tools"],
-        "inputs": record["inputs"],
-        "pre_collection_preflight_sha256": record["pre_collection_preflight_sha256"],
-        "started_at_unix": record["started_at_unix"],
-        "completed_at_unix": record["completed_at_unix"],
-    }
-
-
-def _observations_file(record: dict) -> dict:
-    phases = []
-    for phase in record["phases"]:
-        observations = [
-            {
-                "id": probe["id"],
-                "language": probe["language"],
-                "endpoint_sha256": probe["endpoint_sha256"],
-                "observed": probe["observed"],
-            }
-            for probe in phase["probes"]
-        ]
-        phases.append(
-            {
-                "name": phase["name"],
-                "started_at_unix": phase["started_at_unix"],
-                "completed_at_unix": phase["completed_at_unix"],
-                "observations": observations,
-            }
-        )
-    return {"phases": phases}
-
-
-def _assemble(
-    runner_binary: Path,
-    tmp: Path,
-    kind: str,
-    record: dict,
-    extra: list[str] | None = None,
-) -> bytes:
-    env_path = tmp / "env.json"
-    obs_path = tmp / "observations.json"
-    env_path.write_text(json.dumps(_env_file(record)))
-    obs_path.write_text(json.dumps(_observations_file(record)))
+@pytest.mark.parametrize("subcommand", ["assemble", "collect", "record"])
+def test_runner_has_no_record_writing_subcommand(runner_binary, subcommand):
     result = subprocess.run(
-        [
-            str(runner_binary),
-            "assemble",
-            "--kind",
-            kind,
-            "--env",
-            str(env_path),
-            "--observations",
-            str(obs_path),
-            *(extra or []),
-        ],
-        capture_output=True,
-        check=False,
+        [str(runner_binary), subcommand], capture_output=True, text=True, check=False
     )
-    assert result.returncode == 0, result.stderr.decode()
-    return result.stdout
+    assert result.returncode != 0
+    assert "unknown subcommand" in result.stderr
 
 
-# The runner collects the non-network kinds; network is deferred to a later PR.
-NON_NETWORK_KINDS = ("resource_enforcement", "preexec_confinement", "cleanup_recovery")
+def _report(entries: list[dict]) -> dict:
+    return {"schema": REPORT_SCHEMA, "enforcement_measured": False, "entries": entries}
 
 
-@pytest.mark.parametrize("kind", NON_NETWORK_KINDS)
-def test_runner_record_equals_the_verified_record(runner_binary, tmp_path, kind):
+def test_observation_report_is_refused_as_an_evidence_record(tmp_path):
+    raw = EVIDENCE.canonical_bytes(_report([]))
+    with pytest.raises(EVIDENCE.Refusal):
+        EVIDENCE.parse_record_envelope(raw)
     world = PR1.World(tmp_path)
-    record = world.records[kind]
-    produced = _assemble(runner_binary, tmp_path, kind, record)
-    assert produced == PR1.canonical(record), "runner diverged from the canonical form"
-
-
-@pytest.mark.parametrize("kind", NON_NETWORK_KINDS)
-def test_verifier_accepts_the_runner_records(runner_binary, tmp_path, kind):
-    world = PR1.World(tmp_path)
-    record = world.records[kind]
-    produced = _assemble(runner_binary, tmp_path, kind, record)
-    sha = world.put(produced)
-    result, ok = world.verify([sha])
-    assert ok and result["records"][0]["failure"] is None, result
-
-
-def test_verifier_refuses_a_weakened_runner_record(runner_binary, tmp_path):
-    world = PR1.World(tmp_path)
-    record = PR1.copy.deepcopy(world.records["resource_enforcement"])
-    # A container whose measured OOM peak sits far below the floor is not
-    # enforcement. The runner recomputes matched=false; the verifier refuses it.
-    probe = PR1.find_probe(record, "harness.memory_oom", language="go")
-    probe["observed"]["measured"] = 1
-    produced = _assemble(runner_binary, tmp_path, "resource_enforcement", record)
-    sha = world.put(produced)
-    failure = world.verify([sha])[0]["records"][0]["failure"]
-    assert failure is not None and "harness.memory_oom" in failure, failure
-
-
-def test_test_mode_exposes_only_passed_and_total(runner_binary, tmp_path):
-    world = PR1.World(tmp_path)
-    record = world.records["cleanup_recovery"]
-    output = _assemble(
-        runner_binary, tmp_path, "cleanup_recovery", record, extra=["--test"]
-    )
-    summary = json.loads(output)
-    assert set(summary) == {"passed", "total"}
-    assert summary["passed"] == summary["total"] > 0
+    result, ok = world.verify([world.put(raw)])
+    assert not ok and result["records"][0]["failure"] is not None
 
 
 def test_runner_refuses_a_missing_approved_image_instead_of_pulling(runner_binary):
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("docker is unavailable")
-    info = subprocess.run([docker, "info"], capture_output=True, check=False)
-    if info.returncode != 0:
+    if subprocess.run([docker, "info"], capture_output=True, check=False).returncode:
         pytest.skip("docker daemon is unavailable")
     absent = "registry.invalid/enforcement-probe-e2e@sha256:" + "0" * 64
     result = subprocess.run(
@@ -180,65 +105,46 @@ def test_runner_refuses_a_missing_approved_image_instead_of_pulling(runner_binar
     assert "refusing to pull" in result.stderr, result.stderr
 
 
-LIVE_OUTPUT = "DITTOBENCH_NATIVE_PROBE_OUTPUT"
+def _expected_requested_config(language: str) -> dict:
+    """Limits derived independently by the offline verifier's profile parser."""
+
+    policy = EVIDENCE.parse_grading_profile(CI_PROFILE.read_bytes())["policy"]
+    scratch = policy["ScratchLimitBytes"]
+    if language == "rust":
+        scratch -= min(scratch // 2, 128 << 20)
+    return {
+        "memory_limit_bytes": policy["MemoryLimitBytes"],
+        "memory_swap_bytes": 0,
+        "cpu_quota_millis": policy["CPUQuotaMillis"],
+        "pids_limit": policy["PidsLimit"],
+        "scratch_limit_bytes": scratch,
+        "read_only_rootfs": True,
+    }
 
 
-def _live_observations() -> dict:
-    path = os.environ.get(LIVE_OUTPUT)
-    if not path or not Path(path).is_file():
-        pytest.skip(f"{LIVE_OUTPUT} is unset; the rootless CI job provides it")
-    return json.loads(Path(path).read_text())
+def _live_report() -> dict:
+    path = os.environ.get(LIVE_REPORT)
+    if not path:
+        if os.environ.get(REQUIRE_LIVE) == "1":
+            pytest.fail(f"{REQUIRE_LIVE}=1 but {LIVE_REPORT} is unset")
+        pytest.skip(f"{LIVE_REPORT} is unset; the rootless CI job provides it")
+    return json.loads(Path(str(path)).read_text())
 
 
-def _live_world(tmp_path: Path, live: dict, monkeypatch) -> "PR1.World":
-    """A World whose approved grading profile is the one the live run enforced."""
-
-    for name, value in live["grading_resource_policy"].items():
-        monkeypatch.setitem(PR1.GRADING_POLICY, name, value)
-    grading_sha = PR1.hashlib.sha256(PR1.go_canonical(PR1.GRADING_PROFILE)).hexdigest()
-    monkeypatch.setitem(PR1.INPUTS, "grading_profile_sha256", grading_sha)
-    return PR1.World(tmp_path)
-
-
-def _splice_live(record: dict, live: dict, mutate=None) -> int:
-    spliced = 0
-    for phase in live["phases"]:
-        for observation in phase["Observations"]:
-            probe = PR1.find_probe(record, observation["ID"], observation["Language"])
-            observed = dict(observation["Observed"])
-            if mutate is not None:
-                observed = mutate(observation["ID"], observed)
-            probe["observed"] = observed
-            spliced += 1
-    return spliced
+def test_live_requested_config_equals_the_approved_profile():
+    report = _live_report()
+    assert report["schema"] == REPORT_SCHEMA
+    assert report["enforcement_measured"] is False
+    assert report["entries"]
+    for entry in report["entries"]:
+        assert entry["container_class"] == "executor_grading"
+        assert entry["source"] == "docker_inspect_created_unstarted_container"
+        assert entry["requested_config"] == _expected_requested_config(
+            entry["language"]
+        ), entry
 
 
-def test_verifier_accepts_live_rootless_executor_observations(
-    runner_binary, tmp_path, monkeypatch
-):
-    live = _live_observations()
-    world = _live_world(tmp_path, live, monkeypatch)
-    record = PR1.copy.deepcopy(world.records["resource_enforcement"])
-    assert _splice_live(record, live) >= 5
-    produced = _assemble(runner_binary, tmp_path, "resource_enforcement", record)
-    result, ok = world.verify([world.put(produced)])
-    assert ok and result["records"][0]["failure"] is None, result
-
-
-def test_verifier_refuses_live_observations_under_a_weakened_profile(
-    runner_binary, tmp_path, monkeypatch
-):
-    live = _live_observations()
-    world = _live_world(tmp_path, live, monkeypatch)
-    record = PR1.copy.deepcopy(world.records["resource_enforcement"])
-
-    def loosen(probe_id, observed):
-        # A launch that doubled the pids cap no longer equals the approved profile.
-        if probe_id == "executor_grading.pids_max":
-            observed["cgroup"] = observed["cgroup"] * 2
-        return observed
-
-    _splice_live(record, live, loosen)
-    produced = _assemble(runner_binary, tmp_path, "resource_enforcement", record)
-    failure = world.verify([world.put(produced)])[0]["records"][0]["failure"]
-    assert failure is not None and "executor_grading.pids_max" in failure, failure
+def test_live_report_is_refused_as_an_evidence_record():
+    raw = EVIDENCE.canonical_bytes(_live_report())
+    with pytest.raises(EVIDENCE.Refusal):
+        EVIDENCE.parse_record_envelope(raw)
