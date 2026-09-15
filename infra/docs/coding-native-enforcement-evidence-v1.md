@@ -136,6 +136,7 @@ Expectation types:
 | `exact` | The observed object equals the catalog value |
 | `profile_equal` | The cgroup value equals the profile value, and the profile value is at least 1 |
 | `bounded` | Enforcement was seen, `limit` and `measured` are at least 1, and `limit * floor <= measured * 1000 <= limit * ceiling` |
+| `zero_retained` | Exactly 0 bytes retained: `retained_bytes == 0`, with `limit >= 1` equal to the approved output limit and `emitted_bytes >= limit`. Only `executor_grading.log_bound` uses it |
 | `supervisor_timeout` | Exit 124, no live processes, and elapsed time between the deadline and the tolerance, for a named `hidden` or `visible` test group |
 | `control` | `all_pass`: at least two tests, all passed. `some_fail`: at least two tests, at least one passed and one failed. `timeout`: the run timed out. Pass, wrong and hang controls per language must share one `suite_sha256`, and pass and wrong must have the same total |
 | `subordinate_ids` | Host uid and gid equal subordinate start `+ id - 1` for the catalog candidate ids |
@@ -152,9 +153,19 @@ limit, so an idle or crashed burner fails:
 | `pids_cap` (pids when fork fails) | 1000 | 1000 |
 | `scratch_enospc` (bytes written at ENOSPC) | 950 | 1000 |
 | `nofile_cap` (fds open at EMFILE; 1014 of 1024 leaves a 10 fd baseline) | 990 | 1000 |
-| `log_bound` (bytes retained) | 500 | 1000 |
+| `harness.log_bound`, `executor_authoring.log_bound` (bytes retained) | 500 | 1000 |
 
 Supervisor elapsed time must fall between the deadline and 1100 per mille of it.
+
+`executor_grading.log_bound` has no floor. Hosted grading intentionally keeps
+none of the candidate's output, so Peyton decided (2026-09-15) that it is an
+exact assertion that 0 bytes are retained. Its observation is
+`{"emitted_bytes", "limit", "retained_bytes"}`. `limit` must equal the approved
+24 KiB output limit, and the candidate must have written at least that much.
+Otherwise an idle or crashed writer, which also retains nothing, would count.
+One retained byte fails. Both verifiers refuse a catalog that puts this probe back
+on a per-mille floor, turns it into a loose `exact` value, or uses
+`zero_retained` for any other probe or limit.
 
 ## Canonical encoding
 
@@ -292,8 +303,24 @@ approval's `private_input_custody` digest is the digest of that object.
   `issued_at`. `host_preflight` is a post-collection preflight, kept verbatim
   and taken after the last record.
 - **Resources:** every language image the approval names.
-- **Endpoints:** hashed endpoints plus the connectivity-profile digest only
-  (hashes are now salted with the endpoint-set digest; see the questions).
+- **Endpoints:** hashed endpoints plus the connectivity-profile digest only.
+  Salting the hashes with the endpoint-set digest is accepted on three
+  conditions, and each is tested:
+  - **Domain separation.** Each endpoint hash is
+    `sha256("dittobench-coding-native-endpoint-v1" \0 endpoint_set_sha256 \0 label \0 address:port)`.
+    No other digest uses that tag, and the preimage can never be a canonical
+    JSON document. Role labels and endpoint sets keep otherwise equal endpoints
+    apart.
+  - **Approval pin.** `check-approval` requires the reviewed
+    `--connectivity-endpoint-set-sha256` pin and refuses a mismatch. PR 3a
+    moves this pin into the signed approval document.
+  - **Full digest retained.** Each network record keeps
+    `inputs.connectivity_profile_sha256`, and the review and check output keep
+    it next to the endpoint set. A reissued profile with the same endpoint set
+    but a different full digest is refused.
+- **Floors:** CPU, memory, pids, scratch and nofile are accepted as listed.
+  Grading output retention is an exact zero-byte assertion, not a 500 per-mille
+  floor.
 - **Custody:** its digest is cross-bound to machine and boot.
 - **Proxy:** the refusing proxy is part of network collection and must be
   running and listed.
@@ -308,20 +335,18 @@ approval's `private_input_custody` digest is the digest of that object.
 
 ## Questions for Peyton
 
-- **Endpoint-set digest.** This refines "hashed labels plus the profile digest".
-  Endpoint hashes are salted with the endpoint-set digest rather than the full
-  profile digest, so the expired probe profile and the canary's later profile
-  share them. The approval review pins the endpoint set. Is dropping `schema`,
-  the issue/expiry times and the shadow flags from that set right?
-- **Floors.** Are the lower bounds above right? The log floor of 500 is the
-  least certain, because Docker's local log driver with `max-file=1` may keep
-  any amount under 8 MiB after rotation.
+- **Harness and authoring log floors.** These keep the 500 per-mille floor.
+  Docker's local log driver with `max-file=1` may keep any amount under 8 MiB
+  after rotation, so this floor is still the least certain.
 - **Custody binding and the other tolerances** from the first round remain
   open.
 
-## Host-side enforcement follow-up (B5 later PR)
+## Host-side enforcement follow-up (B5 PR 3a)
 
-This PR does not change runtime code. The native consumer still has three gaps:
+Peyton (2026-09-15): this is not deferred beyond B5. No host collection can
+count as approval evidence until the host verifies the detached curator signature
+and the daemon identity is bound into the signed approval and evidence. This PR
+does not change runtime code. The native consumer still has three gaps:
 
 - `native.py` and `run.py` take `--native-approval-sha256` on the command line
   and never check the curator signature on the host. The signature is checked
