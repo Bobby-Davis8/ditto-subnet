@@ -28,6 +28,25 @@
       is set, or --start-at-task skipped the enable flag. Nothing was removed.
     quiet: true
 
+# Accident guard only. The supported entry point,
+# infra/scripts/coding-hosted-guarded-run.py, verifies the reviewed checkout,
+# validates the controller inputs before ansible parses anything, builds the
+# enabled flag, confirmation and revision itself, and sets this marker in
+# ansible's environment. Anyone able to run ansible-playbook can set the same
+# variable, so the marker proves nothing about the caller: it only stops an
+# accidental direct run, which is unsupported. It sits inside the dynamic
+# include so --start-at-task cannot skip it, and reads the controller
+# environment, never an operator template.
+- name: Require the guarded entry point marker, an accident guard only
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.env', 'DITTO_CODING_HOSTED_GUARDED_RUN') == 'worker-credentials-remove'
+    fail_msg: >-
+      Run this only through uv run --locked --script infra/scripts/coding-hosted-guarded-run.py
+      worker-credentials-remove REVIEWED_REVISION; direct ansible-playbook runs are
+      unsupported. Nothing was removed.
+    quiet: true
+
 # ansible_play_batch and ansible_play_hosts_all are computed from the run's
 # targeting and are not overridable by -e; require exactly the one dedicated host
 # (batch and the whole host set, so serial: 1 cannot pass without --limit) so a

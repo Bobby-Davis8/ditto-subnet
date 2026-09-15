@@ -59,6 +59,11 @@ OWNER = "ditto-coding-hosted"
 
 # main.yml
 PRESET = "Refuse a preset gate, capture, result or credential-named variable"
+GUARD_MARKER = "Require the guarded entry point marker, an accident guard only"
+MARKER_ENV = "DITTO_CODING_HOSTED_GUARDED_RUN"
+OPERATION = "worker-credentials-materialize"
+CLEANUP_OPERATION = "worker-credentials-remove"
+SPECS = ROOT / "infra/ansible/guarded-runs"
 GATE_FREEZE = "Freeze the enabled gate once"
 DORMANT = "Explain dormant native worker credential materialization"
 INCLUDE = "Materialize the worker-owned credential files behind the enabled gate"
@@ -180,6 +185,7 @@ def test_main_refuses_presets_then_freezes_the_gate_and_includes() -> None:
 def test_materialize_task_order() -> None:
     assert [t["name"] for t in _docs(MATERIALIZE)] == [
         PRESET_INCLUDE,
+        GUARD_MARKER,
         BATCH,
         PIPELINING,
         CHECK_MODE,
@@ -231,11 +237,13 @@ def test_in_include_guards_are_start_at_task_proof_and_target_one_host() -> None
             )
             or prefix == CLEANUP_PREFIX
         )
-        # The batch guard is next and pins the exact single host and the whole
-        # play host set (so serial: 1 cannot pass without --limit), not a
-        # -e-overridable inventory_hostname/group check.
-        assert names[1] == BATCH
-        batch = tasks[1]["ansible.builtin.assert"]["that"]
+        # The guarded entry point's marker is next, then the batch guard pins
+        # the exact single host and the whole play host set (so serial: 1 cannot
+        # pass without --limit), not a -e-overridable inventory_hostname/group
+        # check.
+        assert names[1] == GUARD_MARKER
+        assert names[2] == BATCH
+        batch = tasks[2]["ansible.builtin.assert"]["that"]
         assert batch == [
             "ansible_play_batch == ['ditto-coding-hosted-v2']",
             "ansible_play_hosts_all == ['ditto-coding-hosted-v2']",
@@ -249,7 +257,7 @@ def test_in_include_guards_are_start_at_task_proof_and_target_one_host() -> None
 def test_pipelining_and_keep_remote_files_guard_precedes_secrets() -> None:
     tasks = _docs(MATERIALIZE)
     names = [t["name"] for t in tasks]
-    assert names[2] == PIPELINING
+    assert names[3] == PIPELINING
     that = _task(PIPELINING, tasks)["ansible.builtin.assert"]["that"]
     assert "(ansible_pipelining | default(false)) is sameas true" in that
     # ansible_ssh_pipelining wins over ansible_pipelining on 2.21.2, so it must
@@ -417,8 +425,84 @@ def test_playbooks_and_ci_registration() -> None:
     assert "coding_hosted_worker_credentials" in platform
 
 
+def test_guarded_entry_point_specs_and_markers() -> None:
+    # The supported entry point is infra/scripts/coding-hosted-guarded-run.py;
+    # each role's marker is an accident guard inside its dynamic include.
+    for tasks, operation, nothing in (
+        (_docs(MATERIALIZE), OPERATION, "Nothing was written."),
+        (_docs(REMOVE), CLEANUP_OPERATION, "Nothing was removed."),
+    ):
+        marker = _task(GUARD_MARKER, tasks)["ansible.builtin.assert"]
+        assert marker["that"] == [
+            f"lookup('ansible.builtin.env', '{MARKER_ENV}') == '{operation}'"
+        ]
+        assert marker["quiet"] is True
+        assert _flat(marker["fail_msg"]).endswith(nothing)
+        assert "{{" not in marker["fail_msg"]
+    assert MARKER_ENV not in MAIN and MARKER_ENV not in CLEANUP_MAIN
+    base = {
+        "schema": "ditto-coding-hosted-guarded-run/v1",
+        "limit": "ditto-coding-hosted-v2",
+        "nonsecret_env_vars": [],
+    }
+    creds = _task(CREDS, _docs(MATERIALIZE))["loop"]
+    assert json.loads((SPECS / f"{OPERATION}.json").read_text()) == {
+        **base,
+        "operation": OPERATION,
+        "playbook": "playbooks/gcp-coding-hosted-worker-credentials.yml",
+        "enabled_var": f"{PREFIX}enabled",
+        "confirmation_var": f"{PREFIX}confirmation",
+        "confirmation": CONFIRMATION,
+        "revision_var": f"{PREFIX}source_revision",
+        # The guard applies the role's own bounds before ansible starts: each
+        # value is printable ASCII without whitespace, longer than its prefix,
+        # within its byte bound, and the eight values are distinct.
+        "secret_env": [
+            {
+                "name": item["env"],
+                "charset": "printable_ascii",
+                "prefix": item["prefix"],
+                "min_length": len(item["prefix"]) + 1,
+                "max_length": item["max_bytes"],
+            }
+            for item in creds
+        ],
+        "distinct_secret_values": True,
+        "forbidden_env": [
+            "DITTO_CODING_WORKER_HIPPIUS_PRIVATE_INPUT_CURATOR_SECRET_KEY",
+            "DITTO_CODING_HIPPIUS_PRIVATE_INPUT_CURATOR_SECRET_KEY",
+        ],
+        "forbidden_env_prefixes": [],
+    }
+    assert [item["env"] for item in creds] == ENV_NAMES
+    assert json.loads((SPECS / f"{CLEANUP_OPERATION}.json").read_text()) == {
+        **base,
+        "operation": CLEANUP_OPERATION,
+        "playbook": "playbooks/gcp-coding-hosted-worker-credentials-cleanup.yml",
+        "enabled_var": f"{CLEANUP_PREFIX}enabled",
+        "confirmation_var": f"{CLEANUP_PREFIX}confirmation",
+        "confirmation": CLEANUP_CONFIRMATION,
+        "revision_var": f"{CLEANUP_PREFIX}source_revision",
+        "secret_env": [],
+        "distinct_secret_values": False,
+        # Removal needs no secret: an exported credential is refused.
+        "forbidden_env": ["DITTO_CODING_HIPPIUS_PRIVATE_INPUT_CURATOR_SECRET_KEY"],
+        "forbidden_env_prefixes": ["DITTO_CODING_WORKER_"],
+    }
+    for playbook, operation in (
+        (PLAYBOOK, OPERATION),
+        (CLEANUP_PLAYBOOK, CLEANUP_OPERATION),
+    ):
+        text = playbook.read_text()
+        assert "infra/scripts/coding-hosted-guarded-run.py" in text
+        assert operation in text
+        assert "-e '" not in text
+
+
 def test_docs_describe_every_guard() -> None:
-    docs = (ROOT / "infra/docs/coding-hosted-worker-credentials-v2.md").read_text()
+    docs = _flat(
+        (ROOT / "infra/docs/coding-hosted-worker-credentials-v2.md").read_text()
+    )
     for phrase in (
         "`coding_hosted_worker_credentials_*`",
         CONFIRMATION,
@@ -432,8 +516,8 @@ def test_docs_describe_every_guard() -> None:
         "`refreshing`",
         "An empty listing",
         f"`{REHEARSAL_GATE}=1`",
-        "dedicated image reader",
-        "capped OpenRouter",
+        "dedicated image-reader identity and HMAC key",
+        "dedicated, hard-capped OpenRouter key",
         "O_NOFOLLOW",
         "worker UID",
         "ANSIBLE_CONFIG",
@@ -447,6 +531,19 @@ def test_docs_describe_every_guard() -> None:
         "--step",
         "private_dir_mode",
         "not_attempted",
+        "infra/scripts/coding-hosted-guarded-run.py",
+        OPERATION,
+        CLEANUP_OPERATION,
+        "worker-credentials-journal-check",
+        "accident guard only",
+        "Direct `ansible-playbook` invocation is unsupported",
+        "`#jinja2`",
+        "two-hour",
+        "request.time",
+        "platform-storage-hmac-secret",
+        "validator-openrouter-key",
+        "hard credit limit",
+        "renew",
     ):
         assert phrase in docs, phrase
 
@@ -747,7 +844,21 @@ def _mat_host(root: Path) -> dict:
     }
 
 
-def _run(tmp_path, name, hosts, plays, *flags, extra_env=None) -> str:
+_MARKER_LITERAL = re.compile(
+    re.escape(f"lookup('ansible.builtin.env', '{MARKER_ENV}') == '") + r"([a-z-]+)'"
+)
+_UNSET = object()
+
+
+def _marker_for(plays: object) -> str | None:
+    # The guarded entry point sets exactly one operation's marker per ansible
+    # run; the rehearsal sets the one the rehearsed tasks require.
+    found = set(_MARKER_LITERAL.findall(json.dumps(plays)))
+    assert len(found) <= 1, found
+    return next(iter(found), None)
+
+
+def _run(tmp_path, name, hosts, plays, *flags, extra_env=None, marker=_UNSET) -> str:
     work = tmp_path / name
     work.mkdir()
     inventory = {"all": {"children": {"role_coding_hosted": {"hosts": hosts}}}}
@@ -768,6 +879,9 @@ def _run(tmp_path, name, hosts, plays, *flags, extra_env=None) -> str:
         LOOKUP_STANDIN: LOOKUP_VALUE,
         **(extra_env if extra_env is not None else STANDINS),
     }
+    chosen = _marker_for(plays) if marker is _UNSET else marker
+    if chosen is not None:
+        env[MARKER_ENV] = chosen
     completed = subprocess.run(
         [
             "uvx",
@@ -1141,6 +1255,7 @@ def _run_gate(tmp_path, name, host_vars, play, materialize_file, *flags) -> str:
         "ANSIBLE_RETRY_FILES_ENABLED": "0",
         "ANSIBLE_CALLBACK_RESULT_FORMAT": "yaml",
         "ANSIBLE_LIBRARY": LIBRARY_PATH,
+        MARKER_ENV: OPERATION,
         **STANDINS,
     }
     completed = subprocess.run(
@@ -1259,6 +1374,36 @@ def test_rehearsal_targeting_and_pipelining_guards(tmp_path) -> None:
     _leak_free(output)
     assert _outcome(k_root, "b")["task"] == PIPELINING
     assert not any(_private(k_root).iterdir())
+
+
+@rehearsal
+def test_rehearsal_runs_without_the_guard_marker_change_nothing(tmp_path) -> None:
+    target = "ditto-coding-hosted-v2"
+    for marker in (None, "worker-credentials-remove"):
+        label = marker or "none"
+        root = tmp_path / "hosts" / f"mat_{label}"
+        output = _run(
+            tmp_path,
+            f"mat_marker_{label}",
+            {target: _mat_host(root)},
+            [_play(_rehearsal_materialize(real_batch=True), "m")],
+            marker=marker,
+        )
+        _leak_free(output)
+        _assert_refused(root, GUARD_MARKER, "m")
+    for marker in (None, OPERATION):
+        label = marker or "none"
+        root = tmp_path / "hosts" / f"rm_{label}"
+        output = _run(
+            tmp_path,
+            f"rm_marker_{label}",
+            {target: _cleanup_host(root)},
+            [_play(_rehearsal_remove(real_batch=True), "r")],
+            marker=marker,
+        )
+        _leak_free(output)
+        assert _outcome(root, "r")["task"] == GUARD_MARKER
+        assert len(list(_private(root).iterdir())) == 3
 
 
 # ─── Cleanup rehearsal ────────────────────────────────────────────────────────
