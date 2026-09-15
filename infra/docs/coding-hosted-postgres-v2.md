@@ -127,13 +127,106 @@ accepts:
   cannot carry it, and a `coding_hosted_postgres_environment_password` variable
   is refused.
 
-This is a separate protected convergence. It uses the same pattern as the first
-provisioning of `gcp-platform-pg.yml`: an operator who already holds
-`platform-db-password` exports it, runs
-`playbooks/gcp-coding-hosted-postgres-environment.yml` with the exact
-confirmation `MATERIALIZE NATIVE CODING POSTGRES ENVIRONMENT`, passing booleans
-as JSON extra vars (`-e '{"coding_hosted_postgres_environment_enabled": true, …}'`),
-and unsets it. No workflow identity gets Secret Manager access.
+This is a separate protected convergence. An operator who already holds
+`platform-db-password` exports it, and the exact Platform private IP from the
+reviewed `coding_hosted_postgres_access` output, in the controller shell, runs
+the guarded entry point, and unsets both. No workflow identity gets Secret
+Manager access.
+
+```bash
+# From a fresh, clean checkout of the reviewed revision.
+export DITTO_CODING_PG_PASSWORD="$(gcloud secrets versions access latest \
+  --secret=platform-db-password --project=ditto-app-dev)"
+export DITTO_CODING_PG_HOST=10.30.0.…     # coding_hosted_postgres_access output
+GCP_OSLOGIN_USER=… uv run --locked --script infra/scripts/coding-hosted-guarded-run.py \
+  postgres-environment-materialize <reviewed 40-hex revision>
+unset DITTO_CODING_PG_PASSWORD DITTO_CODING_PG_HOST
+```
+
+### Guarded entry point
+
+`infra/scripts/coding-hosted-guarded-run.py` is the only supported way to run
+this playbook. Direct `ansible-playbook`
+invocation is unsupported. The script is shared byte for byte with the worker
+credential roles; each operation is a data file under
+`infra/ansible/guarded-runs/` (here `postgres-environment-materialize.json`),
+so adding an operation never edits the script or a shared registry. It:
+
+- **Accepts only two arguments**, the operation name and the reviewed 40-hex
+  revision. Any other argument, including `-e`, `--start-at-task`, `-v`,
+  `--step`, `--check`, `--tags`, `-i` or `--limit`, is refused.
+- **Verifies the checkout.** `HEAD` must equal the revision and `git status`
+  must show no tracked change. Because `status` trusts the index stat cache,
+  `assume-unchanged`/`skip-worktree` bits and clean filters, every file under
+  `infra/ansible` and `infra/scripts` is also hashed as a git blob, without
+  filters, and compared with the reviewed tree, including symlinks and the
+  executable bit. Any untracked or ignored file there, such as a `host_vars`
+  file, a `__pycache__` directory or a forged spec, is refused. git runs with
+  no `GIT_*` variable and no system or global config.
+- **Refuses dangerous environment** rather than silently stripping it:
+  every `ANSIBLE_*` and `_ANSIBLE_*` variable (config file, keep remote files,
+  debug, verbosity, log path, callbacks, strategy, plugin and library paths,
+  remote temp and all others), `LD_*`, `DYLD_*`, every `PYTHON*` variable except
+  `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `PYTHONIOENCODING`,
+  `PYTHONUTF8` and `PYTHONHASHSEED`, a preset marker, an empty or relative
+  `PATH` entry, a relative `HOME`, a malformed `GCP_OSLOGIN_USER`, template
+  syntax in any passed-through value, and any variable the operation forbids.
+- **Validates every protected input before Ansible parses anything.** Here
+  `DITTO_CODING_PG_PASSWORD` must be one line of 1 to 1024 characters with no
+  control character or surrounding whitespace, and `DITTO_CODING_PG_HOST` must
+  fully match the role's own address pattern. Both refuse template syntax:
+  `{{`, `{%`, `{#` anywhere, and `#jinja2` in any case anywhere, since a
+  `#jinja2:` header can redefine the delimiters and line prefixes for the rest
+  of a string. ansible-core 2.21 has no configuration that changes the
+  delimiters otherwise. A refusal names only the variable and a failure class
+  (`missing`, `empty`, `template_syntax`, `control_character`,
+  `surrounding_whitespace`, `too_long`, `pattern_mismatch`, …), never a value.
+- **Builds the extra vars itself:** the JSON boolean
+  `coding_hosted_postgres_environment_enabled: true`, the exact confirmation,
+  the revision, and the pattern-validated, non-secret host. No secret is passed
+  through extra vars, argv or stdin; the password reaches Ansible only in its
+  environment, where the role reads it.
+- **Runs a fixed argv:** the locked interpreter with `-I -m ansible.cli.playbook`,
+  `-i infra/ansible/inventory/gcp.yml`, `--limit ditto-coding-hosted-v2`, the
+  constructed `-e` and the fixed playbook, with `infra/ansible` as the working
+  directory and stdin closed. It never resolves `ansible-playbook` from `PATH`.
+  `uv run --locked --script` installs `coding-hosted-guarded-run.py.lock`, and
+  the script refuses unless the interpreter is a virtual environment whose
+  installed distributions are exactly the locked set and versions, with
+  ansible-core 2.21.2 imported from inside it. The script's own directory is
+  removed from `sys.path` before any other import.
+- **Constructs Ansible's environment from an allowlist:** `HOME`, `USER`,
+  `LOGNAME`, `PATH`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `NO_COLOR`,
+  `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_*` and `GCP_*`,
+  the operation's validated secret inputs, and fixed settings:
+  `ANSIBLE_CONFIG` and `ANSIBLE_ROLES_PATH` in the verified tree,
+  `ANSIBLE_KEEP_REMOTE_FILES=False`, `ANSIBLE_DEBUG=False`,
+  `ANSIBLE_VERBOSITY=0`, `ANSIBLE_DISPLAY_ARGS_TO_STDOUT=False`, and every
+  plugin, module and module_utils search path pointed at a directory that
+  cannot exist in a verified tree, so nothing under `~/.ansible/plugins` or
+  `/usr/share/ansible/plugins` shadows a builtin. Pipelining is left to the
+  playbook and `ansible.cfg`, as the role's guard expects.
+- **Sets the marker** `DITTO_CODING_HOSTED_GUARDED_RUN=<operation>`, which the
+  role requires as the second task of its dynamic include.
+
+The marker is an **accident guard only**. Anyone who can run `ansible-playbook`
+can export the same variable, so it proves nothing about the caller; it stops
+an accidental direct run. Every role guard below still applies in full.
+
+Residual trust, documented rather than closed:
+- The operator's `PATH` (which resolves `git`, `ssh` and the ProxyCommand's
+  `gcloud`), `~/.ssh/config`, and the collections installed in
+  `~/.ansible/collections` (the `google.cloud` inventory plugin and the
+  `ansible.posix` callbacks the repo `ansible.cfg` enables) run with the
+  password in the controller environment. Install collections only from
+  `infra/ansible/requirements.yml`.
+- The script verifies the checkout it runs from, including itself, so a
+  modified script can skip its own checks. Use a fresh clone or worktree of the
+  reviewed revision and run it unmodified.
+- A `uv run --with` package, or other code injected into the interpreter,
+  runs before the distribution check can refuse it.
+- The operator can still edit files between verification and Ansible reading
+  them, or paste the password anywhere else in their own shell.
 
 The role behaves as follows:
 - The `enabled` gate is decided exactly once. `tasks/main.yml` captures the
@@ -247,23 +340,27 @@ Two residual limitations are accepted, not closed, by design:
   start after the final re-check but before a reader opens the copy. The
   operator stops every unit first (the pre-write listing must be `inactive` or
   `failed`); the re-checks catch a unit that starts during the write or verify.
-- **Operator-supplied Jinja.** ansible-core renders a trusted `-e`/inventory
-  string on any reference and offers no way to read a variable's raw text
-  without rendering it. Capturing each input once behind `default(..., true)`
-  confines every input to a single render and turns a template that renders
-  undefined, such as `{{ {}[lookup('env', …)] }}`, into an empty value. It does
-  not neutralise a template that raises: for example
+- **Operator-supplied Jinja, direct invocation only.** ansible-core renders a
+  trusted `-e`/inventory string on any reference and offers no way to read a
+  variable's raw text without rendering it. Capturing each input once behind
+  `default(..., true)` confines every input to a single render and turns a
+  template that renders undefined, such as `{{ {}[lookup('env', …)] }}`, into an
+  empty value. It does not neutralise a template that raises: for example
   `{{ lookup('file', lookup('env', 'DITTO_CODING_PG_PASSWORD')) }}` as `enabled`
   or `host` fails the run closed at the capture, writing nothing, but
   ansible-core 2.21.2 prints the raised message, including the value, through
   the task result's `exception` field, which `no_log` deliberately preserves, on
   the console and in any `ANSIBLE_LOG_PATH` log. Core Jinja offers no construct
-  that swallows such an error. An operator who pastes hostile Jinja into their
-  own command still holds the exported password directly. The write module's
-  `no_log` argument and the pipelining guard keep the password off the target's
-  disk and journal, but cannot stop an operator who already holds it. Moving
-  `host` to a controller-only environment input, like the password, would remove the last
-  rendered input; that is a larger interface change left for review.
+  that swallows such an error. **The guarded entry point closes this for the
+  supported path:** it builds `enabled`, the confirmation and the revision
+  itself, accepts `host` only as a pattern-validated environment value, refuses
+  template syntax in every input before Ansible starts, refuses
+  `ANSIBLE_LOG_PATH` and every other `ANSIBLE_*` override, and accepts no `-e`.
+  The residual remains only for an unsupported direct `ansible-playbook` run,
+  where the operator who pastes hostile Jinja into their own command already
+  holds the exported password. The write module's `no_log` argument and the
+  pipelining guard keep the password off the target's disk and journal, but
+  cannot stop an operator who already holds it.
 
 Root tests check the guard structure. With `DITTO_ANSIBLE_REHEARSAL=1` they also
 run the real, restructured role through ansible-core 2.21.2 against a temporary
@@ -288,6 +385,21 @@ It searches for the stand-in in raw, JSON-, YAML- and repr-escaped forms, for a
 canary no escaping changes, and for the SHA-1, MD5 and SHA-256 digests of the
 password and of the document, and it pins the raising-template residual above
 exactly. The infra CI Ansible job runs it.
+
+`ditto/tests/test_coding_hosted_guarded_run.py`, shared with the worker
+credential roles, tests the guarded entry point against synthetic git
+checkouts: extra arguments, a wrong or dirty revision, untracked and ignored
+files, `assume-unchanged`/`skip-worktree` edits, same-size same-mtime edits,
+symlink and mode swaps, `GIT_*` redirection, every refused environment class,
+each input failure class with a canary that must never be echoed, malformed
+specs, and the exact argv, extra vars and child environment, which carry no
+secret. It also checks that every real spec matches its playbook's role
+defaults, confirmation, marker and environment reads. With the rehearsal gate
+it runs the real script under `uv run --locked --script` and ansible-core
+2.21.2: the synthetic play receives only the constructed values and marker, a
+`PATH` `ansible-playbook` is never used, a rogue host is outside the play, and
+the raising-template input, a template host, `ANSIBLE_CONFIG`, a `--with`
+package and `-e`/`-vvv` arguments are refused before Ansible starts.
 
 The `role_coding_hosted` group connects through IAP only
 (`group_vars/role_coding_hosted.yml`). Every native host role therefore reaches
