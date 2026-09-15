@@ -241,13 +241,17 @@ def _run(repo: Path, argv: list[str], env: dict[str, str]) -> tuple[int, str, An
 
 def test_guard_is_a_locked_uv_script_pinning_ansible_core() -> None:
     text = GUARD.read_text()
-    assert text.startswith(
-        "#!/usr/bin/env python3\n# /// script\n"
-        '# requires-python = ">=3.12"\n'
-        '# dependencies = ["ansible-core==2.21.2"]\n# ///\n'
-    )
+    assert text.startswith("#!/usr/bin/env python3\n# /// script\n")
+    metadata = text.split("# ///\n", 1)[0]
+    assert '# requires-python = ">=3.12"\n' in metadata
+    pins = re.findall(r'^#     "([a-z-]+)==([0-9.]+)",$', metadata, re.M)
+    # ansible-core, plus the libraries google.cloud.gcp_compute needs to parse
+    # the real inventory; every direct dependency is pinned exactly.
+    assert [name for name, _ in pins] == ["ansible-core", "google-auth", "requests"]
+    assert metadata.count("==") == 3 and pins[0][1] == "2.21.2"
     lock = LOCK.read_text()
-    assert 'requirements = [{ name = "ansible-core", specifier = "==2.21.2" }]' in lock
+    for name, version in pins:
+        assert f'{{ name = "{name}", specifier = "=={version}" }}' in lock
     assert re.search(r'name = "ansible-core"\nversion = "2\.21\.2"', lock)
     assert guard.ANSIBLE_CORE_VERSION == "2.21.2"
     # Every release of the shared guard updates this pin in the shared test, so
@@ -290,7 +294,7 @@ def test_script_directory_is_dropped_from_sys_path_before_other_imports(
         assert str(real) not in completed.stdout
 
 
-GUARD_SHA256 = "647623db1f3229669d38ef88024e66081006e0bfe34ad59d3596573169902b10"
+GUARD_SHA256 = "71fe0a4a4b463c514053a02d6633383db3f15535807bee9e8656dbf0e4f399a2"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +372,15 @@ def test_only_an_operation_and_a_reviewed_revision_are_accepted(
         ("LD_LIBRARY_PATH", "/tmp"),
         ("DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib"),
         (MARKER, "rehearsal-probe"),
+        ("OPENSSL_CONF", "/tmp/evil.cnf"),
+        ("OPENSSL_MODULES", "/tmp"),
+        ("GCONV_PATH", "/tmp"),
+        ("GLIBC_TUNABLES", "glibc.malloc.check=3"),
+        ("UV_PYTHON", "/tmp/evil-python"),
+        ("UV_NO_VERIFY_HASHES", "1"),
+        ("CLOUDSDK_PYTHON", "/tmp/evil-python"),
+        ("CLOUDSDK_PYTHON_SITEPACKAGES", "1"),
+        ("SSL_CERT_FILE", "/tmp/evil-ca.pem"),
         ("PATH", ".:/usr/bin:/bin"),
         ("PATH", "/usr/bin::/bin"),
         ("PATH", "bin:/usr/bin"),
@@ -414,6 +427,10 @@ RAISING_TEMPLATE = "{{ lookup('file', lookup('env', 'DITTO_CODING_REHEARSAL_TOKE
         (f"{CANARY}\n", "control_character"),
         (f"{CANARY}\r", "control_character"),
         (f"{CANARY}\x7f", "control_character"),
+        (f"{CANARY}\x85tail", "control_character"),
+        (f"{CANARY}\u2028tail", "control_character"),
+        (f"{CANARY}\u2029tail", "control_character"),
+        (f"{CANARY}\u200btail", "control_character"),
         (f" {CANARY}", "surrounding_whitespace"),
         (f"{CANARY} ", "surrounding_whitespace"),
         (f"{CANARY}\udcff", "invalid_encoding"),
@@ -597,6 +614,40 @@ def test_symlink_and_mode_swaps_are_refused(tmp_path: Path) -> None:
     _refused_checkout(repo, revision, tmp_path, "inventory/gcp.yml differs from")
 
 
+def test_untracked_directories_even_empty_are_refused(tmp_path: Path) -> None:
+    repo, revision = _synthetic_repo(tmp_path)
+    (repo / "infra/ansible/playbooks/roles").mkdir()
+    _refused_checkout(
+        repo,
+        revision,
+        tmp_path,
+        "untracked or ignored directory infra/ansible/playbooks/roles",
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_execute_only_directories_hiding_files_are_refused(tmp_path: Path) -> None:
+    # os.walk silently skips a directory it cannot list, yet ansible can open a
+    # known path inside it: a shadow role under playbooks/roles, for example.
+    repo, revision = _synthetic_repo(tmp_path)
+    hidden = repo / "infra/ansible/roles/placeholder/tasks"
+    (hidden / "shadow.yml").write_text("- ansible.builtin.debug: {}\n")
+    hidden.chmod(0o111)
+    try:
+        _refused_checkout(repo, revision, tmp_path, "is unreadable")
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_printed_paths_cannot_carry_terminal_escapes(tmp_path: Path) -> None:
+    repo, revision = _synthetic_repo(tmp_path)
+    (repo / "infra/ansible/evil\x1b[2Jname.yml").write_text("x\n")
+    code, output, _ = _run(repo, ["rehearsal-probe", revision], _operator_env(tmp_path))
+    assert code == 2
+    assert "\x1b" not in output
+    assert "evil\\x1b[2Jname.yml" in output
+
+
 def test_missing_verified_file_is_refused(tmp_path: Path) -> None:
     repo, revision = _synthetic_repo(tmp_path)
     (repo / "infra/ansible/roles/placeholder/tasks/main.yml").unlink()
@@ -706,6 +757,8 @@ def test_invocation_is_fixed_and_carries_no_secret(tmp_path: Path) -> None:
         SSH_AUTH_SOCK="/run/agent",
         GIT_DIR="/tmp/elsewhere",
         EDITOR="evil",
+        GCP_AUTH_KIND="serviceaccount",
+        CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK="1",
         PAGER="evil",
         UV="/usr/bin/uv",
         VIRTUAL_ENV="/tmp/venv",
@@ -753,6 +806,8 @@ def test_invocation_is_fixed_and_carries_no_secret(tmp_path: Path) -> None:
         "VIRTUAL_ENV",
         "DITTO_REHEARSAL_DROPPED",
         "DITTO_CODING_REHEARSAL_HOST",
+        "GCP_AUTH_KIND",
+        "CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK",
     ):
         assert dropped not in child
     for kept in ("GCP_OSLOGIN_USER", "CLOUDSDK_CONFIG", "LC_ALL", "SSH_AUTH_SOCK"):
@@ -774,7 +829,12 @@ def test_invocation_is_fixed_and_carries_no_secret(tmp_path: Path) -> None:
         "ANSIBLE_VERBOSITY",
         "ANSIBLE_DISPLAY_ARGS_TO_STDOUT",
         "ANSIBLE_RETRY_FILES_ENABLED",
+        "ANSIBLE_INVENTORY_UNPARSED_FAILED",
+        "ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED",
+        "ANSIBLE_HOST_PATTERN_MISMATCH",
     }
+    assert child["ANSIBLE_HOST_PATTERN_MISMATCH"] == "error"
+    assert child["ANSIBLE_INVENTORY_UNPARSED_FAILED"] == "True"
     assert "values not shown" in output
 
 
@@ -795,6 +855,88 @@ def test_runtime_check_refuses_an_interpreter_outside_a_virtual_environment(
     monkeypatch.setattr(guard.sys, "prefix", guard.sys.base_prefix)
     with pytest.raises(guard.Refusal):
         guard.verify_ansible_runtime(ROOT)
+
+
+class _Distribution:
+    def __init__(self, name: str, version: str) -> None:
+        self.metadata = {"Name": name}
+        self.version = version
+
+
+def _locked_distributions() -> list[_Distribution]:
+    import tomllib
+
+    lock = tomllib.loads(LOCK.read_text())
+    return [_Distribution(p["name"], p["version"]) for p in lock["package"]]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "needle"),
+    [
+        (
+            lambda d: d + [_Distribution("six", "1.17.0")],
+            "six is not in the script lock",
+        ),
+        (
+            lambda d: [
+                _Distribution("Jinja2", "3.0.0")
+                if x.metadata["Name"] == "jinja2"
+                else x
+                for x in d
+            ],
+            "jinja2 is not the locked version",
+        ),
+        (
+            lambda d: d + [_Distribution("PyYAML", "1.0")],
+            "pyyaml is installed twice",
+        ),
+    ],
+)
+def test_runtime_check_refuses_anything_but_the_locked_distributions(
+    monkeypatch, mutate, needle
+) -> None:
+    import importlib.metadata
+
+    monkeypatch.setattr(guard.sys, "prefix", "/synthetic/venv")
+    monkeypatch.setattr(guard.sys, "base_prefix", "/synthetic/base")
+    distributions = mutate(_locked_distributions())
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: distributions)
+    with pytest.raises(guard.Refusal) as refused:
+        guard.verify_ansible_runtime(ROOT)
+    assert any(needle in reason for reason in refused.value.reasons)
+
+
+@pytest.mark.parametrize(
+    ("name", "shadow"),
+    [("PYTHONPATH", "hashlib.py"), ("OPENSSL_CONF", None), ("LD_PRELOAD", None)],
+)
+def test_code_loading_environment_is_refused_before_any_further_import(
+    tmp_path: Path, name: str, shadow: str | None
+) -> None:
+    # Run the real script file: a shadowing hashlib on PYTHONPATH must never be
+    # imported, because the refusal happens right after sys and os.
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    witness = tmp_path / "imported"
+    if shadow:
+        (evil / shadow).write_text(f"open({str(witness)!r}, 'w').close()\n")
+    value = str(evil) if shadow else str(evil / "missing")
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        name: value,
+    }
+    completed = subprocess.run(
+        [sys.executable, str(GUARD), "rehearsal-probe", REVISION_ZERO],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stderr
+    assert f"environment: {name} must be unset" in completed.stderr
+    assert not witness.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +1059,26 @@ def test_rehearsal_runs_ansible_with_only_the_constructed_values(
         "play_hosts": ["ditto-coding-hosted-v2"],
     }
     assert CANARY not in json.dumps(outcome)
+
+
+@rehearsal
+def test_rehearsal_an_inventory_without_the_host_fails_the_run(tmp_path: Path) -> None:
+    # ansible exits 0 when --limit matches nothing; the guard makes that fatal,
+    # so a run whose inventory cannot see the reviewed host never looks done.
+    repo, _ = _synthetic_repo(tmp_path)
+    inventory = json.loads(json.dumps(REHEARSAL_INVENTORY))
+    hosts = inventory["all"]["children"]["role_coding_hosted"]["hosts"]
+    del hosts["ditto-coding-hosted-v2"]
+    (repo / "infra/ansible/inventory/gcp.yml").write_text(yaml.safe_dump(inventory))
+    _git(repo, "commit", "-q", "-am", "no reviewed host")
+    revision = _git(repo, "rev-parse", "HEAD")
+    home = tmp_path / "home"
+    home.mkdir()
+    uv_dir = str(Path(shutil.which("uv") or "/").parent)
+    env = _operator_env(home, PATH=f"{uv_dir}:/usr/local/bin:/usr/bin:/bin")
+    completed = _uv_run(repo, home, ["rehearsal-probe", revision], env)
+    assert completed.returncode != 0, completed.stdout + completed.stderr
+    assert not (home / "outcome.json").exists()
 
 
 @rehearsal
