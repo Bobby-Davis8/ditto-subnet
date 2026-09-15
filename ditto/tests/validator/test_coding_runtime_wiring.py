@@ -250,6 +250,8 @@ def _canary_config(*, enabled: bool) -> Any:
         dittobench_api_url="http://sandbox-docker:8000",
         dittobench_control_token="coding-control-token-00000000000000000001",
         validator_hotkey="5" + "V" * 47,
+        coding_canary_agent_ids=(UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),),
+        coding_canary_validator_hotkey="5" + "V" * 47,
         http_timeout_seconds=30.0,
     )
 
@@ -289,7 +291,29 @@ async def test_enabled_canary_accepts_the_compose_scorer_on_a_no_proxy_client() 
         assert runtime._base == "http://sandbox-docker:8000"
         assert canary_http.trust_env is False
         assert canary_http.is_closed is False
+        assert worker._validator_hotkey == "5" + "V" * 47
+        assert worker._targets.permits(
+            UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "5" + "V" * 47
+        )
     assert canary_http is not None and canary_http.is_closed is True
+
+
+async def test_enabled_canary_without_matching_targets_warns_and_refuses_all(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = _canary_config(enabled=True)
+    config.coding_canary_validator_hotkey = "5" + "F" * 47
+    async with AsyncExitStack() as resources:
+        with caplog.at_level("WARNING", logger="ditto.validator.__main__"):
+            worker = await validator_main._create_coding_canary_worker(
+                config=config,
+                platform=object(),  # type: ignore[arg-type]
+                keypair=object(),
+                scorer_http=_scorer_http(config, resources),
+            )
+        assert worker is not None
+        assert worker._targets.refuses_all(config.validator_hotkey)
+    assert "refuses every lease" in caplog.text
 
 
 async def test_enabled_canary_closes_its_client_when_construction_fails() -> None:
@@ -322,6 +346,8 @@ async def test_canary_and_local_shadow_share_one_scorer_client() -> None:
     config.dittobench_api_url = "http://sandbox-docker:8000"
     config.coding_canary_enabled = True
     config.coding_canary_poll_seconds = 10.0
+    config.coding_canary_agent_ids = ()
+    config.coding_canary_validator_hotkey = ""
     observed: list[httpx.AsyncClient] = []
     original = validator_main.httpx.AsyncClient
 

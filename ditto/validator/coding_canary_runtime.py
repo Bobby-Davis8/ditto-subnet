@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -21,7 +21,7 @@ from ditto.api_models.coding_certification_leases import (
 from ditto.api_models.coding_inference_grants import (
     CodingCertificationInferenceExchangeResponse,
 )
-from ditto.validator.coding_canary import CodingCanaryOutcome
+from ditto.validator.coding_canary import CodingCanaryOutcome, CodingCanaryReadiness
 from ditto.validator.coding_executor_transport import scorer_control_origin
 from ditto.validator.config import ValidatorConfig
 from ditto.validator.errors import (
@@ -31,11 +31,19 @@ from ditto.validator.errors import (
 
 _REQUEST_SCHEMA = "dittobench-coding-certification-canary-request-v1"
 _RESPONSE_SCHEMA = "dittobench-coding-certification-canary-response-v1"
+_READINESS_SCHEMA = "dittobench-coding-certification-canary-readiness-v1"
+_CANARY_PATH = "/v1/coding/certifier/canary"
+_READINESS_PATH = f"{_CANARY_PATH}/readiness"
 _MAX_BODY_BYTES = 8 << 20
-# One certify call may never outlive its lease. The scorer independently caps
-# a canary operation at 32 minutes, and a lease deadline is at most 30 minutes
-# after issue, so the local bound is the earlier of the two.
-_MAX_CERTIFY_SECONDS = 32 * 60.0
+_MAX_READINESS_BYTES = 64 << 10
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+# The scorer bounds its own probe at 20 seconds.
+_READINESS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+# The lease deadline is the only bound on a certify call; asyncio.timeout
+# enforces it for the whole exchange. There is deliberately no read timeout: a
+# long, legitimate certification streams nothing until it finishes. Connecting,
+# writing the request, and waiting for a pooled connection stay short.
+_CERTIFY_TIMEOUT = httpx.Timeout(None, connect=10.0, write=60.0, pool=10.0)
 
 
 class _WireModel(BaseModel):
@@ -61,6 +69,44 @@ class _CanaryResponse(_WireModel):
         return self
 
 
+class _CanaryReadiness(_WireModel):
+    schema_name: str = Field(alias="schema")
+    coding_contract_version: int
+    weight_eligible: bool
+    ready: bool
+    failure: str
+    pack_loaded: bool
+    executor_daemon_ready: bool
+    runtime_image_ready: bool
+    canary_manifest_sha256: str
+    runner_plan_sha256: str
+    grader_plan_sha256: str
+    resource_profile_sha256: str
+    inference_policy_sha256: str
+
+    def identity(self) -> CodingCanaryReadiness:
+        digests = (
+            self.canary_manifest_sha256,
+            self.runner_plan_sha256,
+            self.grader_plan_sha256,
+            self.resource_profile_sha256,
+            self.inference_policy_sha256,
+        )
+        if (
+            self.schema_name != _READINESS_SCHEMA
+            or self.coding_contract_version != 1
+            or self.weight_eligible
+            or not self.ready
+            or self.failure
+            or not self.pack_loaded
+            or not self.executor_daemon_ready
+            or not self.runtime_image_ready
+            or any(_SHA256.fullmatch(digest) is None for digest in digests)
+        ):
+            raise ValueError("coding canary readiness is not ready")
+        return CodingCanaryReadiness(*digests)
+
+
 class CodingCanaryRuntime:
     """Call the protected scorer canary control plane."""
 
@@ -84,21 +130,47 @@ class CodingCanaryRuntime:
         self._client = client
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    async def require_available(self) -> None:
+    async def require_ready(self) -> CodingCanaryReadiness:
+        """Return the scorer's ready pack identity or refuse.
+
+        This is read-only on the scorer: no harness, container, grant, or lease.
+        Anything but an explicit, complete ready answer is a refusal, so the
+        worker never issues or claims a lease against a scorer whose dedicated
+        rootless daemon, runtime image, or pack would fail certify afterwards.
+        """
+
         try:
-            response = await self._client.post(
-                f"{self._base}/v1/coding/certifier/canary",
+            response = await self._client.get(
+                f"{self._base}{_READINESS_PATH}",
                 headers=self._headers(),
-                json={},
+                follow_redirects=False,
+                timeout=_READINESS_TIMEOUT,
             )
         except httpx.HTTPError as error:
             raise PlatformInfrastructureError(
                 "coding canary runtime is unreachable"
             ) from error
-        if response.status_code in {401, 404, 503} or response.status_code >= 500:
-            raise PlatformInfrastructureError("coding canary runtime is unavailable")
-        if not _private_json_headers(response.headers):
-            raise PlatformInfrastructureError("coding canary runtime is unavailable")
+        if (
+            response.status_code != 200
+            or not _private_json_headers(response.headers)
+            or len(response.content) > _MAX_READINESS_BYTES
+        ):
+            raise PlatformInfrastructureError(
+                f"coding canary runtime is unavailable ({response.status_code})"
+            )
+        try:
+            readiness = _CanaryReadiness.model_validate_json(response.content)
+        except (ValidationError, ValueError) as error:
+            raise PlatformInfrastructureError(
+                "coding canary runtime readiness is invalid"
+            ) from error
+        try:
+            return readiness.identity()
+        except ValueError as error:
+            failure = readiness.failure if readiness.failure.isidentifier() else ""
+            raise PlatformInfrastructureError(
+                f"coding canary runtime is not ready (failure={failure or 'unknown'})"
+            ) from error
 
     async def certify(
         self,
@@ -147,12 +219,6 @@ class CodingCanaryRuntime:
             },
         }
         budget = self._certify_budget_seconds(lease)
-        timeout = httpx.Timeout(
-            budget,
-            connect=min(10.0, budget),
-            write=min(60.0, budget),
-            pool=min(10.0, budget),
-        )
         body = bytearray()
         try:
             # Single shot: no retry. Leaving this block for any reason, including
@@ -161,11 +227,11 @@ class CodingCanaryRuntime:
             async with asyncio.timeout(budget):
                 async with self._client.stream(
                     "POST",
-                    f"{self._base}/v1/coding/certifier/canary",
+                    f"{self._base}{_CANARY_PATH}",
                     headers=self._headers(),
                     json=payload,
                     follow_redirects=False,
-                    timeout=timeout,
+                    timeout=_CERTIFY_TIMEOUT,
                 ) as response:
                     if response.status_code != 200:
                         raise ValidatorInfrastructureError(
@@ -210,15 +276,25 @@ class CodingCanaryRuntime:
         )
 
     def _certify_budget_seconds(self, lease: CodingCertificationLeaseResponse) -> float:
+        """Seconds left before the lease deadline, the certify call's only bound.
+
+        Platform issues certification leases with a 20-minute deadline and the
+        lease model rejects one more than 30 minutes after issue. The scorer
+        stops the operation at the same deadline (and at its own 20-minute
+        default), so no separate local cap applies.
+        """
+
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValidatorInfrastructureError("coding canary runtime clock is invalid")
         remaining = (
             lease.authority.deadline.astimezone(UTC) - now.astimezone(UTC)
         ).total_seconds()
-        if not math.isfinite(remaining) or remaining <= 0:
-            raise ValidatorInfrastructureError("coding canary lease deadline expired")
-        return min(remaining, _MAX_CERTIFY_SECONDS)
+        if remaining <= 0:
+            raise ValidatorInfrastructureError(
+                "coding canary lease deadline exceeded before certify"
+            )
+        return remaining
 
     def _headers(self) -> dict[str, str]:
         return {

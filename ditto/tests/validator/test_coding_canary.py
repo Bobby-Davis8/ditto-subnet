@@ -13,6 +13,7 @@ from uuid import UUID
 import httpx
 import pytest
 
+import ditto.validator.coding_canary_runtime as runtime_module
 from ditto.api_models.coding import (
     CodingCapabilityCertificationReceipt,
     SubmitCodingCertificationResponse,
@@ -28,7 +29,12 @@ from ditto.api_models.coding_inference_grants import (
     CodingCertificationInferenceGrantOffer,
     CodingCertificationInferenceRevokeResponse,
 )
-from ditto.validator.coding_canary import CodingCanaryOutcome, CodingCanaryWorker
+from ditto.validator.coding_canary import (
+    CodingCanaryOutcome,
+    CodingCanaryReadiness,
+    CodingCanaryTargets,
+    CodingCanaryWorker,
+)
 from ditto.validator.coding_canary_runtime import CodingCanaryRuntime
 from ditto.validator.errors import (
     PlatformError,
@@ -42,6 +48,9 @@ _NOW = datetime(2026, 8, 30, 18, tzinfo=UTC)
 _AGENT = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 _LEASE = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 _UPLOAD = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+_HOTKEY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+_OTHER_AGENT = UUID("abababab-abab-4bab-8bab-abababababab")
+_TARGETS = CodingCanaryTargets.of([_AGENT], _HOTKEY)
 
 
 def _authority(**updates: object) -> CodingCertificationLeaseAuthority:
@@ -50,7 +59,7 @@ def _authority(**updates: object) -> CodingCertificationLeaseAuthority:
         "coding_contract_version": 1,
         "weight_eligible": False,
         "lease_id": _LEASE,
-        "validator_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        "validator_hotkey": _HOTKEY,
         "agent_id": _AGENT,
         "agent_artifact_sha256": "aa" * 32,
         "screened_image_sha256": "1a" * 32,
@@ -298,16 +307,31 @@ class _Platform:
         )
 
 
+def _readiness(**updates: str) -> CodingCanaryReadiness:
+    authority = _authority()
+    value = {
+        "canary_manifest_sha256": authority.canary_manifest_sha256,
+        "runner_plan_sha256": authority.runner_plan_sha256,
+        "grader_plan_sha256": authority.grader_plan_sha256,
+        "resource_profile_sha256": authority.resource_profile_sha256,
+        "inference_policy_sha256": authority.inference_policy_sha256,
+    }
+    value.update(updates)
+    return CodingCanaryReadiness(**value)
+
+
 class _Runtime:
     def __init__(self) -> None:
         self.probes = 0
         self.certified: list[CodingCertificationLeaseResponse] = []
         self.available = True
+        self.readiness = _readiness()
 
-    async def require_available(self) -> None:
+    async def require_ready(self) -> CodingCanaryReadiness:
         self.probes += 1
         if not self.available:
-            raise PlatformInfrastructureError("coding canary runtime is unavailable")
+            raise PlatformInfrastructureError("coding canary runtime is not ready")
+        return self.readiness
 
     async def certify(
         self,
@@ -332,16 +356,28 @@ class _Runtime:
         )
 
 
+def _worker(
+    platform: _Platform,
+    runtime: _Runtime,
+    *,
+    targets: CodingCanaryTargets = _TARGETS,
+    validator_hotkey: str = _HOTKEY,
+) -> CodingCanaryWorker:
+    return CodingCanaryWorker(
+        platform=platform,
+        runtime=runtime,
+        sign_receipt=lambda _lease, _receipt: "ab" * 64,
+        validator_hotkey=validator_hotkey,
+        targets=targets,
+        clock=lambda: _NOW,
+    )
+
+
 @pytest.mark.asyncio
 async def test_canary_worker_claims_issued_lease_then_runs_certifier() -> None:
     platform = _Platform()
     runtime = _Runtime()
-    worker = CodingCanaryWorker(
-        platform=platform,
-        runtime=runtime,
-        sign_receipt=lambda _lease, _receipt: "ab" * 64,
-        clock=lambda: _NOW,
-    )
+    worker = _worker(platform, runtime)
     worker.offer(_AGENT, 12)
     assert await worker.run_once() is True
     assert platform.issues == 1
@@ -360,12 +396,7 @@ async def test_canary_worker_claims_issued_lease_then_runs_certifier() -> None:
 async def test_canary_worker_skips_ineligible_or_conflicted_issue() -> None:
     platform = _Platform()
     runtime = _Runtime()
-    worker = CodingCanaryWorker(
-        platform=platform,
-        runtime=runtime,
-        sign_receipt=lambda _lease, _receipt: "ab" * 64,
-        clock=lambda: _NOW,
-    )
+    worker = _worker(platform, runtime)
 
     async def missing(*_args: object, **_kwargs: object) -> None:
         return None
@@ -389,12 +420,7 @@ async def test_canary_worker_does_not_claim_when_runtime_is_down() -> None:
     platform = _Platform()
     runtime = _Runtime()
     runtime.available = False
-    worker = CodingCanaryWorker(
-        platform=platform,
-        runtime=runtime,
-        sign_receipt=lambda _lease, _receipt: "ab" * 64,
-        clock=lambda: _NOW,
-    )
+    worker = _worker(platform, runtime)
     worker.offer(_AGENT, 12)
     assert await worker.run_once() is False
     assert platform.issues == 0
@@ -409,12 +435,7 @@ async def test_canary_worker_does_not_skip_issue_infrastructure_failure() -> Non
         "public certification canary is unavailable"
     )
     runtime = _Runtime()
-    worker = CodingCanaryWorker(
-        platform=platform,
-        runtime=runtime,
-        sign_receipt=lambda _lease, _receipt: "ab" * 64,
-        clock=lambda: _NOW,
-    )
+    worker = _worker(platform, runtime)
     worker.offer(_AGENT, 12)
     with pytest.raises(PlatformInfrastructureError, match="unavailable"):
         await worker.run_once()
@@ -435,18 +456,136 @@ async def test_canary_worker_aborts_issued_lease_if_claim_fails() -> None:
     platform = _Platform()
     platform.claim_error = PlatformInfrastructureError("claim failed")
     runtime = _Runtime()
-    worker = CodingCanaryWorker(
-        platform=platform,
-        runtime=runtime,
-        sign_receipt=lambda _lease, _receipt: "ab" * 64,
-        clock=lambda: _NOW,
-    )
+    worker = _worker(platform, runtime)
     worker.offer(_AGENT, 12)
     with pytest.raises(PlatformInfrastructureError, match="claim failed"):
         await worker.run_once()
     assert platform.issues == 1
     assert platform.claims == 1
     assert platform.aborts == 1
+    assert runtime.certified == []
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        CodingCanaryTargets(),
+        CodingCanaryTargets.of([], _HOTKEY),
+        CodingCanaryTargets.of([_AGENT], ""),
+        CodingCanaryTargets.of([_OTHER_AGENT], _HOTKEY),
+        # Exact targets copied onto a validator with a different hotkey.
+        CodingCanaryTargets.of([_AGENT], "5" + "F" * 47),
+    ],
+)
+async def test_canary_worker_refuses_every_lease_outside_its_exact_targets(
+    targets: CodingCanaryTargets,
+) -> None:
+    platform = _Platform()
+    runtime = _Runtime()
+    worker = _worker(platform, runtime, targets=targets)
+    worker.offer(_AGENT, 12)
+    assert await worker.run_once() is False
+    # Defense in depth: even a target that reached the queue is refused.
+    worker._queue.put_nowait((_AGENT, 12))
+    assert await worker.run_once() is False
+    assert platform.issues == 0
+    assert platform.claims == 0
+    assert runtime.certified == []
+
+
+async def test_canary_worker_default_targets_refuse_everything() -> None:
+    assert CodingCanaryTargets().refuses_all(_HOTKEY)
+    assert not CodingCanaryTargets().permits(_AGENT, _HOTKEY)
+    assert _TARGETS.permits(_AGENT, _HOTKEY)
+    assert not _TARGETS.permits(_OTHER_AGENT, _HOTKEY)
+    assert not _TARGETS.permits(_AGENT, "5" + "F" * 47)
+    assert not _TARGETS.refuses_all(_HOTKEY)
+    assert _TARGETS.refuses_all("5" + "F" * 47)
+
+
+async def test_canary_worker_offers_only_allowlisted_agents() -> None:
+    platform = _Platform()
+    runtime = _Runtime()
+    worker = _worker(platform, runtime)
+    worker.offer(_OTHER_AGENT, 12)
+    assert worker._queue.empty()
+    assert await worker.run_once() is False
+    assert runtime.probes == 0
+    worker.offer(_AGENT, 12)
+    assert await worker.run_once() is True
+    assert platform.issues == 1
+
+
+async def test_canary_worker_keeps_the_offer_until_the_scorer_is_ready() -> None:
+    platform = _Platform()
+    runtime = _Runtime()
+    runtime.available = False
+    worker = _worker(platform, runtime)
+    worker.offer(_AGENT, 12)
+    assert await worker.run_once() is False
+    assert await worker.run_once() is False
+    assert runtime.probes == 2
+    assert platform.issues == 0
+    runtime.available = True
+    assert await worker.run_once() is True
+    assert platform.issues == 1
+    assert platform.claims == 1
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        {"agent_id": _OTHER_AGENT},
+        {"validator_hotkey": "5" + "F" * 47},
+    ],
+)
+async def test_canary_worker_aborts_an_issued_lease_for_another_target(
+    authority: dict[str, object],
+) -> None:
+    platform = _Platform()
+    platform.issued = CodingCertificationLeaseResponse(
+        authority=_authority(**authority),
+        status=CodingCertificationLeaseStatus.ISSUED,
+        claimed_at=None,
+        screened_image_id="sha256:" + "ef" * 32,
+        screened_image_ref=f"ditto-screen/{_AGENT}:latest",
+        screened_image_upload_id=_UPLOAD,
+        weight_eligible=False,
+    )
+    runtime = _Runtime()
+    worker = _worker(platform, runtime)
+    worker.offer(_AGENT, 12)
+    with pytest.raises(PlatformInfrastructureError, match="allowlisted target"):
+        await worker.run_once()
+    assert platform.issues == 1
+    assert platform.aborts == 1
+    assert platform.claims == 0
+    assert runtime.certified == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "canary_manifest_sha256",
+        "runner_plan_sha256",
+        "grader_plan_sha256",
+        "resource_profile_sha256",
+        "inference_policy_sha256",
+    ],
+)
+async def test_canary_worker_aborts_a_lease_the_ready_scorer_pack_cannot_run(
+    field: str,
+) -> None:
+    platform = _Platform()
+    runtime = _Runtime()
+    runtime.readiness = _readiness(**{field: "9" * 64})
+    worker = _worker(platform, runtime)
+    worker.offer(_AGENT, 12)
+    with pytest.raises(PlatformInfrastructureError, match="scorer pack"):
+        await worker.run_once()
+    assert platform.issues == 1
+    assert platform.aborts == 1
+    assert platform.claims == 0
     assert runtime.certified == []
 
 
@@ -525,17 +664,137 @@ async def test_canary_runtime_rejects_missing_no_store() -> None:
             )
 
 
-@pytest.mark.asyncio
-async def test_canary_runtime_probe_treats_404_as_unavailable() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, text="not found")
+def _readiness_payload(**updates: object) -> dict[str, object]:
+    authority = _authority()
+    value: dict[str, object] = {
+        "schema": "dittobench-coding-certification-canary-readiness-v1",
+        "coding_contract_version": 1,
+        "weight_eligible": False,
+        "ready": True,
+        "failure": "",
+        "pack_loaded": True,
+        "executor_daemon_ready": True,
+        "runtime_image_ready": True,
+        "canary_manifest_sha256": authority.canary_manifest_sha256,
+        "runner_plan_sha256": authority.runner_plan_sha256,
+        "grader_plan_sha256": authority.grader_plan_sha256,
+        "resource_profile_sha256": authority.resource_profile_sha256,
+        "inference_policy_sha256": authority.inference_policy_sha256,
+    }
+    value.update(updates)
+    return value
+
+
+async def test_canary_runtime_readiness_returns_the_ready_pack_identity() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
+            json=_readiness_payload(),
+        )
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), trust_env=False
     ) as http:
         runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
-        with pytest.raises(PlatformInfrastructureError, match="unavailable"):
-            await runtime.require_available()
+        readiness = await runtime.require_ready()
+    assert readiness == _readiness()
+    assert readiness.binds(_authority())
+    (request,) = requests
+    assert request.method == "GET"
+    assert request.url.path == "/v1/coding/certifier/canary/readiness"
+    assert request.headers["Authorization"] == f"Bearer {_TOKEN}"
+    assert request.content == b""
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "payload"),
+    [
+        (404, {"Cache-Control": "no-store"}, {"error": "not_found"}),
+        (401, {"Cache-Control": "no-store"}, {"error": "unauthorized"}),
+        (503, {"Cache-Control": "no-store"}, {"error": "busy"}),
+        (302, {"Location": "https://elsewhere.invalid"}, {}),
+        (200, {}, _readiness_payload()),
+        (200, {"Cache-Control": "no-store"}, "not json"),
+        (200, {"Cache-Control": "no-store"}, _readiness_payload(ready=False)),
+        (
+            200,
+            {"Cache-Control": "no-store"},
+            _readiness_payload(ready=False, failure="executor_daemon"),
+        ),
+        (
+            200,
+            {"Cache-Control": "no-store"},
+            _readiness_payload(executor_daemon_ready=False),
+        ),
+        (
+            200,
+            {"Cache-Control": "no-store"},
+            _readiness_payload(runtime_image_ready=False),
+        ),
+        (200, {"Cache-Control": "no-store"}, _readiness_payload(pack_loaded=False)),
+        (200, {"Cache-Control": "no-store"}, _readiness_payload(failure="pack")),
+        (200, {"Cache-Control": "no-store"}, _readiness_payload(weight_eligible=True)),
+        (
+            200,
+            {"Cache-Control": "no-store"},
+            _readiness_payload(coding_contract_version=2),
+        ),
+        (200, {"Cache-Control": "no-store"}, _readiness_payload(schema="other-v1")),
+        (
+            200,
+            {"Cache-Control": "no-store"},
+            _readiness_payload(canary_manifest_sha256="AB" * 32),
+        ),
+        (200, {"Cache-Control": "no-store"}, _readiness_payload(ready="true")),
+        (
+            200,
+            {"Cache-Control": "no-store"},
+            {
+                key: value
+                for key, value in _readiness_payload().items()
+                if key != "runtime_image_ready"
+            },
+        ),
+    ],
+)
+async def test_canary_runtime_readiness_fails_closed(
+    status: int, headers: dict[str, str], payload: object
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        if isinstance(payload, str):
+            return httpx.Response(
+                status,
+                headers={"Content-Type": "application/json", **headers},
+                content=payload.encode(),
+            )
+        return httpx.Response(
+            status,
+            headers={"Content-Type": "application/json", **headers},
+            json=payload,
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
+        with pytest.raises(PlatformInfrastructureError, match="canary runtime"):
+            await runtime.require_ready()
+
+
+async def test_canary_runtime_readiness_refuses_an_unreachable_scorer() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
+        with pytest.raises(PlatformInfrastructureError, match="unreachable"):
+            await runtime.require_ready()
 
 
 @pytest.mark.parametrize(
@@ -614,17 +873,20 @@ async def _certify(runtime: CodingCanaryRuntime) -> CodingCanaryOutcome:
 
 
 @pytest.mark.parametrize(
-    ("remaining", "expected_read"),
-    [
-        (timedelta(minutes=20), 1200.0),
-        (timedelta(seconds=5), 5.0),
-    ],
+    "remaining",
+    [timedelta(minutes=20), timedelta(seconds=5), timedelta(hours=1)],
 )
-async def test_canary_runtime_bounds_certify_by_the_lease_deadline(
-    remaining: timedelta, expected_read: float
+async def test_canary_runtime_bounds_certify_only_by_the_lease_deadline(
+    remaining: timedelta, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    observed: list[dict[str, float]] = []
+    observed: list[dict[str, float | None]] = []
+    budgets: list[float | None] = []
     deadline = _authority().deadline
+    original_timeout = runtime_module.asyncio.timeout
+
+    def recording_timeout(delay: float | None) -> Any:
+        budgets.append(delay)
+        return original_timeout(delay)
 
     def handler(request: httpx.Request) -> httpx.Response:
         observed.append(request.extensions["timeout"])
@@ -634,6 +896,7 @@ async def test_canary_runtime_bounds_certify_by_the_lease_deadline(
             json=_canary_response_payload(),
         )
 
+    monkeypatch.setattr(runtime_module.asyncio, "timeout", recording_timeout)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), trust_env=False, timeout=30.0
     ) as http:
@@ -643,38 +906,10 @@ async def test_canary_runtime_bounds_certify_by_the_lease_deadline(
             clock=lambda: deadline - remaining,
         )
         await _certify(runtime)
-    assert observed == [
-        {
-            "connect": min(10.0, expected_read),
-            "read": expected_read,
-            "write": min(60.0, expected_read),
-            "pool": min(10.0, expected_read),
-        }
-    ]
-
-
-async def test_canary_runtime_caps_certify_at_the_scorer_operation_bound() -> None:
-    observed: list[dict[str, float]] = []
-    deadline = _authority().deadline
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        observed.append(request.extensions["timeout"])
-        return httpx.Response(
-            200,
-            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
-            json=_canary_response_payload(),
-        )
-
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), trust_env=False
-    ) as http:
-        runtime = CodingCanaryRuntime(
-            _runtime_config(),
-            http,
-            clock=lambda: deadline - timedelta(hours=1),
-        )
-        await _certify(runtime)
-    assert [value["read"] for value in observed] == [32 * 60.0]
+    # The whole exchange is bounded by exactly the time left on the lease, with
+    # no separate cap and no per-read timeout that could fire first.
+    assert budgets == [remaining.total_seconds()]
+    assert observed == [{"connect": 10.0, "read": None, "write": 60.0, "pool": 10.0}]
 
 
 @pytest.mark.parametrize(
@@ -697,7 +932,7 @@ async def test_canary_runtime_never_sends_after_the_lease_deadline(
         runtime = CodingCanaryRuntime(
             _runtime_config(), http, clock=lambda: deadline + offset
         )
-        with pytest.raises(ValidatorInfrastructureError, match="deadline expired"):
+        with pytest.raises(ValidatorInfrastructureError, match="deadline exceeded"):
             await _certify(runtime)
     assert calls == 0
 

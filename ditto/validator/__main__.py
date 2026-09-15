@@ -24,7 +24,7 @@ from ditto.api_models.coding_certification_leases import (
 )
 from ditto.chain import ChainConfig, create_chain_client
 from ditto.system_health import SystemMetricsCollector
-from ditto.validator.coding_canary import CodingCanaryWorker
+from ditto.validator.coding_canary import CodingCanaryTargets, CodingCanaryWorker
 from ditto.validator.coding_canary_runtime import CodingCanaryRuntime
 from ditto.validator.coding_executor_canary import CodingExecutorConnectivityCanary
 from ditto.validator.coding_publication import CodingPublicationClient
@@ -270,13 +270,28 @@ async def _create_coding_canary_worker(
             receipt=receipt,
         )
 
+    targets = CodingCanaryTargets.of(
+        config.coding_canary_agent_ids, config.coding_canary_validator_hotkey
+    )
     worker = CodingCanaryWorker(
         platform=platform,
         runtime=CodingCanaryRuntime(config, canary_http),
         sign_receipt=_sign_canary_receipt,
+        validator_hotkey=config.validator_hotkey,
+        targets=targets,
         poll_seconds=config.coding_canary_poll_seconds,
     )
-    logger.info("coding canary worker enabled")
+    if targets.refuses_all(config.validator_hotkey):
+        logger.warning(
+            "coding canary worker enabled but refuses every lease: it needs at "
+            "least one allowlisted agent and an allowlisted validator hotkey "
+            "equal to this validator's hotkey"
+        )
+    else:
+        logger.info(
+            "coding canary worker enabled targets=%d",
+            len(targets.agent_ids),
+        )
     return worker
 
 
