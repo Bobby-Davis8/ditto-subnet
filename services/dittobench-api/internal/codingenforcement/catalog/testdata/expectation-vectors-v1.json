@@ -1,0 +1,665 @@
+{
+  "schema": "dittobench-coding-native-enforcement-expectation-vectors-v1",
+  "subordinate_ids": {
+    "gid_count": 65536,
+    "gid_start": 100000,
+    "uid_count": 65536,
+    "uid_start": 100000
+  },
+  "vectors": [
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny refused",
+      "observed": {
+        "outcome": "refused"
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny connected",
+      "observed": {
+        "outcome": "connected"
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny probe error is not a deny",
+      "observed": {
+        "outcome": "probe_error"
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny unknown outcome",
+      "observed": {
+        "outcome": "teleported"
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny outcome not a string",
+      "observed": {
+        "outcome": 1
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny extra key",
+      "observed": {
+        "bytes": 0,
+        "outcome": "refused"
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "accept": [
+          "not_permitted",
+          "refused",
+          "reset",
+          "timeout",
+          "unreachable"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "deny not an object",
+      "observed": [
+        "refused"
+      ],
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "accept": [
+          "container_address"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "router source container",
+      "observed": {
+        "outcome": "container_address"
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "accept": [
+          "container_address"
+        ],
+        "type": "outcome_in"
+      },
+      "name": "router source host",
+      "observed": {
+        "outcome": "host_address"
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "interfaces": [
+            "lo"
+          ]
+        }
+      },
+      "name": "interfaces lo",
+      "observed": {
+        "interfaces": [
+          "lo"
+        ]
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "interfaces": [
+            "lo"
+          ]
+        }
+      },
+      "name": "interfaces eth0",
+      "observed": {
+        "interfaces": [
+          "eth0",
+          "lo"
+        ]
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "interfaces": [
+            "lo"
+          ]
+        }
+      },
+      "name": "interfaces empty",
+      "observed": {
+        "interfaces": []
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "interfaces": [
+            "lo"
+          ]
+        }
+      },
+      "name": "interfaces address refused",
+      "observed": {
+        "interfaces": [
+          "10.0.0.2"
+        ]
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "interfaces": [
+            "lo"
+          ]
+        }
+      },
+      "name": "interfaces missing key",
+      "observed": {},
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "containers": 0,
+          "networks": 0,
+          "processes": 0,
+          "volumes": 0
+        }
+      },
+      "name": "zero residue",
+      "observed": {
+        "containers": 0,
+        "networks": 0,
+        "processes": 0,
+        "volumes": 0
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "containers": 0,
+          "networks": 0,
+          "processes": 0,
+          "volumes": 0
+        }
+      },
+      "name": "container left",
+      "observed": {
+        "containers": 1,
+        "networks": 0,
+        "processes": 0,
+        "volumes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "containers": 0,
+          "networks": 0,
+          "processes": 0,
+          "volumes": 0
+        }
+      },
+      "name": "negative count",
+      "observed": {
+        "containers": -1,
+        "networks": 0,
+        "processes": 0,
+        "volumes": 0
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "exact",
+        "value": {
+          "no_new_privs": 1
+        }
+      },
+      "name": "bool is not an integer",
+      "observed": {
+        "no_new_privs": true
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "profile_equal"
+      },
+      "name": "profile equal",
+      "observed": {
+        "cgroup": 1024,
+        "profile": 1024
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "type": "profile_equal"
+      },
+      "name": "profile differs",
+      "observed": {
+        "cgroup": 2048,
+        "profile": 1024
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "profile_equal"
+      },
+      "name": "profile zero is vacuous",
+      "observed": {
+        "cgroup": 0,
+        "profile": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu at 1.15x",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 1150
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu over 1.15x",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 1151
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu not throttled",
+      "observed": {
+        "enforced": false,
+        "limit": 1000,
+        "measured": 900
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu measured zero",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu limit zero",
+      "observed": {
+        "enforced": true,
+        "limit": 0,
+        "measured": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu no overflow",
+      "observed": {
+        "enforced": true,
+        "limit": 9223372036854775807,
+        "measured": 9223372036854775807
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu enforced string",
+      "observed": {
+        "enforced": "true",
+        "limit": 1000,
+        "measured": 1000
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "tolerance": "pids_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "pids exact cap",
+      "observed": {
+        "enforced": true,
+        "limit": 64,
+        "measured": 64
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "tolerance": "pids_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "pids over cap",
+      "observed": {
+        "enforced": true,
+        "limit": 64,
+        "measured": 65
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout within 1.1x",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1100,
+        "exit_code": 124,
+        "live_processes": 0
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout too late",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1101,
+        "exit_code": 124,
+        "live_processes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout before deadline",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 999,
+        "exit_code": 124,
+        "live_processes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout wrong exit",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1000,
+        "exit_code": 137,
+        "live_processes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout tree alive",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1000,
+        "exit_code": 124,
+        "live_processes": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout exit out of range",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1000,
+        "exit_code": 380,
+        "live_processes": 0
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "tests"
+      },
+      "name": "all pass",
+      "observed": {
+        "passed": 3,
+        "total": 3
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "tests"
+      },
+      "name": "all pass with a failure",
+      "observed": {
+        "passed": 2,
+        "total": 3
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "tests"
+      },
+      "name": "empty suite never passes",
+      "observed": {
+        "passed": 0,
+        "total": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "tests"
+      },
+      "name": "passed above total",
+      "observed": {
+        "passed": 4,
+        "total": 3
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "result": "some_fail",
+        "type": "tests"
+      },
+      "name": "wrong control fails",
+      "observed": {
+        "passed": 1,
+        "total": 3
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "result": "some_fail",
+        "type": "tests"
+      },
+      "name": "wrong control passes",
+      "observed": {
+        "passed": 3,
+        "total": 3
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "some_fail",
+        "type": "tests"
+      },
+      "name": "empty suite never fails usefully",
+      "observed": {
+        "passed": 0,
+        "total": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "subordinate_uid"
+      },
+      "name": "uid inside range",
+      "observed": {
+        "host_uid": 165531
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "type": "subordinate_uid"
+      },
+      "name": "uid at range end",
+      "observed": {
+        "host_uid": 165536
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "subordinate_uid"
+      },
+      "name": "uid below range",
+      "observed": {
+        "host_uid": 99999
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "subordinate_uid"
+      },
+      "name": "uid negative",
+      "observed": {
+        "host_uid": -1
+      },
+      "result": "invalid"
+    }
+  ]
+}
