@@ -165,7 +165,20 @@ The role behaves as follows:
   refusal here.
 - It gathers no facts. Host identity and the worker and custodian accounts come
   from registered `setup` and `getent` probes, because an `ansible_facts` extra
-  var replaces gathered facts but not a registered result.
+  var replaces gathered facts but not a registered result. It also requires
+  `ansible_play_batch == ['ditto-coding-hosted-v2']`, so the play targets
+  exactly the reviewed inventory host: the hostname, architecture and
+  distribution come from the target's own `setup`, which a labelled rogue VM
+  controls, but the inventory name and batch do not, so a run without `--limit`
+  cannot route the password to such a host.
+- It refuses check mode up front with a constant message, since it only writes
+  files and cannot verify a write in `--check`. The dormant fixture stays the
+  check path: `main.yml` never includes the write file when the gate is closed.
+- Before the password is read it requires pipelining to be effectively on and
+  `keep_remote_files` off. Without pipelining ansible-core writes the module,
+  including its arguments, to a temp file under the ssh user's `~/.ansible/tmp`
+  on the target, and with `keep_remote_files` on it is left there, so the
+  password could persist even on a dropped connection.
 - Every variable it reads is a documented input, a prefixed name the preset
   check refuses, the refused loop `item`, or a magic variable extra vars cannot
   override. `inventory_hostname` and `group_names` are host variables that an
@@ -187,11 +200,20 @@ The role behaves as follows:
   `reloading`, `refreshing` (systemd 256 and later), `maintenance`, a future
   state or an unparseable line all refuse. An empty listing means no such unit
   is loaded and is allowed. The role stops nothing.
-- It writes each copy with `no_log` and without a diff. Every target-side
-  module whose arguments, loop or result carry the password, the document, a
-  captured input or a checksum runs under `no_log`, so the module never writes
-  its invocation parameters to the target's journal and
-  `ansible_inject_invocation` returns nothing sensitive.
+- It writes each copy with a role-local module, never `copy`/`file`, so no
+  symlink can be followed. A path-based write run as root would follow a
+  `private` (or copy) symlink the reader account swaps in, even mid-run: it
+  would chown and chmod the link target to the account and write the password
+  inside it, and a `follow=false` stat of the final path would still pass. The
+  module instead opens every component from `/` with `O_NOFOLLOW`, verifies the
+  reader-owned home and `private` directories on the descriptors (creating
+  `private` with `mkdirat`+`fchown`+`fchmod`, then re-opening to verify), writes
+  an `O_CREAT|O_EXCL` temp with `fchown`/`fchmod`/`fsync` and `renameat`s it into
+  the pinned directory, unlinks the temp on any failure, and re-verifies the
+  parents after the write. The document is a `no_log` argument, so the module
+  never writes its invocation to the target's journal and
+  `ansible_inject_invocation` returns nothing sensitive; the write result and
+  the digest check are `no_log`.
 - The unit state is re-checked after the write and again after verification.
   A unit could start between the pre-write listing and the write, so if any unit
   is no longer `inactive` or `failed` the role fails loudly, warning that a copy
@@ -222,8 +244,10 @@ Two residual limitations are accepted, not closed, by design:
   the task result's `exception` field, which `no_log` deliberately preserves, on
   the console and in any `ANSIBLE_LOG_PATH` log. Core Jinja offers no construct
   that swallows such an error. An operator who pastes hostile Jinja into their
-  own command still holds the exported password directly. Moving `host` to a
-  controller-only environment input, like the password, would remove the last
+  own command still holds the exported password directly. The write module's
+  `no_log` argument and the pipelining guard keep the password off the target's
+  disk and journal, but cannot stop an operator who already holds it. Moving
+  `host` to a controller-only environment input, like the password, would remove the last
   rendered input; that is a larger interface change left for review.
 
 Root tests check the guard structure. With `DITTO_ANSIBLE_REHEARSAL=1` they also
@@ -235,7 +259,11 @@ templated gate, a gate templated to the password, a string `"true"` and
 nothing; that a preset loop `item`, a raising password variable, and an
 `inventory_hostname` and `group_names` forged for a host outside the group are
 refused; that `-vvv` with `ansible_inject_invocation` prints nothing sensitive; that a lazily templated `host` writes the safe captured address rather
-than the loop-time one; that preset results and document variables, forged
+than the loop-time one; that a `private` or copy swapped for a symlink is never
+followed (the write module refuses or replaces it with a real file); that a
+rogue inventory host, check mode, pipelining off and kept remote files are
+refused; that `--start-at-task` at any `main.yml` task with the captured gate
+and registers preset still writes nothing; that preset results and document variables, forged
 `ansible_facts`, `refreshing`, `maintenance` and unknown unit states, and
 trailing-newline inputs are refused before anything is written; and that no
 password form reaches the console or log even when the owner/mode check fails.

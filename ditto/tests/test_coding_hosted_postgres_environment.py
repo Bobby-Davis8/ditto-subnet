@@ -589,8 +589,10 @@ def test_write_module_refuses_swapped_parents_and_writes_atomically(tmp_path) ->
     assert written.parent.stat().st_mode & 0o777 == 0o700
     # A private swapped for a symlink to a root-ish victim dir is refused, and the
     # victim stays empty: the write never follows the link.
+    # The victim is owned by the account at 0700, so only O_NOFOLLOW refuses.
     victim = tmp_path / "victim"
-    victim.mkdir(mode=0o755)
+    victim.mkdir(mode=0o700)
+    victim.chmod(0o700)
     home2 = tmp_path / "var/lib/ditto-coding-custody"
     home2.mkdir(parents=True, mode=0o700)
     (home2 / "private").symlink_to(victim)
@@ -1433,8 +1435,11 @@ def test_rehearsal_module_never_writes_through_a_swapped_parent(tmp_path) -> Non
     # victim directory stays empty.
     root = tmp_path / "hosts/swap"
     hostvars = _hostvars(root)
-    victim = tmp_path / "victim-root-owned"
-    victim.mkdir()
+    # A victim the account "owns" at 0700 (as root would leave it after chowning
+    # the link target), so only O_NOFOLLOW, not the owner/mode checks, refuses.
+    victim = tmp_path / "victim-account-owned"
+    victim.mkdir(mode=0o700)
+    victim.chmod(0o700)
     custody_home = root / "var/lib/ditto-coding-custody"
     custody_home.mkdir(parents=True, mode=0o700)
     (custody_home / "private").symlink_to(victim)
