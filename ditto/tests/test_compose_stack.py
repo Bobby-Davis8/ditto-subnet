@@ -213,8 +213,10 @@ def test_shadow_coding_worker_is_present_but_default_off_on_both_sides() -> None
     ):
         assert _compose_default(scorer[name]) == ""
     assert not [
-        name for name in scorer if name.startswith("DITTOBENCH_CODING_") and "CA" in
-        name.removeprefix("DITTOBENCH_CODING_").split("_")
+        name
+        for name in scorer
+        if name.startswith("DITTOBENCH_CODING_")
+        and "CA" in name.removeprefix("DITTOBENCH_CODING_").split("_")
     ]
     assert scorer["DOCKER_HOST"] == "tcp://127.0.0.1:2375"
     assert _compose_default(validator["VALIDATOR_CODING_CANARY_ENABLED"]) == "false"
