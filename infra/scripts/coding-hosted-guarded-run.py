@@ -70,12 +70,17 @@ REFUSED_ENV_PREFIXES = (
     "OPENSSL_",
     "GCONV_",
     "GLIBC_",
-    "UV_PYTHON",
     "CLOUDSDK_PYTHON",
 )
 REFUSED_ENV_NAMES = frozenset(
     {
         "DITTO_CODING_HOSTED_GUARDED_RUN",
+        # Choose or download the interpreter itself; UV_PYTHON_INSTALL_DIR only
+        # says where uv keeps managed interpreters and is allowed.
+        "UV_PYTHON",
+        "UV_PYTHON_INSTALL_MIRROR",
+        "UV_PYPY_INSTALL_MIRROR",
+        "UV_PYTHON_DOWNLOADS_JSON_URL",
         "UV_NO_VERIFY_HASHES",
         "UV_INSECURE_HOST",
         "UV_CONFIG_FILE",
