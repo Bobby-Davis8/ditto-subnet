@@ -1,0 +1,19 @@
+---
+# The enabled gate is decided exactly once, here, in a single top-level task
+# with no loop in scope. ansible re-templates a variable every time it is read,
+# so a lazily templated extra var such as
+# `-e '{"..._enabled": "{{ item is defined }}"}'` evaluates to false wherever
+# `item` is undefined (here) and to true inside a write loop; a block-level
+# `when` is pushed down to every child task and re-evaluated with the loop
+# variable in scope, which is the #1888 bypass. Reading enabled once here, with
+# no `item`, and running the enabled branch through a dynamic include_tasks
+# closes both that flip and `--start-at-task`, which cannot jump into a
+# dynamically included file and so cannot skip the guards.
+- name: Explain dormant native worker credential materialization
+  ansible.builtin.debug:
+    msg: Native Coding worker credential materialization is disabled; no credential file is written.
+  when: not ((coding_hosted_worker_credentials_enabled | default(false, true)) | bool)
+
+- name: Materialize the worker-owned credential files behind the enabled gate
+  ansible.builtin.include_tasks: materialize.yml
+  when: (coding_hosted_worker_credentials_enabled | default(false, true)) | bool

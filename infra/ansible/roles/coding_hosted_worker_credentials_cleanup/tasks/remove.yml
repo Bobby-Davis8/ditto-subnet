@@ -1,0 +1,223 @@
+---
+# Reached only when the enabled gate in main.yml evaluated true once, with no
+# loop variable in scope.
+
+# Extra vars outrank registered results and gathered facts. Before anything is
+# registered, refuse a preset result name or any role variable other than the
+# three documented inputs, from -e, inventory or vars files alike. Every later
+# guard then reads only a result this run produced.
+- name: Refuse preset registered results and undocumented role inputs
+  ansible.builtin.assert:
+    that:
+      - coding_hosted_worker_credentials_cleanup_identity is not defined
+      - coding_hosted_worker_credentials_cleanup_units is not defined
+      - coding_hosted_worker_credentials_cleanup_directories is not defined
+      - coding_hosted_worker_credentials_cleanup_files is not defined
+      - coding_hosted_worker_credentials_cleanup_unlinked is not defined
+      - coding_hosted_worker_credentials_cleanup_after is not defined
+      # This prefix already excludes the materialization role's names, and its
+      # refusal excludes this prefix, so neither matches the other's variables.
+      - >-
+        lookup('ansible.builtin.varnames', '^coding_hosted_worker_credentials_cleanup_', wantlist=True)
+        | sort == ['coding_hosted_worker_credentials_cleanup_confirmation',
+        'coding_hosted_worker_credentials_cleanup_enabled',
+        'coding_hosted_worker_credentials_cleanup_source_revision']
+    fail_msg: >-
+      Only the enabled, confirmation and source_revision inputs are accepted; a registered result
+      name or another coding_hosted_worker_credentials_cleanup_ variable is preset. Nothing was
+      removed. source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision
+      if coding_hosted_worker_credentials_cleanup_source_revision is string
+      and coding_hosted_worker_credentials_cleanup_source_revision is match('^[0-9a-f]{40}$')
+      and coding_hosted_worker_credentials_cleanup_source_revision | length == 40
+      else 'invalid' }}
+    quiet: true
+
+- name: Refuse check mode for an enabled removal
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+    fail_msg: Enabled removal must run its host checks for real; the disabled fixture covers check mode.
+    quiet: true
+
+# A -e ansible_facts value replaces gathered facts, so identity comes only from
+# this registered probe, whose name the guard above keeps unforgeable.
+- name: Probe this machine's identity into a result extra vars cannot preset
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', platform, distribution]
+  register: coding_hosted_worker_credentials_cleanup_identity
+
+- name: Require the exact host, source and removal confirmation
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in groups.get('role_coding_hosted', [])
+      - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
+      - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_architecture == 'x86_64'
+      - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_distribution == 'Debian'
+      - coding_hosted_worker_credentials_cleanup_identity.ansible_facts.ansible_distribution_major_version == '13'
+      - coding_hosted_worker_credentials_cleanup_source_revision is string
+      - coding_hosted_worker_credentials_cleanup_source_revision is match('^[0-9a-f]{40}$')
+      - coding_hosted_worker_credentials_cleanup_source_revision | length == 40
+      - coding_hosted_worker_credentials_cleanup_confirmation == 'REMOVE NATIVE CODING WORKER CREDENTIALS'
+    fail_msg: >-
+      Require the reviewed source, dedicated host and exact removal confirmation. Nothing was
+      removed. source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision
+      if coding_hosted_worker_credentials_cleanup_source_revision is string
+      and coding_hosted_worker_credentials_cleanup_source_revision is match('^[0-9a-f]{40}$')
+      and coding_hosted_worker_credentials_cleanup_source_revision | length == 40
+      else 'invalid' }}
+    quiet: true
+
+# Same listing as coding_hosted_worker_credentials. This role stops nothing; the
+# operator stops the services first.
+- name: List live worker and custody units
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, list-units, --all, --plain, --no-legend, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
+  register: coding_hosted_worker_credentials_cleanup_units
+  changed_when: false
+  check_mode: false
+
+# Allow-list, not deny-list: every listed line must be an expected unit whose
+# ACTIVE column is inactive or failed. Any other state, including refreshing
+# (systemd 256+), maintenance, a future state or an unparseable line, refuses.
+# An empty listing means no such unit is loaded and is allowed.
+- name: Refuse to remove credentials unless every listed unit is inactive or failed
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_worker_credentials_cleanup_units.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
+      Stop the hosted worker and every custody instance before removing credentials; each listed
+      unit must be inactive or failed and this role stops nothing. Nothing was removed.
+      source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision }}
+    quiet: true
+
+# Path resolution follows links in parent components even when the final
+# component is inspected with follow=false, so each parent must be real.
+- name: Inspect the worker home and private directory without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - /var/lib/ditto-coding-hosted
+    - /var/lib/ditto-coding-hosted/private
+  register: coding_hosted_worker_credentials_cleanup_directories
+
+- name: Refuse a linked or non-directory parent
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: >-
+      A worker credential parent is not a real directory; reconcile it by hand. Nothing was
+      removed. source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision }}
+    quiet: true
+  loop: "{{ coding_hosted_worker_credentials_cleanup_directories.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Inspect the three exact files as link metadata only
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - {path: /var/lib/ditto-coding-hosted/private/hippius-environment.json, owner: ditto-coding-hosted}
+    - {path: /var/lib/ditto-coding-hosted/private/image-storage.json, owner: ditto-coding-hosted}
+    - {path: /var/lib/ditto-coding-hosted/private/provider-key, owner: ditto-coding-hosted}
+  loop_control:
+    label: "{{ item.path }}"
+  register: coding_hosted_worker_credentials_cleanup_files
+
+- name: Refuse anything but an absent file or a regular single-link file owned by the worker
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists or
+        (item.stat.isreg and not item.stat.islnk and item.stat.nlink == 1 and
+         item.stat.pw_name | default('') == item.item.owner)
+    fail_msg: >-
+      A worker credential path is a link, directory, hard link or another account's file;
+      reconcile it by hand. Nothing was removed.
+      source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision }}
+    quiet: true
+  loop: "{{ coding_hosted_worker_credentials_cleanup_files.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Unlink the present files and report any partial removal
+  block:
+    # unlink(2) removes one directory entry and fails on a directory, so this
+    # task cannot recurse even if a path changes after inspection.
+    - name: Unlink each exact file that exists and nothing else
+      ansible.builtin.command:
+        argv: [/usr/bin/unlink, "{{ item }}"]
+      loop:
+        - /var/lib/ditto-coding-hosted/private/hippius-environment.json
+        - /var/lib/ditto-coding-hosted/private/image-storage.json
+        - /var/lib/ditto-coding-hosted/private/provider-key
+      when: >-
+        item in (coding_hosted_worker_credentials_cleanup_files.results
+        | selectattr('stat.exists') | map(attribute='item.path') | list)
+      register: coding_hosted_worker_credentials_cleanup_unlinked
+      changed_when: true
+  rescue:
+    # Every item is attempted even after one fails. Report which unlinks
+    # succeeded and which present files remain unconfirmed, then fail.
+    - name: Report the files unlinked before the removal failure and stop
+      ansible.builtin.fail:
+        msg: >-
+          Native Coding worker credential cleanup failed during removal;
+          source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision }};
+          removed={{ coding_hosted_worker_credentials_cleanup_unlinked.results | default([])
+          | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+          | map(attribute='item') | list | to_json }};
+          not_removed={{ coding_hosted_worker_credentials_cleanup_files.results
+          | selectattr('stat.exists') | map(attribute='item.path')
+          | reject('in', coding_hosted_worker_credentials_cleanup_unlinked.results | default([])
+          | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+          | map(attribute='item') | list)
+          | list | to_json }};
+          reinspect every path and reconcile by hand before re-running.
+
+- name: Reinspect the three exact paths without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - /var/lib/ditto-coding-hosted/private/hippius-environment.json
+    - /var/lib/ditto-coding-hosted/private/image-storage.json
+    - /var/lib/ditto-coding-hosted/private/provider-key
+  register: coding_hosted_worker_credentials_cleanup_after
+
+- name: Require the three exact files to be absent
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists
+    fail_msg: >-
+      A worker credential file is still present after removal.
+      source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision }}
+    quiet: true
+  loop: "{{ coding_hosted_worker_credentials_cleanup_after.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Report only the source revision and exact paths removed or already absent
+  ansible.builtin.debug:
+    msg: >-
+      Native Coding worker credential cleanup;
+      source_revision={{ coding_hosted_worker_credentials_cleanup_source_revision }};
+      removed={{ coding_hosted_worker_credentials_cleanup_files.results
+      | selectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+      already_absent={{ coding_hosted_worker_credentials_cleanup_files.results
+      | rejectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+      directories_kept=true; services_stopped=false; credentials_read=false;
+      credentials_revoked=false.
