@@ -342,12 +342,18 @@ Before removing anything it refuses when:
   `item` is refused too. Every other variable the role reads is a magic variable
   extra vars cannot override;
 - the machine is not the dedicated Debian 13 x86_64 host
-  `ditto-coding-hosted-v2`, or any host in the play is outside
-  `role_coding_hosted`. The playbook gathers no facts: identity comes from a
-  registered `setup` probe, because an `ansible_facts` extra var replaces
-  gathered facts. Membership is read from `groups` and `ansible_play_hosts_all`,
-  because `inventory_hostname` and `group_names` are host variables an extra
-  var replaces;
+  `ditto-coding-hosted-v2`, any host in the play is outside `role_coding_hosted`,
+  or the play targets more than the reviewed host. The playbook gathers no
+  facts: identity comes from a registered `setup` probe, because an
+  `ansible_facts` extra var replaces gathered facts. Membership is read from
+  `groups` and `ansible_play_hosts_all`, and the target is pinned with
+  `ansible_play_batch == ['ditto-coding-hosted-v2']`, because
+  `inventory_hostname` and `group_names` are host variables an extra var
+  replaces while the batch and group lists are not: a labelled rogue VM run
+  without `--limit` is refused;
+- the enabled flag, re-asserted raw inside the include, is not a boolean true.
+  The frozen gate could be preset while `--start-at-task` skips the freeze, so
+  the include re-checks the raw flag;
 - the source revision is not exactly 40 lowercase hex characters (a trailing
   newline is refused) or the confirmation differs;
 - any worker or custody unit in the materialization listing has an ACTIVE state
@@ -389,9 +395,13 @@ nothing `ansible_inject_invocation` returns, can carry it.
 
 It inspects metadata only: no checksum, slurp or fetch. It attempts both
 unlinks; if either fails, it fails with the source revision and the exact paths
-removed and not removed, so a partial removal is never silent. It then verifies
-that both paths are absent. A re-run reports both as already absent. `--check`
-runs the same descriptor checks and lists what would be removed.
+removed and not removed, so a partial removal is never silent. The report's
+`removed=` and the partial-failure message are built from the module's returned
+state, never the pre-unlink stat, so a copy that survived under a parent renamed
+between the inspection and the unlink is never claimed removed; such a vanished
+copy fails the run loudly. It then verifies that both paths are absent. A re-run
+reports both as already absent. `--check` runs the same descriptor checks and
+lists what would be removed.
 
 One residual is accepted, not closed. `default(..., true)` neutralises a
 template that renders undefined, not one that raises. A template that raises
@@ -417,8 +427,9 @@ rehearsal covers lazily templated and lookup-based gates and inputs, extra vars
 that preset a result, forge identity, the gate or a loop `item`, an
 `inventory_hostname` and `group_names` forged for a host outside the group,
 `--start-at-task` at the unlink, the copy inspection, a guard and the include,
-`-vvv` with `ansible_inject_invocation`, a unit that starts during removal, and
-every refusal above. It searches the console and log for the stand-in in raw, JSON-,
+any `main.yml` task with the frozen gate and registers preset, a rogue inventory
+host, `-vvv` with `ansible_inject_invocation`, a unit that starts during removal,
+and every refusal above. It searches the console and log for the stand-in in raw, JSON-,
 YAML- and repr-escaped forms and for the SHA-1, MD5 and SHA-256 digests of the
 password and of the copy document. The infra CI Ansible job runs it.
 
