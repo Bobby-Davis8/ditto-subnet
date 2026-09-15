@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["ansible-core==2.21.2"]
+# dependencies = [
+#     "ansible-core==2.21.2",
+#     "google-auth==2.58.0",
+#     "requests==2.34.2",
+# ]
 # ///
 """Guarded entry point for the native Coding host's secret-handling playbooks.
 
@@ -49,14 +53,80 @@ if __name__ == "__main__" and not sys.flags.safe_path and sys.path:
     del sys.path[0]
 sys.path[:] = [entry for entry in sys.path if entry not in ("", ".")]
 
+import os  # already loaded from the standard library by site at start-up
+
+# Refused before any further import. ANSIBLE_* covers ANSIBLE_CONFIG,
+# KEEP_REMOTE_FILES, DEBUG, VERBOSITY, LOG_PATH, callback, strategy, plugin and
+# library paths, REMOTE_TEMP and every other setting. The rest change what this
+# interpreter, OpenSSL, glibc, uv or gcloud load: PYTHONPATH would shadow the
+# next import and OPENSSL_CONF is read by the first hashlib import, so they are
+# refused here, before either can happen.
+REFUSED_ENV_PREFIXES = (
+    "ANSIBLE_",
+    "_ANSIBLE_",
+    "LD_",
+    "DYLD_",
+    "PYTHON",
+    "OPENSSL_",
+    "GCONV_",
+    "GLIBC_",
+    "UV_PYTHON",
+    "CLOUDSDK_PYTHON",
+)
+REFUSED_ENV_NAMES = frozenset(
+    {
+        "DITTO_CODING_HOSTED_GUARDED_RUN",
+        "UV_NO_VERIFY_HASHES",
+        "UV_INSECURE_HOST",
+        "UV_CONFIG_FILE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    }
+)
+HARMLESS_PYTHON_ENV = frozenset(
+    {
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUNBUFFERED",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "PYTHONHASHSEED",
+    }
+)
+
+
+def _printable(name: str) -> str:
+    """Show a name as is only when it cannot carry terminal escapes."""
+    if name and all("!" <= c <= "~" for c in name):
+        return name
+    return ascii(name)
+
+
+def refused_environment_names(environ) -> list[str]:
+    return sorted(
+        name
+        for name in environ
+        if name in REFUSED_ENV_NAMES
+        or (name.startswith(REFUSED_ENV_PREFIXES) and name not in HARMLESS_PYTHON_ENV)
+    )
+
+
+if __name__ == "__main__":
+    _early = refused_environment_names(os.environ)
+    if _early:
+        sys.stderr.write("coding-hosted-guarded-run: refused; nothing was run.\n")
+        for _name in _early:
+            sys.stderr.write(f"  - environment: {_printable(_name)} must be unset\n")
+        sys.exit(2)
+
 import hashlib
 import json
-import os
 import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import tomllib
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,28 +178,17 @@ PASSTHROUGH_ENV = frozenset(
         "NO_COLOR",
         "SSH_AUTH_SOCK",
         "GOOGLE_APPLICATION_CREDENTIALS",
+        # The ssh login name the group vars read.
+        "GCP_OSLOGIN_USER",
+        # How the IAP ProxyCommand's gcloud finds its configuration and account.
+        "CLOUDSDK_CONFIG",
+        "CLOUDSDK_ACTIVE_CONFIG_NAME",
+        "CLOUDSDK_CORE_ACCOUNT",
+        "CLOUDSDK_CORE_PROJECT",
     }
 )
-# LC_* for the UTF-8 locale ansible requires; CLOUDSDK_* and GCP_* for the IAP
-# ProxyCommand's gcloud and the google.cloud.gcp_compute inventory plugin
-# (GCP_OSLOGIN_USER is the ssh login name).
-PASSTHROUGH_PREFIXES = ("LC_", "CLOUDSDK_", "GCP_")
-
-# Refused outright rather than silently dropped, so a shell prepared for a
-# different run fails loudly. ANSIBLE_* covers ANSIBLE_CONFIG, KEEP_REMOTE_FILES,
-# DEBUG, VERBOSITY, LOG_PATH, callback/strategy/plugin/library paths, REMOTE_TEMP
-# and every other setting; LD_*/DYLD_* and the code-loading PYTHON* variables
-# change what this interpreter itself runs.
-REFUSED_ENV_PREFIXES = ("ANSIBLE_", "_ANSIBLE_", "LD_", "DYLD_", "PYTHON")
-HARMLESS_PYTHON_ENV = frozenset(
-    {
-        "PYTHONDONTWRITEBYTECODE",
-        "PYTHONUNBUFFERED",
-        "PYTHONIOENCODING",
-        "PYTHONUTF8",
-        "PYTHONHASHSEED",
-    }
-)
+# LC_* for the UTF-8 locale ansible requires. Nothing else passes by prefix.
+PASSTHROUGH_PREFIXES = ("LC_",)
 
 PLUGIN_PATH_ENV = (
     "ANSIBLE_ACTION_PLUGINS",
@@ -436,7 +495,9 @@ def classify_secret(value: str | None, spec: SecretInput) -> str | None:
         if any(not ("!" <= c <= "~") for c in value):
             return "not_printable_ascii_without_whitespace"
     else:
-        if any(c < " " or c == "\x7f" for c in value):
+        # Cc includes C0, DEL and C1 (NEL); Cf, Zl and Zp are invisible format
+        # and line or paragraph separators YAML or splitlines treat as breaks.
+        if any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in value):
             return "control_character"
         if value != value.strip():
             return "surrounding_whitespace"
@@ -469,12 +530,10 @@ def classify_nonsecret(value: str | None, spec: NonsecretInput) -> str | None:
 
 def check_base_environment(environ: Mapping[str, str]) -> None:
     """Refuse settings that change what git, python or ansible load or log."""
-    reasons: list[str] = []
-    for name in sorted(environ):
-        if name == MARKER_ENV:
-            reasons.append(f"environment: {name} is set by the guard only")
-        elif name.startswith(REFUSED_ENV_PREFIXES) and name not in HARMLESS_PYTHON_ENV:
-            reasons.append(f"environment: {name} must be unset")
+    reasons = [
+        f"environment: {_printable(name)} must be unset"
+        for name in refused_environment_names(dict(environ))
+    ]
     path = environ.get("PATH", "")
     if not path:
         reasons.append("environment: PATH is empty")
@@ -491,7 +550,9 @@ def check_base_environment(environ: Mapping[str, str]) -> None:
         if name in PASSTHROUGH_ENV or name.startswith(PASSTHROUGH_PREFIXES):
             value = environ[name]
             if _has_surrogate(value) or contains_template_syntax(value):
-                reasons.append(f"environment: {name}: template_syntax_or_encoding")
+                reasons.append(
+                    f"environment: {_printable(name)}: template_syntax_or_encoding"
+                )
     if reasons:
         raise Refusal(reasons)
 
@@ -501,7 +562,9 @@ def check_inputs(environ: Mapping[str, str], spec: Spec) -> None:
     reasons: list[str] = []
     for name in sorted(environ):
         if name in spec.forbidden_env or name.startswith(spec.forbidden_env_prefixes):
-            reasons.append(f"environment: {name} is forbidden for {spec.operation}")
+            reasons.append(
+                f"environment: {_printable(name)} is forbidden for {spec.operation}"
+            )
     for secret in spec.secret_env:
         failure = classify_secret(environ.get(secret.name), secret)
         if failure:
@@ -609,12 +672,34 @@ def verify_checkout(root: Path, revision: str, environ: Mapping[str, str]) -> No
         if required not in expected:
             raise Refusal([f"checkout: {required} is not in the reviewed revision"])
 
+    tracked_directories = {
+        str(parent)
+        for relative in expected
+        for parent in Path(relative).parents
+        if str(parent) != "."
+    }
+
+    def unwalkable(_error: OSError) -> None:
+        # os.walk skips a directory it cannot list, yet ansible can still open a
+        # known path inside an execute-only one, so any listing error refuses.
+        raise Refusal(["checkout: a directory in the verified tree is unreadable"])
+
     actual: set[str] = set()
     for verified in VERIFIED_DIRECTORIES:
         top = root / verified
         if top.is_symlink() or not top.is_dir():
             raise Refusal([f"checkout: {verified} is not a real directory"])
-        for directory, dirnames, filenames in os.walk(top):
+        for directory, dirnames, filenames in os.walk(top, onerror=unwalkable):
+            relative_directory = os.path.relpath(directory, root)
+            if relative_directory not in tracked_directories:
+                reasons.append(
+                    "checkout: untracked or ignored directory "
+                    + _printable(relative_directory)
+                )
+            if not os.access(directory, os.R_OK | os.X_OK):
+                raise Refusal(
+                    ["checkout: a directory in the verified tree is unreadable"]
+                )
             for name in list(dirnames):
                 if os.path.islink(os.path.join(directory, name)):
                     filenames.append(name)
@@ -622,9 +707,9 @@ def verify_checkout(root: Path, revision: str, environ: Mapping[str, str]) -> No
             for name in filenames:
                 actual.add(os.path.relpath(os.path.join(directory, name), root))
     for relative in sorted(actual - set(expected)):
-        reasons.append(f"checkout: untracked or ignored file {relative}")
+        reasons.append(f"checkout: untracked or ignored file {_printable(relative)}")
     for relative in sorted(set(expected) - actual):
-        reasons.append(f"checkout: missing file {relative}")
+        reasons.append(f"checkout: missing file {_printable(relative)}")
     for relative in sorted(actual & set(expected)):
         mode, oid = expected[relative]
         path = root / relative
@@ -639,7 +724,9 @@ def verify_checkout(root: Path, revision: str, environ: Mapping[str, str]) -> No
         else:
             data, matches = b"", False
         if not matches or _blob_digest(data, object_format) != oid:
-            reasons.append(f"checkout: {relative} differs from the reviewed revision")
+            reasons.append(
+                f"checkout: {_printable(relative)} differs from the reviewed revision"
+            )
     if reasons:
         raise Refusal(reasons)
 
@@ -696,6 +783,13 @@ def verify_ansible_runtime(root: Path) -> str:
         import ansible.release  # type: ignore[import-not-found]
     except ImportError:
         raise Refusal(["runtime: ansible-core is not installed"]) from None
+    try:
+        # The google.cloud.gcp_compute inventory plugin needs both; without them
+        # ansible parses no inventory and would match no host.
+        import google.auth  # type: ignore[import-not-found]  # noqa: F401
+        import requests  # type: ignore[import-untyped]  # noqa: F401
+    except ImportError:
+        raise Refusal(["runtime: google-auth and requests are not installed"]) from None
     location = Path(ansible.__file__).resolve()
     if not location.is_relative_to(Path(sys.prefix).resolve()):
         raise Refusal(["runtime: ansible-core is not from the locked environment"])
@@ -740,6 +834,11 @@ def build_invocation(
         "ANSIBLE_VERBOSITY": "0",
         "ANSIBLE_DISPLAY_ARGS_TO_STDOUT": "False",
         "ANSIBLE_RETRY_FILES_ENABLED": "False",
+        # An inventory that fails to parse, or a --limit that matches no host,
+        # must fail the run instead of skipping every play and exiting 0.
+        "ANSIBLE_INVENTORY_UNPARSED_FAILED": "True",
+        "ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED": "True",
+        "ANSIBLE_HOST_PATTERN_MISMATCH": "error",
         MARKER_ENV: spec.operation,
     }
     argv = [
@@ -760,13 +859,16 @@ def build_invocation(
 
 def _default_runner(invocation: Invocation) -> int:
     os.umask(0o077)
-    completed = subprocess.run(
-        invocation.argv,
-        env=invocation.env,
-        cwd=invocation.cwd,
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
+    # A fresh ssh ControlPath directory per run, so no master connection left
+    # by an earlier ssh or ansible session is reused.
+    with tempfile.TemporaryDirectory(prefix="guarded-run-ssh-") as control:
+        completed = subprocess.run(
+            invocation.argv,
+            env={**invocation.env, "ANSIBLE_SSH_CONTROL_PATH_DIR": control},
+            cwd=invocation.cwd,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
     return completed.returncode
 
 
