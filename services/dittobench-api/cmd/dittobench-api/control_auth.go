@@ -45,6 +45,7 @@ func (s *server) newControlPlaneMux() *http.ServeMux {
 	mux.HandleFunc("POST /v1/coding/supervisor/{operation}", s.handleCodingSupervisor)
 	mux.HandleFunc("POST /v1/coding/publications/{operation}", s.handleCodingPublication)
 	mux.HandleFunc("POST /v1/coding/certifier/canary", s.handleCodingCanary)
+	mux.HandleFunc("GET /v1/coding/certifier/canary/readiness", s.handleCodingCanaryReadiness)
 	return mux
 }
 
@@ -73,6 +74,7 @@ var controlPlaneRoutes = []string{
 	"POST /v1/coding/supervisor/{operation}",
 	"POST /v1/coding/publications/{operation}",
 	"POST /v1/coding/certifier/canary",
+	"GET /v1/coding/certifier/canary/readiness",
 }
 
 func (s *server) handleCodingSupervisor(response http.ResponseWriter, request *http.Request) {
@@ -97,6 +99,14 @@ func (s *server) handleCodingCanary(response http.ResponseWriter, request *http.
 		return
 	}
 	s.codingHost.CanaryHandler().ServeHTTP(response, request)
+}
+
+func (s *server) handleCodingCanaryReadiness(response http.ResponseWriter, request *http.Request) {
+	if s == nil || s.codingHost == nil {
+		http.NotFound(response, request)
+		return
+	}
+	s.codingHost.CanaryReadinessHandler().ServeHTTP(response, request)
 }
 
 // controlAuthMode selects what the control plane does with a request that fails

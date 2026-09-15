@@ -25,7 +25,10 @@ type FactoryConfig struct {
 	RequireIsolatedDaemon bool
 	SeccompProfile        string
 	AppArmorProfile       string
-	Now                   func() time.Time
+	// DockerHost selects the dedicated coding daemon for every executor this
+	// factory creates. Empty inherits the process DOCKER_HOST.
+	DockerHost string
+	Now        func() time.Time
 }
 
 // PhaseFactory creates a fresh executor after each phase has verified its own
@@ -39,7 +42,8 @@ func NewPhaseFactory(config FactoryConfig) (*PhaseFactory, error) {
 	if !validImageRepository(config.ImageRepository) ||
 		config.CandidateUID == 0 || config.CandidateGID == 0 ||
 		!config.RequireRootless || !config.RequireIsolatedDaemon ||
-		!validProfileName(config.SeccompProfile) || !validProfileName(config.AppArmorProfile) {
+		!validProfileName(config.SeccompProfile) || !validProfileName(config.AppArmorProfile) ||
+		(config.DockerHost != "" && !ValidDedicatedDockerHost(config.DockerHost)) {
 		return nil, errors.New("coding executor factory configuration is invalid")
 	}
 	if config.SupervisorPath == "" {
@@ -98,7 +102,37 @@ func (factory *PhaseFactory) executorConfig(manifest codinggrader.Manifest, auth
 		RequireRootless:       factory.config.RequireRootless,
 		RequireIsolatedDaemon: factory.config.RequireIsolatedDaemon,
 		SeccompProfile:        factory.config.SeccompProfile, AppArmorProfile: factory.config.AppArmorProfile,
+		DockerHost: factory.config.DockerHost,
 	}
+}
+
+// CertificationReadiness reports, without creating a container, whether a
+// certification executor could pass its Docker preflight right now: the
+// configured endpoint is a rootless daemon with the isolated-daemon label, and
+// the exact runtime image digest is present locally with the supervisor
+// contract. It is advisory; every executor still runs the full preflight.
+func (factory *PhaseFactory) CertificationReadiness(ctx context.Context, imageDigest string) (daemon bool, image bool) {
+	if factory == nil {
+		return false, false
+	}
+	return factory.certificationReadiness(ctx, execDocker{host: factory.config.DockerHost}, imageDigest)
+}
+
+func (factory *PhaseFactory) certificationReadiness(
+	ctx context.Context,
+	docker dockerCLI,
+	imageDigest string,
+) (daemon bool, image bool) {
+	if factory == nil || ctx == nil || ctx.Err() != nil || docker == nil || !ociDigest(imageDigest) {
+		return false, false
+	}
+	if verifyRootlessIsolatedDaemon(ctx, docker) != nil {
+		return false, false
+	}
+	_, err := inspectSupervisorImage(
+		ctx, docker, factory.config.ImageRepository+"@"+imageDigest, imageDigest, "linux/amd64", false,
+	)
+	return true, err == nil
 }
 
 // dockerRepositoryName is the Docker reference grammar for a repository name,

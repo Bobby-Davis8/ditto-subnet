@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/codingcontract"
+	"github.com/ditto-assistant/dittobench-api/internal/codingexecutor"
 	"github.com/ditto-assistant/dittobench-api/internal/codinghost"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 )
@@ -21,15 +22,51 @@ import (
 const (
 	defaultCodingPolicyFile  = "/opt/ditto/coding/coding_inference_policy_locked_v1.json"
 	lockedCodingPolicySHA256 = "b2f38d9f6b5484e9a056d74be4dc0250912f05c9e51512801b590dff934a41d6"
+	// codingDockerHostEnvironment selects the dedicated rootless coding daemon.
+	// Coding harnesses and executors never use the stack's DOCKER_HOST, which on
+	// the Compose validator is the privileged rootful sandbox-docker daemon that
+	// ordinary scoring uses.
+	codingDockerHostEnvironment = "DITTOBENCH_CODING_DOCKER_HOST"
 )
 
-func codingShadowHostFromEnvironment(
-	docker *sandbox.LocalDocker,
-	apiPort int,
-	brokerPort int,
-) (*codinghost.Host, error) {
+// installCodingHost isolates the default-off coding runtime from ordinary
+// scoring. A construction failure disables every coding route (they answer
+// 404, so the validator canary and shadow workers refuse) and is logged, but
+// the scorer keeps serving benchmark tickets.
+func installCodingHost(
+	build func() (*codinghost.Host, error),
+	logf func(string, ...any),
+) *codinghost.Host {
+	host, err := build()
+	if err != nil {
+		logf("coding runtime refused; coding and certification canary routes stay disabled and ordinary scoring continues: %v", err)
+		return nil
+	}
+	if host != nil {
+		logf("shadow coding runtime enabled on private control and source-bound routes")
+	}
+	return host
+}
+
+// codingDockerHostFromEnvironment returns the dedicated coding daemon endpoint.
+// It refuses an unset value, anything but a local Unix socket, the
+// conventional rootful sockets, and the ordinary scoring daemon itself.
+func codingDockerHostFromEnvironment(getenv func(string) string) (string, error) {
+	endpoint := strings.TrimSpace(getenv(codingDockerHostEnvironment))
+	if !codingexecutor.ValidDedicatedDockerHost(endpoint) ||
+		endpoint == strings.TrimSpace(getenv("DOCKER_HOST")) {
+		return "", errors.New("coding runtime requires DITTOBENCH_CODING_DOCKER_HOST to name a dedicated rootless daemon socket, not the sandbox daemon")
+	}
+	return endpoint, nil
+}
+
+func codingShadowHostFromEnvironment(apiPort int, brokerPort int) (*codinghost.Host, error) {
 	if !envBool("DITTOBENCH_CODING_SHADOW_ENABLED") && !envBool("DITTOBENCH_CODING_CANARY_ENABLED") {
 		return nil, nil
+	}
+	dockerHost, err := codingDockerHostFromEnvironment(os.Getenv)
+	if err != nil {
+		return nil, err
 	}
 	port, err := strictCodingEnvInt("DITTOBENCH_CODING_SOURCE_PORT", 11438)
 	if err != nil {
@@ -72,6 +109,13 @@ func codingShadowHostFromEnvironment(
 		_ = listener.Close()
 		return nil, errors.New("coding shadow candidate identity is invalid")
 	}
+	// A dedicated runtime: the ordinary scorer's LocalDocker stays on the stack
+	// daemon, while every coding harness and executor call reaches only the
+	// rootless daemon, which must also prove rootless isolation live.
+	docker := sandbox.NewLocalDocker()
+	docker.DockerHost = dockerHost
+	docker.RequireRootless = true
+	docker.RequireIsolatedDaemon = true
 	host, err := codinghost.New(codinghost.Config{
 		ControlToken: controlTokenFromEnv(), PrivateRoot: root,
 		SourceListener: listener, SourcePublicBaseURL: publicBase, Policy: policy,
