@@ -94,7 +94,9 @@ jobs:
           out="$RUNNER_TEMP/native-probe"
           mkdir -p "$out"
           go test -c -tags native_probe_integration -o "$out/integration.test" ./internal/codingenforcement/probe/
-          CGO_ENABLED=0 go build -trimpath -o "$out/dittobench-coding-enforcement-probe" ./cmd/dittobench-coding-enforcement-probe
+          # The hosted grading chain links cgo (tree-sitter via the sandbox), as
+          # the hosted worker already does, so this is not a static binary.
+          go build -trimpath -o "$out/dittobench-coding-enforcement-probe" ./cmd/dittobench-coding-enforcement-probe
 
       - name: Install rootless prerequisites and pinned Docker static binaries
         run: |
