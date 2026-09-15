@@ -330,7 +330,7 @@ class _Runtime:
         self.readiness = _readiness()
         # Optional per-probe answers (True = ready, False = refused, or a
         # readiness identity); later probes fall back to the fields above.
-        self.script: list[bool | CodingCanaryReadiness] = []
+        self.script: list[bool | CodingCanaryReadiness | Exception] = []
 
     async def require_ready(self) -> CodingCanaryReadiness:
         self.probes += 1
@@ -338,6 +338,8 @@ class _Runtime:
             answer = self.script.pop(0)
             if answer is False:
                 raise PlatformInfrastructureError("coding canary runtime is not ready")
+            if isinstance(answer, BaseException):
+                raise answer
             if isinstance(answer, CodingCanaryReadiness):
                 return answer
             return self.readiness
@@ -558,6 +560,22 @@ async def test_canary_worker_aborts_issued_lease_when_readiness_changes_before_c
     worker = _worker(platform, runtime)
     worker.offer(_AGENT, 12)
     with pytest.raises(PlatformInfrastructureError, match="not ready|changed"):
+        await worker.run_once()
+    assert platform.issues == 1
+    assert platform.aborts == 1
+    assert platform.claims == 0
+    assert runtime.certified == []
+
+
+async def test_canary_worker_aborts_issued_lease_when_the_second_probe_errors() -> None:
+    # An unexpected probe failure (not a reported refusal) after issue must
+    # still abort the issued lease rather than leave it to expire.
+    platform = _Platform()
+    runtime = _Runtime()
+    runtime.script = [True, OSError("fstat failed")]
+    worker = _worker(platform, runtime)
+    worker.offer(_AGENT, 12)
+    with pytest.raises(OSError):
         await worker.run_once()
     assert platform.issues == 1
     assert platform.aborts == 1

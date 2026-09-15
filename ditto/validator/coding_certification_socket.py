@@ -177,8 +177,12 @@ class _VerifiedUnixBackend(httpcore.AsyncNetworkBackend):
             raise httpcore.ConnectError("coding certification socket refused")
         try:
             before = verify_certification_socket(self._identity)
-        except CertificationSocketError as error:
-            raise httpcore.ConnectError(str(error)) from error
+        except OSError as error:
+            # CertificationSocketError, or any other failure of the walk (such
+            # as fstat), is a refused socket rather than an unmapped error.
+            raise httpcore.ConnectError(
+                "coding certification socket refused"
+            ) from error
         stream = await self._inner.connect_unix_socket(
             path, timeout=timeout, socket_options=socket_options
         )

@@ -287,10 +287,11 @@ class CodingCanaryWorker:
             )
         # Re-prove readiness immediately before the irreversible claim, so a
         # daemon restart, socket swap or pack change after issue aborts the
-        # issued lease instead of stranding a claimed one.
+        # issued lease instead of stranding a claimed one. Any failure of the
+        # probe, not only a reported refusal, aborts the still-issued lease.
         try:
             confirmed = await self._runtime.require_ready()
-        except PlatformInfrastructureError:
+        except Exception:
             await self._abort_issued(issued.authority.lease_id)
             raise
         if confirmed != readiness:
