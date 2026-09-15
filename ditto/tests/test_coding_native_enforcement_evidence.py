@@ -3481,6 +3481,31 @@ def test_check_approval_ignores_a_planted_native_pyc(signed, monkeypatch):
 
 
 @needs_openssl
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "image_ref",
+            "coding-runtime.invalid/go/runtime@sha256:" + digest("other manifest"),
+        ),
+        ("config_digest", "sha256:" + digest("other config")),
+    ],
+)
+def test_check_approval_refuses_an_image_the_release_index_does_not_name(
+    signed, field, value
+):
+    # native.release_policy compares every approval image field with the
+    # release index, so the offline check must refuse what the host refuses.
+    changed = copy.deepcopy(signed.value)
+    changed["images"]["go"][field] = value
+    approval, signature = signed.write(changed)
+    with pytest.raises(
+        EVIDENCE.Refusal, match="approval go image differs from the release index"
+    ):
+        signed.check(approval=approval, signature=signature)
+
+
+@needs_openssl
 def test_check_approval_refuses_a_key_the_reviewed_native_py_does_not_pin(signed):
     # Validly signed and self-consistent, but the reviewed native.py pins
     # Peyton's key, so the host would refuse it: the offline check must too.

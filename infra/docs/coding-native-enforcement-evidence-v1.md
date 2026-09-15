@@ -333,6 +333,9 @@ tool never handles a private key. It then checks:
   - The probe profile's full digest stays in the review; it is not a pin.
 - The approval's `evidence_sha256`, machine, boot, source revision, release
   manifest and image approvals equal the review.
+- Each approval image (`image_ref`, `config_digest`, `approval_sha256`,
+  `driver_profile`) equals the release index entry, as `native.release_policy`
+  requires on the host.
 - `issued_at_unix` is no earlier than every record end, the post-collection
   preflight and the custody binding, and at most six hours after the earliest
   record start and the custody binding.

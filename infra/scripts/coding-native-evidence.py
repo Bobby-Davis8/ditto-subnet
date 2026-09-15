@@ -1894,6 +1894,20 @@ def parse_release_index(raw: bytes) -> dict[str, Any]:
             language: _manifest_digest(images[language]["image_ref"], language)
             for language in LANGUAGES
         },
+        # The fields native.release_policy requires the approval's images to
+        # equal on the host.
+        "approval_images": {
+            language: {
+                name: images[language][name]
+                for name in (
+                    "approval_sha256",
+                    "config_digest",
+                    "driver_profile",
+                    "image_ref",
+                )
+            }
+            for language in LANGUAGES
+        },
     }
 
 
@@ -2961,6 +2975,14 @@ def check_approval(
                 release["image_approval_sha256"][language],
             ),
             f"approval {language} image approval differs",
+        )
+        # native.release_policy refuses any other image on the host.
+        require(
+            same(
+                approval["images"][language],
+                release_index["approval_images"][language],
+            ),
+            f"approval {language} image differs from the release index",
         )
     window = rebuilt["window"]
     require(
