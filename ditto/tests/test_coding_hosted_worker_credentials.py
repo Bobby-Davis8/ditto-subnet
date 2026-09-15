@@ -231,15 +231,19 @@ def test_in_include_guards_are_start_at_task_proof_and_target_one_host() -> None
             )
             or prefix == CLEANUP_PREFIX
         )
-        # The batch guard is next and pins the exact single host, not a
+        # The batch guard is next and pins the exact single host and the whole
+        # play host set (so serial: 1 cannot pass without --limit), not a
         # -e-overridable inventory_hostname/group check.
         assert names[1] == BATCH
         batch = tasks[1]["ansible.builtin.assert"]["that"]
-        assert batch == ["ansible_play_batch == ['ditto-coding-hosted-v2']"]
+        assert batch == [
+            "ansible_play_batch == ['ditto-coding-hosted-v2']",
+            "ansible_play_hosts_all == ['ditto-coding-hosted-v2']",
+        ]
     # No role reads inventory_hostname or a groups membership for targeting.
     for text in (MATERIALIZE, REMOVE):
         assert "inventory_hostname in groups" not in text
-        assert "ansible_play_batch == ['ditto-coding-hosted-v2']" in text
+        assert "ansible_play_hosts_all == ['ditto-coding-hosted-v2']" in text
 
 
 def test_pipelining_and_keep_remote_files_guard_precedes_secrets() -> None:
@@ -248,11 +252,21 @@ def test_pipelining_and_keep_remote_files_guard_precedes_secrets() -> None:
     assert names[2] == PIPELINING
     that = _task(PIPELINING, tasks)["ansible.builtin.assert"]["that"]
     assert "(ansible_pipelining | default(false)) is sameas true" in that
+    # ansible_ssh_pipelining wins over ansible_pipelining on 2.21.2, so it must
+    # also be undefined or true.
+    assert any(
+        "ansible_ssh_pipelining is not defined" in line and "is sameas true" in line
+        for line in that
+    )
     assert any("DEFAULT_KEEP_REMOTE_FILES" in line for line in that)
     # It runs before the first secret-carrying task (the env freeze).
     assert names.index(PIPELINING) < names.index(FREEZE_SECRETS)
     # The unlink module carries no secret, so cleanup needs no pipelining guard.
     assert "DEFAULT_KEEP_REMOTE_FILES" not in REMOVE
+    # The materialize playbook turns pipelining on in its play vars so the guard
+    # confirms a genuinely pipelined run (the var is the SSH plugin's input).
+    (play,) = yaml.safe_load(PLAYBOOK.read_text())
+    assert play["vars"]["ansible_pipelining"] is True
 
 
 def test_unlink_module_reports_every_path() -> None:
@@ -426,6 +440,8 @@ def test_docs_describe_every_guard() -> None:
         "no_log",
         "library",
         "ansible_play_batch == ['ditto-coding-hosted-v2']",
+        "ansible_play_hosts_all == ['ditto-coding-hosted-v2']",
+        "ansible_ssh_pipelining",
         "pipelining",
         "--limit ditto-coding-hosted-v2",
         "--step",
@@ -600,6 +616,9 @@ def _play(tasks, rp, hosts="all", report_var="rehearsal_report") -> dict:
         "vars": {
             "ansible_python_interpreter": "{{ ansible_playbook_python }}",
             "rehearsal_pass": rp,
+            # Mirror the playbook's own play var (not a host var), so the guard
+            # runs against the playbook's setting; -e can still override it.
+            "ansible_pipelining": True,
         },
         "tasks": [
             {
@@ -715,9 +734,6 @@ def _base_vars(root: Path) -> dict:
         "rehearsal_owner": pwd.getpwuid(os.getuid()).pw_name,
         "rehearsal_group": grp.getgrgid(os.getgid()).gr_name,
         "rehearsal_accounts": ACCOUNTS_FACT,
-        # The pipelining guard requires this on; the connection is local, but the
-        # rehearsal sets it true to model a pipelined SSH run.
-        "ansible_pipelining": True,
     }
 
 
@@ -1004,7 +1020,10 @@ def test_rehearsal_refuses_forged_facts_and_start_at_task_and_flip(tmp_path) -> 
         "connection": "local",
         "gather_facts": False,
         "become": False,
-        "vars": {"ansible_python_interpreter": "{{ ansible_playbook_python }}"},
+        "vars": {
+            "ansible_python_interpreter": "{{ ansible_playbook_python }}",
+            "ansible_pipelining": True,
+        },
         "tasks": [
             copy.deepcopy(_docs(MAIN)[0]),  # preset refusal
             {
@@ -1197,13 +1216,36 @@ def test_rehearsal_targeting_and_pipelining_guards(tmp_path) -> None:
     assert _outcome(w_root, "b")["task"] == BATCH
     assert not any(_private(w_root).iterdir())
 
-    # Pipelining off is refused before any secret-carrying task.
-    p_root = tmp_path / "hosts" / "pipelining_off"
-    host = {**_mat_host(p_root), "ansible_pipelining": False}
-    output = _run(tmp_path, "pipelining_off", {target: host}, [_play(real, "b")])
+    # serial: 1 makes the batch one host per pass, but ansible_play_hosts_all is
+    # still the whole group, so a second group member is refused without --limit.
+    s_root = tmp_path / "hosts" / "serial_a"
+    s2_root = tmp_path / "hosts" / "serial_b"
+    play = _play(real, "b")
+    play["serial"] = 1
+    play["strategy"] = "linear"
+    output = _run(
+        tmp_path,
+        "serial",
+        {target: _mat_host(s_root), "extra-host": _mat_host(s2_root)},
+        [play],
+    )
     _leak_free(output)
-    assert _outcome(p_root, "b")["task"] == PIPELINING
-    assert not any(_private(p_root).iterdir())
+    assert _outcome(s_root, "b")["task"] == BATCH
+    assert not any(_private(s_root).iterdir())
+
+    # Pipelining turned off through -e (either var) is refused; ansible_ssh_pipelining
+    # wins over ansible_pipelining on 2.21.2, so it is checked too.
+    for name, flag in (
+        ("pipelining_off", "ansible_pipelining=false"),
+        ("ssh_pipelining_off", "ansible_ssh_pipelining=false"),
+    ):
+        r = tmp_path / "hosts" / name
+        output = _run(
+            tmp_path, name, {target: _mat_host(r)}, [_play(real, "b")], "-e", flag
+        )
+        _leak_free(output)
+        assert _outcome(r, "b")["task"] == PIPELINING, name
+        assert not any(_private(r).iterdir()), name
 
     # ANSIBLE_KEEP_REMOTE_FILES=1 is refused too.
     k_root = tmp_path / "hosts" / "keep_remote"
