@@ -299,39 +299,116 @@ The default-off `coding_hosted_postgres_environment_cleanup` role removes the
 two copies above. Run
 `playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml` with a 40-hex
 source revision and the exact confirmation
-`REMOVE NATIVE CODING POSTGRES ENVIRONMENT`. It needs no secret and never reads
-`DITTO_CODING_PG_PASSWORD`.
+`REMOVE NATIVE CODING POSTGRES ENVIRONMENT`, passing booleans as JSON extra vars
+(`-e '{"coding_hosted_postgres_environment_cleanup_enabled": true, …}'`). It
+needs no secret and never reads `DITTO_CODING_PG_PASSWORD`: do not export it.
 
 It unlinks only the two literal file paths. It never removes, creates or
 changes a directory, sibling file, custody key, receipt or evidence record, and
-has no path input, glob or recursion. `unlink(2)` cannot remove a directory.
+has no path input, glob or recursion.
+
+The gate and the inputs are frozen once:
+- `tasks/main.yml` renders the `enabled` flag a single time into a `no_log`
+  fact and hands the work to a dynamic `include_tasks`, evaluated once with no
+  loop item in scope. A block-level `when:` is re-evaluated for every task and
+  loop item, so a flag such as `{{ item is defined }}` used to be false for
+  every guard and true inside the removal loops. `--start-at-task` cannot jump
+  into the not-yet-included `tasks/remove.yml` to skip the guards, and starting
+  at the include itself fails on the missing frozen fact.
+- The gate opens only for a real boolean true (`is sameas true`), after
+  `default(false, true)`. The `bool` filter is avoided: on ansible-core 2.21 it
+  prints any non-boolean string it coerces, such as a flag templated to a
+  secret, in a deprecation warning that `no_log` does not suppress.
+- `confirmation` and `source_revision` are frozen once, under `no_log`, with
+  `default(..., true)`, which turns an undefined result, including one produced
+  while reading a secret (for example `{{ {}[lookup('env', …)] }}`), into an
+  empty value that fails validation. Every later task reads only the frozen
+  values. The role never renders an input into a message: refusals before the
+  host check are fixed text, and later messages name only the frozen revision
+  after it has been proved to be exactly 40 lowercase hex characters.
+
 Before removing anything it refuses when:
 - any variable named `coding_hosted_postgres_environment_cleanup_*` other than
-  the `enabled`, `confirmation` and `source_revision` inputs is set, from extra
-  vars, inventory or vars files. Extra vars outrank registered results, so a
-  preset result name such as `coding_hosted_postgres_environment_cleanup_units`
-  would otherwise replace the unit listing and disable its guard;
+  the `enabled`, `confirmation` and `source_revision` inputs and the frozen gate
+  is set, from extra vars, inventory or vars files. The check lists names
+  without rendering values and runs before any fact is frozen or result
+  registered. Extra vars outrank registered results and facts, so a preset
+  result such as `coding_hosted_postgres_environment_cleanup_units` would
+  otherwise replace the unit listing and disable its guard. Presetting the
+  frozen gate only enables removal, which every guard still decides. The
+  materialization role's `coding_hosted_postgres_environment_*` names never
+  match this prefix, and that role excludes these names in turn;
 - the machine is not the dedicated Debian 13 x86_64 host
   `ditto-coding-hosted-v2` in `role_coding_hosted`. The playbook gathers no
   facts: identity comes from a registered `setup` probe, because an
   `ansible_facts` extra var replaces gathered facts;
+- the source revision is not exactly 40 lowercase hex characters (a trailing
+  newline is refused) or the confirmation differs;
 - any worker or custody unit in the materialization listing has an ACTIVE state
   other than `inactive` or `failed`. This is an allow-list, so `active`,
   `activating`, `deactivating`, `reloading`, `refreshing` (systemd 256 and
   later), `maintenance`, a future state or an unparseable line all refuse. An
   empty listing means no such unit is loaded and is allowed. The role stops
   nothing;
-- a reader home or `private` directory is a symlink or not a directory;
+- a reader home or `private` directory is a symlink, not a directory, not owned
+  by its reader, or writable by group or others;
 - a copy path, inspected without following links, is anything except absent
   or a regular, single-link file owned by its reader. A symlink, directory,
   hard link or another account's file needs manual reconciliation.
 
+The unlink cannot follow a link or remove a directory. Each reader home and
+`private` directory is created `0700` and owned by its reader (`coding_hosted`,
+`coding_hosted_custody_key` and the materialization role), so the unprivileged
+reader could swap a path component for a symlink after the inspection, and a
+path-based unlink run as root would follow it. The role-local
+`coding_hosted_postgres_environment_unlink` module therefore never resolves the
+path as a string. It opens every component from `/` with `O_NOFOLLOW` and
+`O_DIRECTORY`, re-checks that the home and `private` directory are owned by its
+reader and not group- or other-writable and that the copy is a regular
+single-link file owned by its reader, and removes the entry with `unlinkat`
+relative to the pinned `private` directory. `unlinkat` without `AT_REMOVEDIR`
+cannot remove a directory and never follows a symlink, so a later swap can at
+most remove the reader's own directory entry. Directories above the homes are
+not trusted for this: a swapped ancestor can only lead to a directory the reader
+itself owns.
+
+The unit state is re-checked after the unlink. A unit could start between the
+first listing and the unlink and read a copy mid-removal; if any unit is then no
+longer `inactive` or `failed`, the role fails loudly and does not restore the
+copy.
+
 It inspects metadata only: no checksum, slurp or fetch. It attempts both
 unlinks; if either fails, it fails with the source revision and the exact paths
 removed and not removed, so a partial removal is never silent. It then verifies
-that both paths are absent. A re-run reports both as already absent. The report
-and every refusal carry the source revision and paths only. `--check` lists what
-would be removed.
+that both paths are absent. A re-run reports both as already absent. `--check`
+runs the same descriptor checks and lists what would be removed.
+
+One residual is accepted, not closed. `default(..., true)` neutralises a
+template that renders undefined, not one that raises. A template that raises
+with a secret in its message, for example
+`{{ lookup('file', lookup('env', 'DITTO_CODING_PG_PASSWORD')) }}` as `enabled`
+or `source_revision`, fails the run closed at the freeze, but ansible-core
+2.21.2 prints the raised message through the task result's `exception` field,
+which `no_log` deliberately preserves, on the console and in any
+`ANSIBLE_LOG_PATH` log. Core Jinja offers no construct that swallows a raised
+lookup or filter error, and there is no way to read a variable without rendering
+it. Such a template must be written into the operator's own command line or a
+reviewed inventory, and the secret must already be readable on the controller.
+Not exporting `DITTO_CODING_PG_PASSWORD` for cleanup keeps the password itself
+out of reach. The rehearsal pins this residual exactly.
+
+Root tests check the role structure and exercise the unlink module directly,
+including a parent swapped for a symlink after pinning and a copy swapped for a
+directory or symlink between inspection and removal. With
+`DITTO_ANSIBLE_REHEARSAL=1` they also run the real role and module through
+ansible-core 2.21.2 against temporary trees, under the repo's `ansible.cfg` and
+`-v --diff`, with a stand-in password exported and planted in the copies. The
+rehearsal covers lazily templated and lookup-based gates and inputs, extra vars
+that preset a result, forge identity or the gate, `--start-at-task` at the
+unlink, a guard and the include, a unit that starts during removal, and every
+refusal above. It searches the console and log for the stand-in in raw, JSON-,
+YAML- and repr-escaped forms and for the SHA-1, MD5 and SHA-256 digests of the
+password and of the copy document. The infra CI Ansible job runs it.
 
 ### Removal is not revocation
 
