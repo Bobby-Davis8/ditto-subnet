@@ -92,6 +92,7 @@ def _source_repository(path: Path) -> tuple[list[str], str]:
     _git(path, "config", "user.name", "fixture")
     files = {
         "apps/platform/pyproject.toml": "[project]\nname = 'synthetic'\n",
+        "apps/platform/release-build-requirements.txt": "hatchling==1\n",
         "apps/platform/ditto/__init__.py": "",
         "apps/platform/scripts/run.sh": "#!/bin/sh\n",
         "apps/platform/dashboard/package.json": "{}\n",
@@ -153,9 +154,9 @@ def build_tree(tmp_path: Path) -> Tree:
     builder_home = directory("var/lib/ditto-platform-api-build", 0o700)
     bin_dir = directory("usr/bin")
 
-    python = bin_dir / "python3.13"
-    python.write_text("synthetic interpreter\n")
-    python.chmod(0o755)
+    # Stands in for the pinned interpreter: a real Python for the probe, and a
+    # fixed link target for the synthetic environment.
+    python = _executable(bin_dir / "python3.13", 'exec /usr/bin/python3 "$@"\n')
     git = _executable(
         bin_dir / "git",
         f'printf "%s\\n" "$(printf "%q " "$@")" >> "{control}/git.log"\n'
@@ -175,20 +176,28 @@ def build_tree(tmp_path: Path) -> Tree:
         "done\n"
         'case "${command[0]}" in\n'
         "  */uv)\n"
-        f'    [ -e "{control}/uv-exit" ] && exit "$(cat "{control}/uv-exit")"\n'
+        f'    if [ -e "{control}/uv-${{command[1]}}-exit" ]; then\n'
+        f'      exit "$(cat "{control}/uv-${{command[1]}}-exit")"\n'
+        "    fi\n"
         '    for arg in "${args[@]}"; do\n'
         '      case "$arg" in\n'
         '        --setenv=UV_PROJECT_ENVIRONMENT=*) venv="${arg#*=*=}" ;;\n'
         '        --setenv=UV_PYTHON=*) interpreter="${arg#*=*=}" ;;\n'
         "      esac\n"
         "    done\n"
-        '    mkdir -p "$venv/bin" "$venv/lib/python3.13/site-packages"\n'
-        '    ln -s "$interpreter" "$venv/bin/python"\n'
-        '    ln -s python "$venv/bin/python3"\n'
-        '    ln -s lib "$venv/lib64"\n'
-        '    pth="$venv/lib/python3.13/site-packages/_synthetic.pth"\n'
-        '    printf "%s\\n" "${venv%/.venv}" > "$pth"\n'
-        '    chmod 0666 "$pth"\n'
+        '    case "${command[1]}" in\n'
+        "      venv)\n"
+        '        mkdir -p "$venv/bin" "$venv/lib/python3.13/site-packages"\n'
+        '        ln -s "$interpreter" "$venv/bin/python"\n'
+        '        ln -s python "$venv/bin/python3"\n'
+        '        ln -s lib "$venv/lib64"\n'
+        "        ;;\n"
+        "      sync)\n"
+        '        pth="$venv/lib/python3.13/site-packages/_synthetic.pth"\n'
+        '        printf "%s\\n" "${venv%/.venv}" > "$pth"\n'
+        '        chmod 0666 "$pth"\n'
+        "        ;;\n"
+        "    esac\n"
         "    ;;\n"
         "  *)\n"
         f'    if [ -e "{control}/preflight-exit" ]; then\n'
@@ -214,8 +223,24 @@ def build_tree(tmp_path: Path) -> Tree:
         root / "usr/local/libexec/ditto-platform-api/launch",
         'echo "synthetic preflight $1 $2"\n',
     )
+    # Records its arguments; exits with control/docker-exit (default 0).
+    docker_probe = root / "usr/local/libexec/ditto-platform-api/deploy-docker-access"
+    docker_probe.write_text(
+        "import pathlib, sys\n"
+        f"control = pathlib.Path({str(control)!r})\n"
+        "with open(control / 'docker-probe.log', 'a') as log:\n"
+        "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "code = control / 'docker-exit'\n"
+        "if code.exists():\n"
+        "    print('synthetic: deploy still holds the docker group')\n"
+        "    sys.exit(int(code.read_text()))\n"
+    )
+    docker_probe.chmod(0o755)
     directory("usr/local/libexec/ditto-platform-api")
 
+    platform_env = config_dir / "platform.env"
+    platform_env.write_text("DITTO_CODING_HOSTED_CONTROL_ENABLED=false\n")
+    platform_env.chmod(0o640)
     settings = config_dir / "release.json"
     settings.write_text(json.dumps({"python": str(python), "platform_owner": "deploy"}))
     settings.chmod(0o644)
@@ -243,6 +268,9 @@ def build_tree(tmp_path: Path) -> Tree:
         builder_home=builder_home,
         dashboard_source=dist,
         launcher=launcher,
+        docker_probe=docker_probe,
+        proc_root=tmp_path / "proc",
+        docker_socket=tmp_path / "docker.sock",
         repository=f"file://{tmp_path / 'source'}",
         git_protocols="file",
         trusted_uid=UID,
@@ -300,6 +328,13 @@ def test_production_host_is_fixed_and_matches_the_role() -> None:
         "/opt/ditto-subnet/apps/platform/dashboard/dist"
     )
     assert host.launcher == Path("/usr/local/libexec/ditto-platform-api/launch")
+    assert host.docker_probe == Path(
+        "/usr/local/libexec/ditto-platform-api/deploy-docker-access"
+    )
+    assert (host.proc_root, host.docker_socket) == (
+        Path("/proc"),
+        Path("/run/docker.sock"),
+    )
     assert host.repository == "git@github.com:ditto-assistant/ditto-subnet.git"
     assert host.git_protocols == "ssh"
     assert (host.unit, host.service_user, host.builder_user) == (
@@ -407,7 +442,18 @@ SECRET = "tao-secret-value"
         + b"a" * 40
         + b"\nDITTO_TAOSTATS_API_KEY="
         + SECRET.encode()
-        + b";id\n",
+        + b"`id`\n",
+        b"revision="
+        + b"a" * 40
+        + b"\nDITTO_TAOSTATS_API_KEY="
+        + SECRET.encode()
+        + b"\\\n",
+        b"revision="
+        + b"a" * 40
+        + b"\nDITTO_TAOSTATS_API_KEY="
+        + SECRET.encode()
+        + b"\x00\n",
+        b"revision=" + b"a" * 40 + b"\n" + SECRET.encode() + b"\n",
         b"revision=" + b"a" * 40 + b"\nDITTO_TAOSTATS_API_KEY=\n",
         b"revision="
         + b"a" * 40
@@ -421,6 +467,32 @@ def test_request_refuses_anything_else_without_echoing_values(body: bytes) -> No
         RELEASE.parse_request(body, with_values=True)
     assert SECRET not in str(error.value)
     assert "/tmp/evil" not in str(error.value)
+
+
+def test_url_characters_update_sh_accepts_stay_literal() -> None:
+    """`&`, `|`, `;`, `~` and friends are single-quoted in deploy.env."""
+    url = "wss://archive.example/v1?key=a&mode=b|c;d~e(f)<g>{h}[i]^j!"
+    request = RELEASE.parse_request(
+        f"revision={'a' * 40}\nSUBTENSOR_ARCHIVE_RPC_URL={url}\n".encode(),
+        with_values=True,
+    )
+    assert dict(request.values) == {"SUBTENSOR_ARCHIVE_RPC_URL": url}
+    assert shlex.split(f"X={shlex.quote(url)}") == [f"X={url}"]
+
+
+def test_refusals_name_a_known_key_but_never_a_value() -> None:
+    with pytest.raises(RELEASE.ReleaseError) as bad_value:
+        RELEASE.parse_request(
+            f"revision={'a' * 40}\nDITTO_TAOSTATS_API_KEY={SECRET}$HOME\n".encode(),
+            with_values=True,
+        )
+    assert str(bad_value.value).startswith("DITTO_TAOSTATS_API_KEY ")
+    assert SECRET not in str(bad_value.value)
+    with pytest.raises(RELEASE.ReleaseError) as unknown:
+        RELEASE.parse_request(
+            f"revision={'a' * 40}\n{SECRET}=1\n".encode(), with_values=True
+        )
+    assert str(unknown.value) == "request line 2 is not an allowed deploy key"
 
 
 def test_activate_requests_carry_no_values() -> None:
@@ -513,37 +585,58 @@ def test_install_seals_a_main_revision_and_activate_switches_current(
     pth = release / "apps/platform/.venv/lib/python3.13/site-packages/_synthetic.pth"
     assert stat.S_IMODE(pth.stat().st_mode) == 0o644
 
-    # The environment was built as ditto-api-build in a sandbox, then the
-    # metadata preflight ran as ditto-api from the sealed tree.
-    build, preflight = tree.log("systemd-run")
-    assert "--uid=ditto-api-build" in build and "--gid=ditto-api-build" in build
-    assert build[build.index("--") + 1 :] == [
+    # The environment was built as ditto-api-build in three sandboxed steps:
+    # the venv, the hash-pinned build backends as wheels only, then the locked
+    # sync that builds local packages without isolation. Then the metadata
+    # preflight ran as ditto-api from the sealed tree.
+    venv, backends, sync, preflight = tree.log("systemd-run")
+    platform = f"{release}/apps/platform"
+    assert venv[venv.index("--") + 1 :] == [
+        tree.host.uv,
+        "venv",
+        "--quiet",
+        f"{platform}/.venv",
+    ]
+    assert backends[backends.index("--") + 1 :] == [
+        tree.host.uv,
+        "pip",
+        "install",
+        "--quiet",
+        "--require-hashes",
+        "--no-build",
+        f"--python={platform}/.venv/bin/python",
+        f"--requirements={platform}/release-build-requirements.txt",
+    ]
+    assert sync[sync.index("--") + 1 :] == [
         tree.host.uv,
         "sync",
         "--frozen",
         "--no-dev",
+        "--no-build-isolation",
         "--no-progress",
-        f"--project={release}/apps/platform",
+        f"--project={platform}",
     ]
-    for expected in (
-        "--wait",
-        "--pipe",
-        "--collect",
-        "--property=NoNewPrivileges=yes",
-        "--property=ProtectSystem=strict",
-        "--property=CapabilityBoundingSet=",
-        f"--property=ReadWritePaths={release}/apps/platform/.venv "
-        f"{tree.host.builder_home}",
-        "--setenv=UV_PYTHON_DOWNLOADS=never",
-        "--setenv=UV_LINK_MODE=copy",
-        "--setenv=UV_COMPILE_BYTECODE=1",
-        f"--setenv=UV_PROJECT_ENVIRONMENT={release}/apps/platform/.venv",
-        f"--setenv=UV_PYTHON={tree.python}",
-        "--setenv=UV_PYTHON_PREFERENCE=only-system",
-        "--setenv=UV_NO_CONFIG=1",
-        f"--working-directory={release}/apps/platform",
-    ):
-        assert expected in build, expected
+    for build in (venv, backends, sync):
+        assert "--uid=ditto-api-build" in build and "--gid=ditto-api-build" in build
+        for expected in (
+            "--wait",
+            "--pipe",
+            "--collect",
+            "--property=NoNewPrivileges=yes",
+            "--property=ProtectSystem=strict",
+            "--property=CapabilityBoundingSet=",
+            f"--property=ReadWritePaths={release}/apps/platform/.venv "
+            f"{tree.host.builder_home}",
+            "--setenv=UV_PYTHON_DOWNLOADS=never",
+            "--setenv=UV_LINK_MODE=copy",
+            "--setenv=UV_COMPILE_BYTECODE=1",
+            f"--setenv=UV_PROJECT_ENVIRONMENT={release}/apps/platform/.venv",
+            f"--setenv=UV_PYTHON={tree.python}",
+            "--setenv=UV_PYTHON_PREFERENCE=only-system",
+            "--setenv=UV_NO_CONFIG=1",
+            f"--working-directory={release}/apps/platform",
+        ):
+            assert expected in build, expected
     assert "--uid=ditto-api" in preflight
     assert preflight[preflight.index("--") + 1 :] == [
         str(tree.host.launcher),
@@ -568,9 +661,12 @@ def test_install_seals_a_main_revision_and_activate_switches_current(
     assert not staged.exists()
     assert tree.log("systemctl") == [
         ["enable", "--quiet", "ditto-platform-api.service"],
+        ["reset-failed", "ditto-platform-api.service"],
         ["restart", "ditto-platform-api.service"],
     ]
     assert list(tree.host.work_root.iterdir()) == [tree.host.work_root / "lock"]
+    # The signer is disabled in platform.env, so no Docker probe ran.
+    assert tree.log("docker-probe") == []
 
 
 def test_an_unmerged_revision_never_becomes_a_release(tree: Tree, capsys) -> None:
@@ -595,14 +691,16 @@ def test_a_sealed_release_is_reused_without_refetching(tree: Tree, capsys) -> No
     assert "reused and sealed" in capsys.readouterr().out
     assert len(tree.log("git")) == clones
     # The preflight still runs for every deploy.
-    assert len(tree.log("systemd-run")) == 3
+    assert len(tree.log("systemd-run")) == 5
 
 
-def test_a_failed_build_leaves_no_release(tree: Tree, capsys) -> None:
-    (tree.control / "uv-exit").write_text("3")
+@pytest.mark.parametrize("step", ["venv", "pip", "sync"])
+def test_a_failed_build_leaves_no_release(tree: Tree, capsys, step: str) -> None:
+    (tree.control / f"uv-{step}-exit").write_text("3")
     assert _install(tree, tree.mains[0]) == 1
-    assert "Python environment build failed" in capsys.readouterr().err
+    assert "Python environment build failed at" in capsys.readouterr().err
     assert list(tree.host.releases.iterdir()) == []
+    assert not tree.host.staged_deploy_env(tree.mains[0]).exists()
 
 
 def test_a_failed_preflight_stages_nothing_and_touches_no_unit(
@@ -726,6 +824,73 @@ def test_untrusted_host_inputs_stop_the_install(tree: Tree, fault: str, capsys) 
     assert _install(tree, tree.mains[0]) == 1
     assert "failed:" in capsys.readouterr().err
     assert tree.log("git") == []
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "'true'", "maybe"])
+def test_an_enabled_signer_requires_deploy_without_docker(
+    tree: Tree, capfd, value: str
+) -> None:
+    tree.host.platform_env.write_text(
+        "DITTO_CODING_HOSTED_CONTROL_ENABLED=false\n"
+        f"DITTO_CODING_HOSTED_CONTROL_ENABLED={value}\n"
+    )
+    (tree.control / "docker-exit").write_text("1")
+    revision = tree.mains[0]
+    assert _install(tree, revision) == 1
+    error = capfd.readouterr()
+    assert "deploy can still reach the Docker daemon" in error.err
+    assert "synthetic: deploy still holds the docker group" in error.out
+    assert tree.log("git") == []
+    assert tree.log("docker-probe") == [
+        [
+            "--user=deploy",
+            "--group=docker",
+            f"--proc={tree.host.proc_root}",
+            f"--socket={tree.host.docker_socket}",
+        ]
+    ]
+
+
+def test_activate_rechecks_docker_access_before_switching(tree: Tree, capsys) -> None:
+    revision = tree.mains[0]
+    assert _install(tree, revision, f"DITTO_UPLOAD_PAYMENT_ADDRESS={PAYMENT}\n") == 0
+    tree.host.platform_env.write_text("DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n")
+    (tree.control / "docker-exit").write_text("1")
+    assert RELEASE.main(["activate"], stdin=tree.request(revision), host=tree.host) == 1
+    assert "can still reach the Docker daemon" in capsys.readouterr().err
+    assert not tree.host.current.exists()
+    assert tree.log("systemctl") == []
+
+
+def test_a_clean_docker_probe_lets_an_enabled_signer_deploy(tree: Tree) -> None:
+    tree.host.platform_env.write_text("DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n")
+    revision = tree.mains[0]
+    assert _install(tree, revision, f"DITTO_UPLOAD_PAYMENT_ADDRESS={PAYMENT}\n") == 0
+    assert RELEASE.main(["activate"], stdin=tree.request(revision), host=tree.host) == 0
+    assert len(tree.log("docker-probe")) == 2
+
+
+def test_each_deploy_hashes_the_tree_once_per_step(
+    tree: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Path] = []
+    real = RELEASE.manifest_digest
+
+    def counting(release: Path) -> str:
+        calls.append(release)
+        return real(release)
+
+    monkeypatch.setattr(RELEASE, "manifest_digest", counting)
+    revision = tree.mains[0]
+    request = f"DITTO_UPLOAD_PAYMENT_ADDRESS={PAYMENT}\n"
+    assert _install(tree, revision, request) == 0
+    assert RELEASE.main(["activate"], stdin=tree.request(revision), host=tree.host) == 0
+    # Receipt at install, verification at activate.
+    assert len(calls) == 2
+    assert _install(tree, revision, request) == 0
+    assert RELEASE.main(["activate"], stdin=tree.request(revision), host=tree.host) == 0
+    # A reused release: verification at install and at activate.
+    assert len(calls) == 4
 
 
 # --- Dashboard data ---------------------------------------------------------
@@ -888,6 +1053,37 @@ def test_seal_refuses_links_out_of_the_release_and_special_files(
         RELEASE.seal(host, settings, release)
 
 
+def test_seal_refuses_a_chain_of_relative_links_that_escapes(tmp_path: Path) -> None:
+    """Each target looks harmless alone; resolved hop by hop it leaves.
+
+    `sub/hop -> ../..` stays inside (it names release/apps). `esc ->
+    sub/hop/../..` also normalizes to a path inside, but the kernel resolves
+    `hop` first and then climbs two levels above release/apps.
+    """
+    host, settings, release = _release(tmp_path)
+    platform = release / "apps/platform"
+    (platform / "sub").mkdir()
+    (platform / "sub/hop").symlink_to("../..")
+    (platform / "esc").symlink_to("sub/hop/../..")
+    # Control: the old textual rule accepted it; the kernel escapes.
+    textual = os.path.normpath(os.path.join(platform, "sub/hop/../.."))
+    assert textual.startswith(f"{release}{os.sep}")
+    assert not Path(os.path.realpath(platform / "esc")).is_relative_to(release)
+    assert RELEASE._allowed_link(release, platform / "sub/hop", settings)
+    assert not RELEASE._allowed_link(release, platform / "esc", settings)
+    with pytest.raises(RELEASE.ReleaseError, match="leaves the release"):
+        RELEASE.seal(host, settings, release)
+
+
+def test_seal_refuses_a_link_loop(tmp_path: Path) -> None:
+    host, settings, release = _release(tmp_path)
+    platform = release / "apps/platform"
+    (platform / "a").symlink_to("b")
+    (platform / "b").symlink_to("a")
+    with pytest.raises(RELEASE.ReleaseError):
+        RELEASE.seal(host, settings, release)
+
+
 def test_seal_accepts_the_venv_interpreter_and_internal_links(tmp_path: Path) -> None:
     host, settings, release = _release(tmp_path)
     (release / "apps/platform/.venv/lib").mkdir()
@@ -944,6 +1140,8 @@ def test_install_activate_stop_and_logs_never_touch_the_seed(tmp_path: Path) -> 
         pytest.skip("synthetic trees model a non-root trusted owner")
     tree = build_tree(tmp_path)
     host = tree.host
+    # Enabled, so the Docker probe runs inside the audited process tree too.
+    host.platform_env.write_text("DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n")
     fields = {
         field.name: getattr(host, field.name) for field in dataclasses.fields(host)
     }
@@ -989,4 +1187,5 @@ def test_install_activate_stop_and_logs_never_touch_the_seed(tmp_path: Path) -> 
     assert run(control=True).returncode == 97
     result = run()
     assert result.returncode == 0, result.stderr
+    assert len(tree.log("docker-probe")) == 2
     assert os.readlink(host.current) == f"releases/{revision}"

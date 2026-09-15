@@ -46,6 +46,7 @@
     - name: Resolve the fixture user once
       ansible.builtin.set_fact:
         fixture_user: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+        fixture_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
         fixture_is_root: "{{ lookup('ansible.builtin.pipe', 'id -u') == '0' }}"
 
     - name: Bind the synthetic validator identity over the empty role default
@@ -124,7 +125,6 @@
         - User=ditto-api
         - Group=ditto-api
         - SupplementaryGroups=
-        - ExecStartPre=/usr/local/libexec/ditto-platform-api/launch preflight
         - ExecStart=/usr/local/libexec/ditto-platform-api/launch serve
         - NoNewPrivileges=yes
         - CapabilityBoundingSet=
@@ -161,7 +161,8 @@
           - pylon_unit | select('match', '\\[Install\\]') | list == []
           - >-
             pylon_env == ['SUBTENSOR_NETWORK=finney', 'PYLON_OPEN_ACCESS_TOKEN=synthetic-pylon-token',
-            'BITTENSOR_WALLET_PATH=/home/deploy/.bittensor/wallets']
+            'BITTENSOR_WALLET_PATH=/etc/ditto-platform/pylon/wallets']
+          - api_unit_plain | select('match', 'ExecStartPre') | list == []
         quiet: true
 
     - name: Prove a staged hotkey or path is still not rendered while disabled
@@ -311,6 +312,19 @@
               - platform_coding_hosted_signer_ancestor_stats.results | map(attribute='item') | list == fixed_seed_ancestors
             fail_msg: "failed_task={{ ansible_failed_task.name }}"
             quiet: true
+
+    - name: Exercise the live Docker-access guard against synthetic process tables
+      ansible.builtin.include_tasks: coding-hosted-control-signer-docker-case.yml
+      loop:
+        # `root` stands in for the Docker group: the fixture user is not in it
+        # and, unless the case adds GID 0, holds no process with it.
+        - {name: no route to the daemon, group: root, groups: "{{ lookup('ansible.builtin.pipe', 'id -g') }}", accept: true, skip_as_root: true}
+        - {name: primary group opens the daemon, group: "{{ fixture_group }}", groups: "", accept: false}
+        - {name: running process kept the group, group: root, groups: "{{ lookup('ansible.builtin.pipe', 'id -g') }} 0", accept: false}
+        - {name: socket not owned by root, group: root, groups: "", setup: "python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind(\"docker.sock\")'", accept: false, skip_as_root: true}
+      loop_control:
+        loop_var: docker_case
+        label: "{{ docker_case.name }}"
 
     - name: Exercise the stat-only seed guard against synthetic temporary trees
       ansible.builtin.include_tasks: coding-hosted-control-signer-seed-case.yml

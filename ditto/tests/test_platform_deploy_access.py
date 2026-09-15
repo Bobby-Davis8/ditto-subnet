@@ -58,26 +58,96 @@ def _visudo(tmp_path: Path, content: str) -> None:
 # --- base role: journal access without root ---------------------------------
 
 
-def test_team_sudoers_is_exactly_the_narrowed_service_rules(tmp_path: Path) -> None:
+TEAM_SERVICES = {
+    "ditto-image-builder",
+    "ditto-platform-api",
+    "ditto-platform-pylon",
+    "ditto-pylon",
+    "ditto-screener",
+    "ditto-screener-capacity",
+    "ditto-screener-enroll",
+    "ditto-screener-fleet-agent",
+    "ditto-screener-fleet-auto-update",
+    "ditto-screener-source-review-secret",
+    "ditto-validator",
+    "ditto-validator-stack-auto-update",
+    "ditto-validator-stack-prefetch",
+    "ditto-validator-stack-updater-refresh",
+    "ditto-worker",
+}
+TEAM_TIMERS = {
+    "ditto-screener-fleet-auto-update",
+    "ditto-screener-source-review-secret",
+    "ditto-validator-auto-update",
+    "ditto-validator-stack-auto-update",
+    "ditto-validator-stack-prefetch",
+    "ditto-validator-stack-updater-refresh",
+}
+# Units whose stop would weaken isolation. No team or deploy rule may name them.
+GUARD_UNITS = (
+    "ditto-coding-executor",
+    "ditto-coding-hosted",
+    "ditto-sandbox-firewall",
+    "ditto-imds-guard",
+    "ditto-egress-proxy",
+    "ditto-screener-docker",
+)
+PYLON_JOURNAL = (
+    "/usr/bin/journalctl --no-pager --quiet --output=short-iso --lines=80 "
+    "--unit=ditto-platform-pylon.service"
+)
+
+
+def _team_rules() -> tuple[dict[str, Any], list[str], list[str]]:
     task = _task(BASE / "tasks/users.yml", "Ensure team sudoers grant")
+    content = task["ansible.builtin.copy"]["content"]
+    logical = re.sub(r"\\\n\s*", "", content)
+    lines = [
+        line.strip()
+        for line in logical.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    (alias,) = [line for line in lines if line.startswith("Cmnd_Alias ")]
+    name, commands = alias.removeprefix("Cmnd_Alias ").split(" = ", 1)
+    assert name == "DITTO_TEAM_UNITS"
+    rules = [line for line in lines if line != alias]
+    return task, [command.strip() for command in commands.split(",")], rules
+
+
+def test_team_sudoers_is_exact_root_only_and_excludes_deploy(tmp_path: Path) -> None:
+    task, commands, rules = _team_rules()
     copy = task["ansible.builtin.copy"]
     assert copy["dest"] == "/etc/sudoers.d/ditto-team"
     assert (copy["owner"], copy["group"], copy["mode"]) == ("root", "root", "0440")
     assert copy["validate"] == "/usr/sbin/visudo -cf %s"
-    assert _content_lines(task) == [
-        "%ditto ALL=(ALL) NOPASSWD: /bin/systemctl restart ditto-*",
-        "%ditto ALL=(ALL) NOPASSWD: /bin/systemctl stop ditto-*",
-        "%ditto ALL=(ALL) NOPASSWD: /bin/systemctl start ditto-*",
-        "%ditto ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload",
-        "%ditto ALL=(ALL) NOPASSWD: /bin/systemctl reload caddy",
+    assert rules == [
+        "%ditto,!deploy ALL=(root) NOPASSWD: DITTO_TEAM_UNITS",
+        "%ditto,!deploy ALL=(root) NOPASSWD: /bin/systemctl daemon-reload, "
+        "/bin/systemctl reload caddy",
         "%ditto ALL=(deploy) NOPASSWD: ALL",
     ]
-    for rule in _content_lines(task):
-        # No pager-running or free-argument root command for the ditto group,
-        # which includes the deploy service account.
-        assert "journalctl" not in rule
-        assert "status" not in rule
-    _visudo(tmp_path, copy["content"])
+    expected = set()
+    for service in TEAM_SERVICES:
+        expected |= {service, f"{service}.service"}
+    expected |= {f"{timer}.timer" for timer in TEAM_TIMERS}
+    exact = re.compile(
+        r"/bin/systemctl (start|stop|restart) (ditto-[a-z0-9-]+(\.service|\.timer)?)"
+    )
+    seen: dict[str, set[str]] = {}
+    for command in commands:
+        match = exact.fullmatch(command)
+        assert match, command
+        seen.setdefault(match.group(2), set()).add(match.group(1))
+    assert set(seen) == expected
+    assert all(verbs == {"start", "stop", "restart"} for verbs in seen.values())
+    assert len(commands) == len(set(commands)) == 3 * len(expected)
+    text = copy["content"]
+    assert "*" not in text.replace("# ", "")
+    assert "(ALL)" not in text and "journalctl" not in "".join(rules + commands)
+    assert "status" not in "".join(rules + commands)
+    for guard in GUARD_UNITS:
+        assert guard not in "".join(commands), guard
+    _visudo(tmp_path, text)
 
 
 def test_team_members_read_the_journal_without_sudo_and_deploy_does_not() -> None:
@@ -95,13 +165,17 @@ def test_team_members_read_the_journal_without_sudo_and_deploy_does_not() -> Non
         deploy["ansible.builtin.user"]["groups"]
         == "{{ deploy_group | default('ditto') }}"
     )
-    # No sudoers rule in any role grants journalctl, whatever its arguments.
+    # The only journalctl rule in any role is the exact, pager-free Pylon read.
     for role in (ANSIBLE / "roles").iterdir():
         for path in sorted(role.rglob("*.yml")):
             for line in _strings(_load(path)):
                 rule = line.strip()
                 if "NOPASSWD" in rule and not rule.startswith("#"):
-                    assert "journalctl" not in rule, (path, rule)
+                    assert "*" not in rule, (path, rule)
+                    if "journalctl" in rule:
+                        owner = "{{ platform_owner }}"
+                        expected = f"{owner} ALL=(root) NOPASSWD: {PYLON_JOURNAL}"
+                        assert rule == expected, (path, rule)
 
 
 def _strings(node: Any) -> list[str]:
@@ -149,6 +223,22 @@ def test_switches_ship_off_and_are_reviewed_activations() -> None:
         "when": "platform_api_service_identity_enabled | bool",
     }
     names = [task.get("name") for task in main]
+    accounts = by_name["Create the dedicated ditto-api and ditto-api-build accounts"]
+    assert accounts == {
+        "name": accounts["name"],
+        "ansible.builtin.import_tasks": "api_service_accounts.yml",
+        "when": "platform_api_service_identity_enabled | bool",
+    }
+    # The users exist before anything chowns to ditto-api, so one converge with
+    # the identity and Hippius evidence both on succeeds.
+    signer_guard = "Verify the pre-placed hosted-v2 control signer without reading it"
+    assert names.index(signer_guard) + 1 == names.index(accounts["name"])
+    for owner_task in (
+        "Validate protected Hippius Coding evidence authority files",
+        "Ensure protected Hippius Coding evidence spool",
+    ):
+        assert names.index(accounts["name"]) < names.index(owner_task)
+        assert "platform_api_process_user" in yaml.safe_dump(by_name[owner_task])
     guard = "Guard the rendered .env against unresolved placeholders"
     assert (
         names.index(guard) < names.index(pylon["name"]) < names.index(identity["name"])
@@ -192,8 +282,11 @@ def test_pylon_unit_reads_only_root_owned_inputs() -> None:
     assert env == [
         "SUBTENSOR_NETWORK={{ platform_subtensor_network }}",
         "PYLON_OPEN_ACCESS_TOKEN={{ platform_secrets.pylon_token }}",
-        "BITTENSOR_WALLET_PATH=/home/{{ platform_owner }}/.bittensor/wallets",
+        # Root-owned and empty: dockerd resolves the bind source as root, so a
+        # path in deploy's home could be redirected by a symlink.
+        "BITTENSOR_WALLET_PATH=/etc/ditto-platform/pylon/wallets",
     ]
+    assert "/home/" not in "\n".join(env)
     # Every variable the compose file interpolates is either supplied above or
     # keeps the default update.sh's exported .env left it at.
     compose = (ROLE / "files/pylon-compose.yml").read_text()
@@ -218,7 +311,7 @@ def test_pylon_tasks_install_one_exact_rule_and_remove_docker_membership(
 ) -> None:
     path = ROLE / "tasks/pylon_root_unit.yml"
     tasks = _load(path)
-    rule = _task(path, "Allow the deploy user to re-run only the Pylon unit")
+    rule = _task(path, "Allow the deploy user to re-run and read only the Pylon unit")
     copy = rule["ansible.builtin.copy"]
     assert (copy["dest"], copy["mode"], copy["validate"]) == (
         "/etc/sudoers.d/ditto-platform-pylon",
@@ -227,8 +320,30 @@ def test_pylon_tasks_install_one_exact_rule_and_remove_docker_membership(
     )
     assert _content_lines(rule) == [
         "{{ platform_owner }} ALL=(root) NOPASSWD: "
-        "/usr/bin/systemctl restart ditto-platform-pylon.service"
+        "/usr/bin/systemctl restart ditto-platform-pylon.service",
+        f"{{{{ platform_owner }}}} ALL=(root) NOPASSWD: {PYLON_JOURNAL}",
     ]
+    # update.sh prints exactly that journal read when the unit fails.
+    assert PYLON_JOURNAL.replace(" --unit=", " \\\n        --unit=") in (
+        UPDATER.read_text()
+    )
+
+    wallets = _task(
+        path,
+        "Inspect the deploy wallet directory Pylon used to mount, "
+        "without following links",
+    )["ansible.builtin.stat"]
+    assert wallets["path"] == "/home/{{ platform_owner }}/.bittensor/wallets"
+    assert wallets["follow"] is False
+    listing = _task(path, "List the deploy wallet directory without following links")
+    assert listing["ansible.builtin.find"]["follow"] is False
+    assert "not platform_pylon_deploy_wallets.stat.islnk" in listing["when"]
+    refusal = _task(path, "Refuse a Pylon signing identity or a redirected wallet path")
+    (condition,) = refusal["ansible.builtin.assert"]["that"]
+    assert "platform_pylon_deploy_wallet_entries.matched == 0" in condition
+    assert "not platform_pylon_deploy_wallets.stat.islnk" in condition
+    directories = _task(path, "Ensure the root-only Pylon unit directories")
+    assert "/etc/ditto-platform/pylon/wallets" in directories["loop"]
     _visudo(tmp_path, copy["content"].replace("{{ platform_owner }}", "deploy"))
 
     removal = _task(
@@ -298,7 +413,7 @@ def test_identity_sudoers_allows_exactly_four_installer_commands(
 
 
 def test_identity_users_are_locked_down_and_outside_privileged_groups() -> None:
-    path = ROLE / "tasks/api_service_identity.yml"
+    path = ROLE / "tasks/api_service_accounts.yml"
     users = _task(path, "Ensure the locked-down ditto-api and ditto-api-build users")
     module = users["ansible.builtin.user"]
     assert module["groups"] == [] and module["append"] is False
@@ -314,7 +429,19 @@ def test_identity_users_are_locked_down_and_outside_privileged_groups() -> None:
         assert f"'{group}'" in loop
     assert "deploy_group" in loop and "platform_owner" in loop
 
-    identity = _task(path, "Require a supported host and a pinned release interpreter")
+    first = _load(path)[0]
+    assert (
+        first["name"]
+        == "Require distinct deploy and dedicated accounts before creating them"
+    )
+    assert (
+        "platform_owner not in ['root', 'ditto-api', 'ditto-api-build']"
+        in (first["ansible.builtin.assert"]["that"])
+    )
+    identity = _task(
+        ROLE / "tasks/api_service_identity.yml",
+        "Require a supported host and a pinned release interpreter",
+    )
     that = identity["ansible.builtin.assert"]["that"]
     assert "platform_api_process_user == 'ditto-api'" in that
     assert "platform_owner not in ['root', 'ditto-api', 'ditto-api-build']" in that
@@ -344,6 +471,20 @@ def test_identity_tasks_install_root_owned_code_and_never_start_a_unit() -> None
         "group": "root",
         "mode": "0755",
     }
+    probe = _task(
+        path, "Install the live Docker-access probe the installer runs for the signer"
+    )
+    assert probe["ansible.builtin.copy"] == {
+        "src": "deploy-docker-access.py",
+        "dest": "/usr/local/libexec/ditto-platform-api/deploy-docker-access",
+        "owner": "root",
+        "group": "root",
+        "mode": "0755",
+    }
+    assert not any(
+        "ansible.builtin.user" in task or "ansible.builtin.group" in task
+        for task in tasks
+    )
     env = _task(path, "Render the root-owned ditto-api environment")
     assert env["ansible.builtin.template"] == {
         "src": "platform.env.j2",
@@ -382,7 +523,6 @@ UNIT_HARDENING = [
     "User=ditto-api",
     "Group=ditto-api",
     "SupplementaryGroups=",
-    f"ExecStartPre={LAUNCHER_DEST} preflight",
     f"ExecStart={LAUNCHER_DEST} serve",
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
@@ -440,6 +580,9 @@ def test_api_unit_is_hardened_and_only_the_spool_is_writable() -> None:
         for line in lines
     )
     assert keys.count("ReadWritePaths") == 1
+    # One launcher run resolves the release for both the preflight and the
+    # server; a separate ExecStartPre would resolve `current` again.
+    assert "ExecStartPre" not in keys and keys.count("ExecStart") == 1
     block = template[
         template.index("{% if platform_coding_hippius_evidence_enabled | bool %}") :
     ]
@@ -466,6 +609,18 @@ def test_launcher_runs_only_as_ditto_api_from_a_sealed_release() -> None:
         "exec ./.venv/bin/python -I -m ditto.api_server",
     ]
     assert 'export DITTO_BUILD_COMMIT="$revision"' in text
+    assert text.count("readlink -e") == 1
+    code = [line.strip() for line in text.splitlines() if line.strip()]
+    preflight = (
+        "./.venv/bin/python -I -m ditto.api_server.coding_hosted_signer_preflight "
+        "--check-metadata"
+    )
+    # serve: the preflight runs (and `set -e` stops on failure), then the server
+    # execs, both from the single resolved release.
+    assert code.index(preflight) + 1 == code.index(
+        "exec ./.venv/bin/python -I -m ditto.api_server"
+    )
+    assert "set -euo pipefail" in code
     assert "seed" not in re.sub(r"#.*", "", text)
 
     # As any user but ditto-api it stops before sourcing or running anything.
@@ -498,6 +653,54 @@ def test_update_script_commands_match_sudoers_exactly() -> None:
     assert used == {"install", "activate", "stop", "logs"}
     assert {line.rsplit(" ", 1)[-1] for line in API_SUDOERS} == used
     assert 'sudo -n /usr/bin/systemctl restart "$pylon_unit"' in updater
+
+
+def test_release_build_backends_are_pinned_with_hashes() -> None:
+    requirements = (ROOT / "apps/platform/release-build-requirements.txt").read_text()
+    logical = re.sub(r"\\\n\s*", " ", requirements)
+    pins: dict[str, list[str]] = {}
+    for line in logical.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        spec, *hashes = line.split(" --hash=")
+        name, _, version = spec.strip().partition("==")
+        assert re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name) and version, line
+        assert hashes and all(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", h.strip()) for h in hashes
+        )
+        pins[name] = hashes
+    # Backends of the project and the shared protocol, hatch-vcs for the pinned
+    # bittensor-pylon-client Git dependency, editables for the editable build.
+    assert {"hatchling", "hatch-vcs", "editables"} <= set(pins)
+    for project in ("apps/platform", "packages/ditto-screening-protocol"):
+        pyproject = (ROOT / project / "pyproject.toml").read_text()
+        requires = re.search(r"requires = \[([^\]]*)\]", pyproject)
+        assert requires
+        for requirement in re.findall(r'"([A-Za-z0-9_.-]+)', requires.group(1)):
+            assert requirement.lower() in pins, (project, requirement)
+    lock = (ROOT / "apps/platform/uv.lock").read_text()
+    assert (
+        'source = { git = "https://github.com/bittensor-church/bittensor-pylon' in lock
+    )
+
+
+def test_stop_and_profile_scripts_follow_the_supervisor() -> None:
+    stop = (ROOT / "apps/platform/scripts/stop.sh").read_text()
+    assert "sudo -n /usr/local/sbin/ditto-platform-api-release stop" in stop
+    assert "pm2 stop ditto-api || true" in stop
+    profile = (ROOT / "apps/platform/scripts/profile-python.sh").read_text()
+    assert (
+        'pid="$(systemctl show --property=MainPID --value ditto-platform-api.service)"'
+        in profile
+    )
+    subprocess.run(
+        ["bash", "-n", str(ROOT / "apps/platform/scripts/stop.sh")], check=True
+    )
+    subprocess.run(
+        ["bash", "-n", str(ROOT / "apps/platform/scripts/profile-python.sh")],
+        check=True,
+    )
 
 
 def test_start_script_leaves_ditto_api_to_the_unit_in_systemd_mode() -> None:

@@ -254,7 +254,39 @@ def test_disabled_platform_converge_never_reaches_the_seed_path() -> None:
     }
     assert includers == {"coding_hosted_signer.yml"}
     signer = _load(PLATFORM_ROLE / "tasks/coding_hosted_signer.yml")
-    assert [_module(task) for task in signer] == ["assert", "import_tasks"]
+    assert [_module(task) for task in signer] == [
+        "assert",
+        "import_tasks",
+        "import_tasks",
+    ]
+    # The live Docker check runs after the stat guard with literal inputs.
+    assert signer[2]["ansible.builtin.import_tasks"] == "deploy_docker_access.yml"
+    assert signer[2]["vars"] == {
+        "platform_deploy_docker_probe_group": "docker",
+        "platform_deploy_docker_probe_proc": "/proc",
+        "platform_deploy_docker_probe_socket": "/run/docker.sock",
+    }
+    docker = _load(PLATFORM_ROLE / "tasks/deploy_docker_access.yml")
+    assert [_module(task) for task in docker] == ["script", "assert"]
+    assert docker[0]["ansible.builtin.script"]["executable"] == "/usr/bin/python3"
+    script = docker[0]["ansible.builtin.script"]["cmd"].split()[0]
+    assert script == "../files/deploy-docker-access.py"
+    assert (PLATFORM_ROLE / "tasks" / script).resolve() == (
+        PLATFORM_ROLE / "files/deploy-docker-access.py"
+    )
+    assert docker[1]["ansible.builtin.assert"]["that"] == [
+        "platform_deploy_docker_access.rc == 0"
+    ]
+    for name in (
+        "platform_deploy_docker_probe_group",
+        "platform_deploy_docker_probe_proc",
+    ):
+        for path in _converge_task_files():
+            if path.name not in {
+                "coding_hosted_signer.yml",
+                "deploy_docker_access.yml",
+            }:
+                assert name not in path.read_text(), (path, name)
     profile = signer[0]["ansible.builtin.assert"]["that"]
     assert (
         f"platform_coding_hosted_signer_hotkey is match('{ANSIBLE_HOTKEY_PATTERN}')"

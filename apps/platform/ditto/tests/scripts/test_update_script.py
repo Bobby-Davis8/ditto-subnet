@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import threading
@@ -221,14 +222,16 @@ def _run_update(
     _write_executable(
         fake_bin / "sudo",
         f'printf "%s\\n" "sudo $*" >> "{repo}/sudo-actions.log"\n'
+        f'printf "%s\\n" "sudo $*" >> "{repo}/timeline.log"\n'
         'case "${3:-}" in\n'
         f'  install|activate) cat > "{repo}/sudo-stdin-$3.log" ;;\n'
         "esac\n"
+        'case "${3:-}:${2:-}" in\n'
+        '  logs:*|*:/usr/bin/journalctl) echo "synthetic journal line" ;;\n'
+        "esac\n"
         f'if [ -e "{repo}/sudo-${{3:-}}-exit" ]; then\n'
-        f'  [ "${{3:-}}" = logs ] && echo "synthetic journal line"\n'
         f'  exit "$(cat "{repo}/sudo-${{3:-}}-exit")"\n'
         "fi\n"
-        f'[ "${{3:-}}" = logs ] && echo "synthetic journal line"\n'
         "exit 0\n",
     )
     _write_executable(
@@ -246,7 +249,20 @@ def _run_update(
     _write_executable(
         fake_bin / "pm2",
         f'if [ "${{1:-}}" = "jlist" ]; then cat "{repo}/jlist.json"; fi\n'
-        f'printf "%s\\n" "pm2 $*" >> "{repo}/pm2-actions.log"\n',
+        f'printf "%s\\n" "pm2 $*" >> "{repo}/pm2-actions.log"\n'
+        f'printf "%s\\n" "pm2 $*" >> "{repo}/timeline.log"\n',
+    )
+    # The deploy-side Docker-access check: records its arguments and exits with
+    # control file docker-probe-exit (default 0).
+    (tmp_path / "docker-probe.py").write_text(
+        "import pathlib, sys\n"
+        f"repo = pathlib.Path({str(repo)!r})\n"
+        "with open(repo / 'docker-probe.log', 'a') as log:\n"
+        "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "code = repo / 'docker-probe-exit'\n"
+        "if code.exists():\n"
+        "    print('synthetic: deploy still holds the docker group')\n"
+        "    sys.exit(int(code.read_text()))\n"
     )
     _write_executable(fake_bin / "gcloud", gcloud_source)
     _write_executable(fake_bin / "timeout", 'shift\nexec "$@"\n')
@@ -274,6 +290,8 @@ def _run_update(
             "DITTO_HEALTH_TIMEOUT",
             "DITTO_PLATFORM_API_SUPERVISOR",
             "DITTO_PLATFORM_API_UNIT_FILE",
+            "DITTO_DEPLOY_DOCKER_PROBE",
+            "DITTO_DEPLOY_PROC_ROOT",
             "DITTO_PLATFORM_PYLON_UNIT",
             "DITTO_TAOSTATS_API_KEY",
             "DITTO_TAOSTATS_SECRET_ID",
@@ -293,6 +311,8 @@ def _run_update(
     # A unit file left by an earlier dedicated-identity deploy; absent unless a
     # test creates it.
     env["DITTO_PLATFORM_API_UNIT_FILE"] = str(repo / "ditto-platform-api.service")
+    env["DITTO_DEPLOY_DOCKER_PROBE"] = str(tmp_path / "docker-probe.py")
+    env["DITTO_DEPLOY_PROC_ROOT"] = str(tmp_path / "proc")
 
     with ExitStack() as stack:
         port = stack.enter_context(_health_server(health_status, health_commit))
@@ -1119,6 +1139,204 @@ def test_unknown_supervision_values_stop_the_deploy(
     assert not (tmp_path / "repo" / "pm2-actions.log").exists()
 
 
+def _timeline(tmp_path: Path) -> list[str]:
+    return (tmp_path / "repo" / "timeline.log").read_text().splitlines()
+
+
+def test_an_enabled_signer_refuses_while_this_user_reaches_docker(
+    tmp_path: Path,
+) -> None:
+    """A switch in .env proves nothing about the running pm2 daemon's groups."""
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=f"{SYSTEMD_ENV}DITTO_CODING_HOSTED_CONTROL_ENABLED=true\n",
+        control={"docker-probe-exit": "1"},
+        health_commit=RUNNING_SHA,
+    )
+
+    assert result.returncode != 0
+    assert "can still reach the Docker daemon" in result.stderr
+    assert "synthetic: deploy still holds the docker group" in result.stderr
+    (probe,) = (tmp_path / "repo" / "docker-probe.log").read_text().splitlines()
+    assert probe.split() == [
+        f"--user={pwd.getpwuid(os.getuid()).pw_name}",
+        "--group=docker",
+        f"--proc={tmp_path / 'proc'}",
+        "--socket=/run/docker.sock",
+    ]
+    assert _log(tmp_path, "sudo") == []
+    assert _log(tmp_path, "docker") == []
+    assert not (tmp_path / "repo" / "pm2-actions.log").exists()
+    record = _deploy_record(tmp_path)
+    assert (record["stage"], record["rolled_back"]) == ("signer-preflight", "yes")
+
+
+def test_a_disabled_signer_skips_the_docker_check(tmp_path: Path) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=SYSTEMD_ENV,
+        control={"docker-probe-exit": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "repo" / "docker-probe.log").exists()
+
+
+def test_the_pm2_copy_is_saved_away_before_activation_and_failure_reports(
+    tmp_path: Path,
+) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env=SYSTEMD_ENV,
+        control={
+            "sudo-activate-exit": "1",
+            "systemctl-show": "ActiveState=failed\nMainPID=0\nNRestarts=10\n",
+        },
+        health_timeout="4",
+    )
+
+    assert result.returncode != 0
+    timeline = _timeline(tmp_path)
+    delete = timeline.index("pm2 delete ditto-api")
+    # Saved at once, so a reboot after a failed activation cannot resurrect the
+    # pm2 copy next to the enabled unit.
+    assert timeline[delete + 1] == "pm2 save"
+    activate = timeline.index(f"sudo -n {INSTALLER} activate")
+    assert delete < activate
+    assert timeline[activate + 1] == f"sudo -n {INSTALLER} logs"
+    assert "deploy failed -- ditto-api could not be activated on release" in (
+        result.stderr
+    )
+    assert "ditto-platform-api.service status/pid/restarts: errored" in result.stderr
+    assert "synthetic journal line" in result.stderr
+    assert _deploy_record(tmp_path)["stage"] == "api-activate"
+    assert _deploy_record(tmp_path)["rolled_back"] == "no"
+
+
+def test_a_failed_pylon_unit_prints_its_journal(tmp_path: Path) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path,
+        gcloud_source="exit 1\n",
+        initial_env="DITTO_PLATFORM_PYLON_UNIT=ditto-platform-pylon.service\n",
+        control={"sudo-restart-exit": "1"},
+        health_commit=RUNNING_SHA,
+    )
+
+    assert result.returncode != 0
+    assert _log(tmp_path, "sudo") == [
+        "sudo -n /usr/bin/systemctl restart ditto-platform-pylon.service",
+        "sudo -n /usr/bin/journalctl --no-pager --quiet --output=short-iso "
+        "--lines=80 --unit=ditto-platform-pylon.service",
+    ]
+    assert "ditto-platform-pylon.service failed; its last journal lines" in (
+        result.stderr
+    )
+    assert "synthetic journal line" in result.stderr
+    assert _deploy_record(tmp_path)["stage"] == "infra"
+
+
+def test_the_final_hint_names_the_supervisor_logs(tmp_path: Path) -> None:
+    result, _, _, _ = _run_update(
+        tmp_path, gcloud_source="exit 1\n", initial_env=SYSTEMD_ENV
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"done. sudo -n {INSTALLER} logs" in result.stdout
+    assert "pm2 logs ditto-api" not in result.stdout
+
+
+def _run_script(
+    tmp_path: Path, script: str, env_file: str, *, sudo_exit: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    (repo / "scripts").mkdir(parents=True)
+    fake_bin.mkdir()
+    shutil.copy2(ROOT / "scripts" / script, repo / "scripts" / script)
+    shutil.copy2(
+        ROOT / "scripts" / "ecosystem.config.js",
+        repo / "scripts" / "ecosystem.config.js",
+    )
+    (repo / ".env").write_text(env_file)
+    log = repo / "actions.log"
+    for name in ("uv", "docker", "pm2"):
+        _write_executable(fake_bin / name, f'printf "%s\\n" "{name} $*" >> "{log}"\n')
+    _write_executable(
+        fake_bin / "sudo",
+        f'printf "%s\\n" "sudo $*" >> "{log}"\n'
+        + (f"exit {sudo_exit}\n" if sudo_exit else ""),
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("DITTO_", "COMPOSE_"))
+    }
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    result = subprocess.run(
+        [str(repo / "scripts" / script)],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, log.read_text().splitlines() if log.exists() else []
+
+
+def test_start_uses_the_pylon_unit_instead_of_docker(tmp_path: Path) -> None:
+    result, actions = _run_script(
+        tmp_path,
+        "start.sh",
+        "DITTO_COMPOSE_SERVICES=pylon\n"
+        "DITTO_PLATFORM_PYLON_UNIT=ditto-platform-pylon.service\n"
+        "DITTO_PLATFORM_API_SUPERVISOR=systemd\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "sudo -n /usr/bin/systemctl restart ditto-platform-pylon.service" in actions
+    assert not any(action.startswith("docker ") for action in actions)
+    (start,) = [action for action in actions if action.startswith("pm2 start")]
+    assert "--only ditto-screened-image-cleanup " in f"{start} "
+
+
+def test_start_keeps_compose_by_default_and_refuses_unknown_units(
+    tmp_path: Path,
+) -> None:
+    result, actions = _run_script(
+        tmp_path, "start.sh", "DITTO_COMPOSE_SERVICES=pylon\n"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "docker compose up -d --wait pylon" in actions
+    assert not any(action.startswith("sudo ") for action in actions)
+
+    refused, actions = _run_script(
+        tmp_path / "second", "start.sh", "DITTO_PLATFORM_PYLON_UNIT=evil.service\n"
+    )
+    assert refused.returncode != 0
+    assert "DITTO_PLATFORM_PYLON_UNIT must be empty" in refused.stderr
+    assert not any(action.startswith(("docker ", "sudo ")) for action in actions)
+
+
+@pytest.mark.parametrize(
+    ("supervisor", "expected"),
+    [
+        ("pm2", ["pm2 stop ditto-api", "pm2 delete ditto-api"]),
+        ("systemd", [f"sudo -n {INSTALLER} stop"]),
+    ],
+)
+def test_stop_follows_the_supervisor(
+    tmp_path: Path, supervisor: str, expected: list[str]
+) -> None:
+    result, actions = _run_script(
+        tmp_path, "stop.sh", f"DITTO_PLATFORM_API_SUPERVISOR={supervisor}\n"
+    )
+    assert result.returncode == 0, result.stderr
+    assert actions == expected
+
+
 def test_update_script_fixes_every_privileged_command() -> None:
     """sudoers allows exact argument vectors; the script may not vary them."""
     updater = (ROOT / "scripts" / "update.sh").read_text()
@@ -1131,19 +1349,22 @@ def test_update_script_fixes_every_privileged_command() -> None:
     sudo_lines = sorted(
         line.strip()
         for line in updater.splitlines()
-        if "sudo -n" in line and not line.lstrip().startswith("#")
+        if "sudo -n" in line and not line.lstrip().startswith(("#", 'echo "'))
     )
     assert sudo_lines == sorted(
         [
             'if ! api_release_request | sudo -n "$api_release_command" install; then',
-            'sudo -n /usr/bin/systemctl restart "$pylon_unit"',
+            'if ! sudo -n /usr/bin/systemctl restart "$pylon_unit"; then',
+            "sudo -n /usr/bin/journalctl --no-pager --quiet --output=short-iso "
+            "--lines=80 \\",
             'sudo -n "$api_release_command" stop',
-            "printf 'revision=%s\\n' \"$deploy_target\" | "
-            'sudo -n "$api_release_command" activate',
+            "if ! printf 'revision=%s\\n' \"$deploy_target\" | "
+            'sudo -n "$api_release_command" activate; then',
             'sudo -n "$api_release_command" logs >&2 || \\',
         ]
     )
-    # No journalctl or docker as root from this script, and no seed check.
-    assert "journalctl" not in updater
+    # The one journal read is the exact Pylon argv its sudoers rule allows.
+    assert updater.count("journalctl") == 1
+    assert "        --unit=ditto-platform-pylon.service >&2 || \\\n" in updater
     assert "coding_hosted_signer_preflight" not in updater
     assert "DITTO_CODING_HOSTED_SIGNER_SEED_FILE" not in updater
