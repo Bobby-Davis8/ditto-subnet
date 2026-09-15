@@ -35,7 +35,7 @@ there is no approval or readiness key. One record covers one `kind`:
 | `pre_collection_preflight_sha256` | The preflight stdout taken before collection, retained in the store |
 | `inputs` | Per kind: the connectivity profile digest (network) or the execution/grading profile digests. Each must equal the document supplied to the verifier |
 | `endpoints` | Network only. Roles `router` and `refusing_proxy` (one each, distinct), `trusted` (1 to 32) and `trusted_dns` (0 to 2), each as `endpoint_sha256`. The set must equal the hashes derived from the connectivity profile |
-| `tools` | `catalog_sha256`, `collector_sha256`, `evidence_tool_sha256`, `fixtures_sha256`, `runner_sha256` (the canonical hash of the Go runner command, probe library and catalog package trees in the reviewed checkout) |
+| `tools` | `catalog_sha256`, `collector_sha256`, `evidence_tool_sha256`, `fixtures_sha256`, `probe_runner_source_sha256` (supporting provenance: the canonical hash of the Go runner command, probe library and catalog package trees in the reviewed checkout) and `probe_runner_binary_sha256` (the probe runner binary that actually ran, measured on the host; it must equal the release index's `runtime.probe_runner_sha256`) |
 | `preconditions`, `residue` | Worker and custody inactive, no custody socket, zero containers, job networks, volumes and processes |
 | `phases` | Catalog phases in order, each with timestamps and its probes |
 | `coverage`, `not_covered` | `same_boot`, and exactly `daemon_restart_recovery`, `reboot_recovery` |
@@ -196,7 +196,7 @@ in both the Go and Python tests.
     and made mode 0400. Existing objects are never replaced.
   - The host preflight is kept verbatim: the exact stdout of
     `inspect-coding-native-host.py`.
-- `verify --store DIR --checkout DIR --host-preflight SHA --record SHA...`
+- `verify --store DIR --checkout DIR --release-index FILE --host-preflight SHA --record SHA...`
   verifies records against a post-collection preflight. It needs the profile
   documents that the records name.
 - `review --store DIR --checkout DIR` with all six evidence digests assembles
@@ -376,12 +376,30 @@ them with the labels production containers carry:
 
 ### Tool binding
 
-Records carry `tools.runner_sha256`: the canonical hash of the reviewed
-checkout's `cmd/dittobench-coding-enforcement-probe`,
-`internal/codingenforcement/catalog` and `internal/codingenforcement/probe`
-trees (`RUNNER_ROOTS` in the evidence tool). Like every tool hash it is
-computed from the checkout, never taken from a record or its caller. A runner
-source change after review fails the record.
+Peyton (2026-09-15): runtime acceptance pins the binary that actually ran. The
+source tree and revision remain as supporting provenance.
+
+- **Binary (acceptance).** `tools.probe_runner_binary_sha256` is measured on
+  the host from the running process. The runner hashes `/proc/self/exe` and
+  reports `probe_runner_binary_sha256`. It must equal
+  `runtime.probe_runner_sha256` in the release index (`--release-index`, schema
+  `dittobench-coding-native-release-set-v3`).
+  - The native runtime bundle builds and smoke-checks
+    `bin/dittobench-coding-enforcement-probe` and requires it as an executable
+    amd64 ELF. The release builder copies its manifest digest into the index.
+  - A record must name that exact index: `release_manifest_sha256` is the
+    index's digest. Its `source_revision`, `runtime_archive_sha256` and image
+    approvals must equal the index.
+  - The rootless CI job checks that the reported digest equals an independent
+    `sha256sum` of the binary it built.
+- **Sources (provenance).** `tools.probe_runner_source_sha256` is the canonical
+  hash of the reviewed checkout's `cmd/dittobench-coding-enforcement-probe`,
+  `internal/codingenforcement/catalog` and `internal/codingenforcement/probe`
+  trees (`RUNNER_ROOTS`). It is still computed from the checkout, so a source
+  change after review fails the record. It is never accepted in place of the
+  binary digest.
+- **Naming.** The old `tools.runner_sha256` is refused. `approval.runner_sha256`
+  names only `run.py`.
 
 ### CI job
 
@@ -453,8 +471,8 @@ with a doubled pids limit failed the comparison.
 3. Should the hosted harness launch add `--pull never`?
 4. Is "every language image" the approved profile's limits and group timeouts
    with each language's own fixture test argv?
-5. Is `runner_sha256` over the source trees the right binding, or should the
-   release record the built runner binary's digest instead (PR3)?
+5. ~~Source trees or binary?~~ Answered: the release-recorded binary digest is
+   binding, and the source trees are provenance (PR 3b).
 
 ## Custody binding
 
