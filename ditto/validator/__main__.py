@@ -147,11 +147,13 @@ async def _amain() -> int:
                 create_chain_client(chain_config) as chain,
                 AsyncExitStack() as coding_resources,
             ):
+                # One private scorer client for every local coding worker.
+                scorer_http = _ScorerControlClient(config, coding_resources)
                 coding_canary = await _create_coding_canary_worker(
                     config=config,
                     platform=platform,
                     keypair=keypair,
-                    resources=coding_resources,
+                    scorer_http=scorer_http,
                 )
                 worker = ValidatorWorker(
                     config=config,
@@ -171,6 +173,7 @@ async def _amain() -> int:
                     platform=platform,
                     keypair=keypair,
                     resources=coding_resources,
+                    scorer_http=scorer_http,
                 )
                 _apply_ditto_logging()  # re-assert: bittensor has initialised
 
@@ -215,25 +218,43 @@ async def _amain() -> int:
     return 0
 
 
+class _ScorerControlClient:
+    """One private, no-proxy client to the local scorer control plane.
+
+    The scorer control bearer and the certification canary's per-lease broker
+    private key cross this client, so it stays separate from Platform and Pylon
+    traffic and never inherits a proxy setting. The canary worker and the
+    local-mode shadow worker share it. It is created on first use and closed
+    with the coding exit stack.
+    """
+
+    def __init__(self, config: ValidatorConfig, resources: AsyncExitStack) -> None:
+        self._config = config
+        self._resources = resources
+        self._client: httpx.AsyncClient | None = None
+
+    async def get(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = await self._resources.enter_async_context(
+                httpx.AsyncClient(
+                    timeout=self._config.http_timeout_seconds,
+                    trust_env=False,
+                )
+            )
+        return self._client
+
+
 async def _create_coding_canary_worker(
     *,
     config: ValidatorConfig,
     platform: PlatformClient,
     keypair: Any,
-    resources: AsyncExitStack,
+    scorer_http: _ScorerControlClient,
 ) -> CodingCanaryWorker | None:
     if not config.coding_canary_enabled:
         return None
 
-    # The scorer control bearer and the per-lease broker private key cross this
-    # client. Keep it separate from Platform/Pylon traffic and never let an
-    # inherited proxy setting observe it.
-    canary_http = await resources.enter_async_context(
-        httpx.AsyncClient(
-            timeout=config.http_timeout_seconds,
-            trust_env=False,
-        )
-    )
+    canary_http = await scorer_http.get()
 
     def _sign_canary_receipt(
         lease: CodingCertificationLeaseResponse,
@@ -265,6 +286,7 @@ async def _create_coding_shadow_worker(
     platform: PlatformClient,
     keypair: Any,
     resources: AsyncExitStack,
+    scorer_http: _ScorerControlClient,
 ) -> CodingShadowWorker | None:
     if not config.coding_shadow_enabled:
         return None
@@ -284,12 +306,7 @@ async def _create_coding_shadow_worker(
         client_keypair = keypair
         validator_hotkey = config.validator_hotkey
     else:
-        coding_http = await resources.enter_async_context(
-            httpx.AsyncClient(
-                timeout=config.http_timeout_seconds,
-                trust_env=False,
-            )
-        )
+        coding_http = await scorer_http.get()
 
     publication = CodingPublicationClient(
         base_url=config.dittobench_api_url,

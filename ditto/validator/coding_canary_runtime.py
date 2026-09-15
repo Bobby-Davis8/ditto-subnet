@@ -8,7 +8,6 @@ import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import SplitResult, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -23,7 +22,7 @@ from ditto.api_models.coding_inference_grants import (
     CodingCertificationInferenceExchangeResponse,
 )
 from ditto.validator.coding_canary import CodingCanaryOutcome
-from ditto.validator.coding_executor_transport import tls_or_loopback
+from ditto.validator.coding_executor_transport import scorer_control_origin
 from ditto.validator.config import ValidatorConfig
 from ditto.validator.errors import (
     PlatformInfrastructureError,
@@ -33,11 +32,6 @@ from ditto.validator.errors import (
 _REQUEST_SCHEMA = "dittobench-coding-certification-canary-request-v1"
 _RESPONSE_SCHEMA = "dittobench-coding-certification-canary-response-v1"
 _MAX_BODY_BYTES = 8 << 20
-# The validator Compose service reaches the scorer through the sandbox-docker
-# network namespace on the stack's private bridge. That fixed service origin is
-# the only plaintext, non-loopback scorer origin the canary accepts; miner
-# containers run inside the nested daemon and cannot reach port 8000.
-_COMPOSE_SCORER_ORIGINS = frozenset({"http://sandbox-docker:8000"})
 # One certify call may never outlive its lease. The scorer independently caps
 # a canary operation at 32 minutes, and a lease deadline is at most 30 minutes
 # after issue, so the local bound is the earlier of the two.
@@ -76,15 +70,9 @@ class CodingCanaryRuntime:
         client: httpx.AsyncClient,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        parsed = urlsplit(config.dittobench_api_url)
         token = config.dittobench_control_token
         if (
-            not _permitted_scorer_origin(parsed)
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
+            not scorer_control_origin(config.dittobench_api_url)
             or not _valid_control_token(token)
             # The bearer and the broker private key travel on this client; an
             # inherited proxy setting must never receive them.
@@ -245,18 +233,6 @@ def _private_json_headers(headers: httpx.Headers) -> bool:
         directive.strip().lower()
         for directive in headers.get("Cache-Control", "").split(",")
     } and headers.get("Content-Type", "").lower().startswith("application/json")
-
-
-def _permitted_scorer_origin(parsed: SplitResult) -> bool:
-    if not parsed.netloc:
-        return False
-    if f"{parsed.scheme}://{parsed.netloc}" in _COMPOSE_SCORER_ORIGINS:
-        return True
-    try:
-        _ = parsed.port
-    except ValueError:
-        return False
-    return tls_or_loopback(parsed.scheme, parsed.hostname)
 
 
 def _valid_control_token(value: str) -> bool:
