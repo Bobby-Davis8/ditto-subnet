@@ -1743,6 +1743,14 @@ describe('source review causal evidence schema', () => {
     },
   } satisfies GeneratedSourceReviewFinding
 
+  const policyV13InvariantAssessment = {
+    schema_version: 2,
+    decisions: [
+      ...invariantAssessment.decisions,
+      { invariant: 'i8_evaluation_independence', disposition: 'pass', pass_clause: 'evaluation_independent_runtime', summary: 'The reviewed path is independent of evaluation identity and results.', evidence_indices: [] },
+    ],
+  } satisfies GeneratedSourceReviewInvariantAssessment
+
   it('stays statically exhaustive against the generated Platform finding type', () => {
     expectTypeOf<keyof ZodOutput<typeof sourceReviewFindingSchema>>().toEqualTypeOf<
       keyof GeneratedSourceReviewFinding
@@ -1763,6 +1771,24 @@ describe('source review causal evidence schema', () => {
       invariant_assessment: invariantAssessment,
     })
     expect(parsed.invariant_assessment).toEqual(invariantAssessment)
+  })
+
+  it('parses and retains the complete policy-v13 invariant sweep', () => {
+    const parsed = sourceReviewFindingSchema.parse({
+      ...generatedFinding,
+      invariant_assessment: policyV13InvariantAssessment,
+    })
+    expect(parsed.invariant_assessment).toEqual(policyV13InvariantAssessment)
+  })
+
+  it('requires the evaluation-independence decision in schema version 2', () => {
+    expect(() => sourceReviewFindingSchema.parse({
+      ...generatedFinding,
+      invariant_assessment: {
+        schema_version: 2,
+        decisions: invariantAssessment.decisions,
+      },
+    })).toThrow(/every policy-v13 invariant/)
   })
 
   it('rejects duplicate, incompatible, and unbound invariant decisions', () => {
