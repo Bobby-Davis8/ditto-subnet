@@ -37,32 +37,40 @@
 # hosts: role_coding_hosted makes an inventory_hostname/group check tautological,
 # and the host reports its own name, so without --limit any VM labelled
 # role=coding_hosted that reports this hostname would receive the credentials.
-# ansible_play_batch is computed from the run's actual targeting and is not
-# overridable by -e; require the batch to be exactly the one dedicated host.
+# ansible_play_batch and ansible_play_hosts_all are computed from the run's
+# actual targeting and are not overridable by -e. The batch alone is not enough:
+# with serial: 1 on the whole group the batch is one host on each pass, so also
+# require the play's entire host set to be exactly the one dedicated host, which
+# effectively requires --limit ditto-coding-hosted-v2.
 - name: Require the run to target exactly the one dedicated host
   ansible.builtin.assert:
     that:
       - ansible_play_batch == ['ditto-coding-hosted-v2']
+      - ansible_play_hosts_all == ['ditto-coding-hosted-v2']
     fail_msg: >-
       Run this only against the single dedicated host with
-      --limit ditto-coding-hosted-v2; the play batch is not exactly that host. Nothing was written.
+      --limit ditto-coding-hosted-v2; the play targets more than that host. Nothing was written.
     quiet: true
 
 # The write module carries the credentials to the host. With SSH pipelining off
 # the AnsiballZ module file is written to the login user's remote tmp during the
 # run and can persist on interrupt; ANSIBLE_KEEP_REMOTE_FILES keeps it on
-# purpose. Refuse before any secret-carrying task unless pipelining is on and no
-# remote files are kept. (ansible_pipelining reflects the effective connection
-# setting; the repo ansible.cfg turns pipelining on for the SSH connection.)
+# purpose. The playbook sets ansible_pipelining true in its play vars, which both
+# turns pipelining on and lets this guard confirm it. The SSH plugin also reads
+# ansible_ssh_pipelining, and on ansible-core 2.21.2 that var wins over
+# ansible_pipelining, so a later `-e ansible_ssh_pipelining=false` could turn
+# pipelining off while ansible_pipelining stays true; require it undefined or
+# true too. Refuse before any secret-carrying task.
 - name: Require SSH pipelining on and no kept remote files before carrying secrets
   ansible.builtin.assert:
     that:
       - (ansible_pipelining | default(false)) is sameas true
+      - ansible_ssh_pipelining is not defined or (ansible_ssh_pipelining is sameas true)
       - not (lookup('config', 'DEFAULT_KEEP_REMOTE_FILES') is sameas true)
     fail_msg: >-
-      Run with SSH pipelining on (the repo ansible.cfg sets it) and without
-      ANSIBLE_KEEP_REMOTE_FILES, so the module carrying the credentials is never left in the
-      host's remote temp directory. Nothing was written.
+      Run with SSH pipelining on (the playbook sets ansible_pipelining) and without
+      ANSIBLE_KEEP_REMOTE_FILES or a -e that turns pipelining off, so the module carrying the
+      credentials is never left in the host's remote temp directory. Nothing was written.
     quiet: true
 
 # Enabled materialization must inspect the real host; the disabled localhost

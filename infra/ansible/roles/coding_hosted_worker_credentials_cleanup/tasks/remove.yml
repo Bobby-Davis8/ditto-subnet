@@ -28,16 +28,18 @@
       is set, or --start-at-task skipped the enable flag. Nothing was removed.
     quiet: true
 
-# ansible_play_batch is computed from the run's targeting and is not overridable
-# by -e; require exactly the one dedicated host so a role=coding_hosted VM that
-# merely reports this hostname cannot be reached without --limit.
+# ansible_play_batch and ansible_play_hosts_all are computed from the run's
+# targeting and are not overridable by -e; require exactly the one dedicated host
+# (batch and the whole host set, so serial: 1 cannot pass without --limit) so a
+# role=coding_hosted VM that merely reports this hostname cannot be reached.
 - name: Require the run to target exactly the one dedicated host
   ansible.builtin.assert:
     that:
       - ansible_play_batch == ['ditto-coding-hosted-v2']
+      - ansible_play_hosts_all == ['ditto-coding-hosted-v2']
     fail_msg: >-
       Run this only against the single dedicated host with
-      --limit ditto-coding-hosted-v2; the play batch is not exactly that host. Nothing was removed.
+      --limit ditto-coding-hosted-v2; the play targets more than that host. Nothing was removed.
     quiet: true
 
 - name: Refuse check mode for an enabled removal
