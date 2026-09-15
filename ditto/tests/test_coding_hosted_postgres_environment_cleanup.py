@@ -528,9 +528,11 @@ def _only(tasks: list[dict], module: str) -> dict:
 
 def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
     # The cleanup literals are copied from coding_hosted_postgres_environment;
-    # parse that role so any drift in a path, owner or home fails here.
-    written = _only(MATERIALIZE, "ansible.builtin.copy")["loop"]
-    created = _only(MATERIALIZE, "ansible.builtin.file")["loop"]
+    # parse that role's write module loop so any drift in a path or owner fails
+    # here. The materialization role writes through its own pinned module now, so
+    # the private directories are implicit in each copy path rather than a
+    # separate file task.
+    written = _only(MATERIALIZE, "coding_hosted_postgres_environment_write")["loop"]
     asserted = " ".join(
         line
         for task in MATERIALIZE
@@ -549,21 +551,13 @@ def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
 
     parents: list[dict] = []
     for item in written:
-        (directory,) = [
-            entry
-            for entry in created
-            if entry["path"] == str(Path(item["path"]).parent)
-        ]
-        assert directory["owner"] == item["owner"]
-        assert str(Path(directory["path"]).parent) == homes[item["owner"]]
+        private = str(Path(item["path"]).parent)
+        assert str(Path(private).parent) == homes[item["owner"]]
         parents += [
             {"path": homes[item["owner"]], "owner": item["owner"]},
-            {"path": directory["path"], "owner": item["owner"]},
+            {"path": private, "owner": item["owner"]},
         ]
     assert _task(PARENT_STAT)["loop"] == parents == PARENT_ITEMS
-    assert _only(MATERIALIZE, "ansible.builtin.file")["ansible.builtin.file"][
-        "mode"
-    ] == ("0700")
 
 
 def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
