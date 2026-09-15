@@ -45,7 +45,9 @@ Every secret enters only through a `DITTO_CODING_WORKER_*` environment variable
 the operator exports on the controller. None is an Ansible variable, so
 inventory, Git, vars files and `-e` never carry one; the role refuses any
 `coding_hosted_worker_credentials_*` variable other than the three inputs, and
-any Ansible variable named like a credential.
+refuses any Ansible variable whose name matches a `DITTO_CODING_WORKER_*` or
+`DITTO_CODING_HIPPIUS_*` controller input (so `-e DITTO_CODING_WORKER_PROVIDER_KEY=…`
+is refused, not silently ignored).
 
 | Controller environment variable | Written into | Runtime key |
 | --- | --- | --- |
@@ -79,7 +81,14 @@ Manager and IAM are entirely outside the role; see
 `coding-worker-credential-staging-peyton.md` for the source secret names and the
 least-privilege recommendations.
 
+Run from the `infra/ansible` directory, or export
+`ANSIBLE_CONFIG=infra/ansible/ansible.cfg`, so the repo `ansible.cfg` applies its
+`roles_path` (otherwise the role is reported "not found") and its
+`callback_result_format=yaml`. The commands below assume the `infra/ansible`
+working directory.
+
 ```bash
+cd infra/ansible
 # Export each value from its Secret Manager secret without printing it. Prefer a
 # dedicated image reader HMAC and a dedicated capped OpenRouter key (below).
 export DITTO_CODING_WORKER_HIPPIUS_PRIVATE_INPUT_READER_ACCESS_KEY="$(gcloud secrets versions access latest --secret=platform-coding-catalog-access-key --project=ditto-app-dev)"
@@ -91,8 +100,8 @@ export DITTO_CODING_WORKER_IMAGE_STORAGE_ACCESS_KEY="$(gcloud secrets versions a
 export DITTO_CODING_WORKER_IMAGE_STORAGE_SECRET_KEY="$(gcloud secrets versions access latest --secret=coding-hosted-image-reader-hmac-secret --project=ditto-app-dev)"
 export DITTO_CODING_WORKER_PROVIDER_KEY="$(gcloud secrets versions access latest --secret=coding-hosted-openrouter-key --project=ditto-app-dev)"
 
-GCP_OSLOGIN_USER=… ansible-playbook -i infra/ansible/inventory/gcp.yml \
-  infra/ansible/playbooks/gcp-coding-hosted-worker-credentials.yml \
+GCP_OSLOGIN_USER=… ansible-playbook -i inventory/gcp.yml \
+  playbooks/gcp-coding-hosted-worker-credentials.yml \
   --limit ditto-coding-hosted-v2 \
   -e '{"coding_hosted_worker_credentials_enabled": true, "coding_hosted_worker_credentials_confirmation": "MATERIALIZE NATIVE CODING WORKER CREDENTIALS", "coding_hosted_worker_credentials_source_revision": "<40-char lowercase-hex reviewed revision>"}'
 
@@ -137,26 +146,41 @@ source revision with no trailing newline, and the exact target host.
   accounts come from a registered `setup` and `getent`, because an
   `ansible_facts` extra var replaces gathered facts.
 - The worker and every custody instance must be stopped. The live-unit guard is
-  an allow-list: only `inactive` or `failed` pass, so `active`, `activating`,
-  `deactivating`, `reloading`, `refreshing` (systemd 256 and later),
-  `maintenance`, a future state or an unparseable line all refuse.
+  an allow-list, defined once in the role's `assert_units_idle.yml` and reused by
+  the pre-write and post-write checks: only `inactive` or `failed` pass, so
+  `active`, `activating`, `deactivating`, `reloading`, `refreshing` (systemd 256
+  and later), `maintenance`, a future state or an unparseable line all refuse.
   An empty listing means no such unit is loaded and is allowed. The role stops
   nothing.
+- No process may be running as the worker UID. The listed units are not enough:
+  the rootless dockerd user manager (`user@<uid>.service`) and an escaped
+  candidate share that UID and could read the files or swap a directory. The
+  role reads `/proc` for the worker UID and refuses if any process is present.
 - The private directory must be the worker's own `0700` directory, not a
-  symlink, below a real worker home that is not group- or world-writable.
-- Each destination, inspected without following links, must be absent or a
-  regular, single-link, mode-`0600` file owned by the worker. A symlink,
-  directory, hard link, another account's file or a wrong-mode file is refused;
-  the role never follows, replaces or re-permissions such a path.
+  symlink, below a real worker home that is not group- or world-writable. This
+  Ansible stat is an early, clear refusal; the authoritative symlink-safe check
+  is on the helper's own file descriptors (below).
 
 ## How it writes and verifies
 
-Each file is written atomically with `no_log`, without a diff, without following
-a final-component link and without a backup. After the write the role re-stats
-each file (regular, single link, owner, group, mode `0600`, size bounds) and
-checks its SHA-256 against the intended content, all under `no_log`, so no value
-or digest is ever printed. It then re-lists the units and refuses loudly if any
-unit went live during materialization.
+The write is done by a small root-run helper shipped with the role
+(`files/materialize_worker_credentials.py`). Ansible passes the three documents
+to it on stdin, never in argv, and does not echo command stdin even at `-vvv`;
+the helper prints only non-secret metadata, never a value or a digest, so the
+task stays visible. The helper opens every component of the private directory
+path with `O_NOFOLLOW|O_DIRECTORY` — so a directory the worker account could swap
+for a symlink between the Ansible stat and the write cannot redirect it —
+verifies the directory's owner and mode on the open descriptor, writes each file
+to a temporary name with `O_CREAT|O_EXCL|O_NOFOLLOW`, `fchown`s and `fchmod`s it,
+`fsync`s, renames every temporary into place only after all three are written
+(so a mid-write failure leaves no half-updated set and it reports which fixed
+names were replaced or left), and re-verifies each result (regular, single link,
+owner, mode `0600`, size, and SHA-256 of the bytes, compared in process) on its
+own descriptor. It refuses a destination that is a symlink, directory, hard link
+or another account's file, and never follows or re-permissions such a path.
+After the helper, the role re-lists the units and refuses loudly if any unit
+went live during materialization. Cleanup unlinks the three names the same way,
+with `unlinkat` on an `O_NOFOLLOW` directory descriptor.
 
 Residual race: a unit that starts after this final recheck and before any later
 service start is outside this role, which starts nothing. Start services only
@@ -165,20 +189,30 @@ procedure.
 
 ## Nothing is logged, and one residual
 
-No task prints an input value or a digest. Secret-bearing tasks are `no_log`;
-asserts are `quiet` with static failure messages that never interpolate a value;
-the report is a fixed string. The rehearsal (below) proves that stand-in secrets
-and their digests never reach ansible output, including under `-v` and `--diff`.
+No task prints an input value or a digest. The set_fact captures that hold
+credentials are `no_log`; asserts are `quiet` with static failure messages that
+never interpolate an input; the helper and report show only filenames, states
+and the non-secret source revision. The rehearsal (below) proves that stand-in
+secrets and their MD5, SHA-1, SHA-256 and SHA-512 digests never reach ansible
+output, including under `-v` and `--diff` with the repo's yaml callback.
 
-One residual comes from ansible-core itself: if an input is a template that
-raises while referencing an environment lookup, for example
-`{{ {}[lookup('env','DITTO_CODING_WORKER_PROVIDER_KEY')] }}`, ansible prints the
-offending expression in its own `[ERROR]` finalization error before the role can
-inspect it, and `no_log` does not suppress that banner. The role still writes
-nothing, because the failure aborts the run before any write. This is why the
-three inputs must be passed literally on the command line, from the operator's
-own shell, and secrets must be exported only in that same shell: a hostile
-templated input can then only surface a value already present to that operator.
+Inputs are captured once with `set_fact ... | default('', true)` and validated
+as frozen literals, and the enabled gate is frozen the same way. On ansible-core
+2.21.2 this absorbs an **undefined-class** template error — for example
+`{{ {}[lookup('env','X')] }}`, whose subscript raises an Undefined — into `''` or
+`false`, so such an input is refused with no leak (the rehearsal exercises this).
+
+One residual remains and cannot be closed on 2.21.2: if an input is a template
+that raises a **lookup or filter plugin error whose message embeds a value**, for
+example `{{ lookup('file', lookup('env','DITTO_CODING_WORKER_PROVIDER_KEY')) }}`,
+ansible prints that value in its own `[ERROR]` finalization banner before the
+role can inspect it, and neither `no_log`, `ignore_errors`, a rescue nor
+`default(..., true)` suppresses that banner (all were tested). The role still
+writes nothing, because the failure aborts the run before any write. This is why
+the three inputs must be passed literally on the command line, from the
+operator's own shell, and secrets must be exported only in that same shell: a
+hostile templated input can then only surface a value already present to that
+same operator.
 
 ## Cleanup and rotation
 
