@@ -11,6 +11,7 @@ import socket
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -579,7 +580,7 @@ rehearsal = pytest.mark.skipif(
 )
 
 
-def _rewrite(node: object, *, local_identity: bool, mock_accounts: bool) -> object:
+def _rewrite(node: Any, *, local_identity: bool, mock_accounts: bool) -> Any:
     """Point the role at a temporary tree: rewrite paths, owners, the unit
     listing and (optionally) the identity comparison and the account probe."""
     if isinstance(node, dict):
