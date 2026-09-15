@@ -149,3 +149,130 @@ func TestCodingHostFailureIsNonFatalForOrdinaryScoring(t *testing.T) {
 		t.Fatalf("health status=%d", health.Code)
 	}
 }
+
+func codingRuntimeEnvironment(values map[string]string) func(string) string {
+	return func(name string) string { return values[name] }
+}
+
+// The coding runtime has its own proxy, gateway and network. With only the
+// ordinary scorer's settings present (the Compose stack today) it refuses, and
+// a coding value equal to the shared one is also refused.
+func TestCodingRuntimeSettingsNeverFallBackToTheSandboxSettings(t *testing.T) {
+	const dedicated = "unix:///run/ditto-coding-executor/docker.sock"
+	shared := map[string]string{
+		"DITTOBENCH_SANDBOX_EGRESS_NETWORK":         "ditto-sandbox",
+		"DITTOBENCH_SANDBOX_EGRESS_PROXY":           "http://172.30.0.2:3128",
+		"DITTOBENCH_SANDBOX_HOST_GATEWAY_IP":        "172.30.0.1",
+		"DITTOBENCH_OPENROUTER_SHIM_CA_BUNDLE_PATH": "/var/lib/dittobench-openrouter-shim/ca-bundle.pem",
+		"DITTOBENCH_SANDBOX_SECCOMP_PROFILE":        "shared-seccomp",
+	}
+	if docker, err := codingRuntimeDockerFromEnvironment(codingRuntimeEnvironment(shared), dedicated); err == nil || docker != nil {
+		t.Fatalf("shared sandbox settings were used: docker=%+v err=%v", docker, err)
+	}
+	own := map[string]string{
+		codingEgressNetworkEnvironment: "ditto-coding-egress",
+		codingEgressProxyEnvironment:   "http://10.203.0.1:3128",
+		codingHostGatewayEnvironment:   "10.203.0.1",
+	}
+	for name := range own {
+		t.Run("missing "+name, func(t *testing.T) {
+			values := map[string]string{}
+			for key, value := range shared {
+				values[key] = value
+			}
+			for key, value := range own {
+				if key != name {
+					values[key] = value
+				}
+			}
+			docker, err := codingRuntimeDockerFromEnvironment(codingRuntimeEnvironment(values), dedicated)
+			if err == nil || docker != nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("docker=%+v err=%v", docker, err)
+			}
+			if strings.Contains(err.Error(), "172.30.") || strings.Contains(err.Error(), "10.203.") {
+				t.Fatalf("refusal echoes a configured value: %v", err)
+			}
+		})
+	}
+	for _, reuse := range []struct{ coding, sharedName string }{
+		{codingEgressProxyEnvironment, "DITTOBENCH_SANDBOX_EGRESS_PROXY"},
+		{codingHostGatewayEnvironment, "DITTOBENCH_SANDBOX_HOST_GATEWAY_IP"},
+	} {
+		values := map[string]string{}
+		for key, value := range own {
+			values[key] = value
+		}
+		values[reuse.sharedName] = values[reuse.coding]
+		if docker, err := codingRuntimeDockerFromEnvironment(codingRuntimeEnvironment(values), dedicated); err == nil || docker != nil {
+			t.Fatalf("%s equal to %s was accepted", reuse.coding, reuse.sharedName)
+		}
+	}
+
+	values := map[string]string{}
+	for key, value := range shared {
+		values[key] = value
+	}
+	for key, value := range own {
+		values[key] = value
+	}
+	docker, err := codingRuntimeDockerFromEnvironment(codingRuntimeEnvironment(values), dedicated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docker.EgressNetwork != "ditto-coding-egress" || docker.EgressProxy != "http://10.203.0.1:3128" ||
+		docker.HostGatewayIP != "10.203.0.1" || docker.OpenRouterShimCABundleHostPath != "" ||
+		docker.SeccompProfile != "" || docker.DockerHost != dedicated || !docker.RequireRootless ||
+		!docker.RequireIsolatedDaemon || !docker.Harden || docker.GitHubTokenFile != "" || docker.AllowPrivate {
+		t.Fatalf("coding runtime docker = %+v", docker)
+	}
+}
+
+// The coding host must never construct its Docker client from the ordinary
+// scorer's environment-derived defaults.
+func TestCodingShadowHostDoesNotUseTheSharedLocalDockerDefaults(t *testing.T) {
+	body, err := os.ReadFile("coding_shadow.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "NewLocalDocker(") {
+		t.Fatal("coding_shadow.go builds the coding runtime from sandbox.NewLocalDocker")
+	}
+}
+
+// An enabled gate with a valid dedicated socket but no coding runtime settings
+// refuses before creating private state or binding the source listener.
+func TestEnabledCodingGateRefusesMissingRuntimeSettingsBeforeSideEffects(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	privateRoot := filepath.Join(t.TempDir(), "coding-shadow-v1")
+	t.Setenv("DITTOBENCH_CODING_SHADOW_ENABLED", "false")
+	t.Setenv("DITTOBENCH_CODING_CANARY_ENABLED", "true")
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+	t.Setenv(codingDockerHostEnvironment, "unix:///run/ditto-coding-executor/docker.sock")
+	t.Setenv("DITTOBENCH_SANDBOX_EGRESS_NETWORK", "ditto-sandbox")
+	t.Setenv("DITTOBENCH_SANDBOX_EGRESS_PROXY", "http://172.30.0.2:3128")
+	t.Setenv("DITTOBENCH_OPENROUTER_SHIM_CA_BUNDLE_PATH", "/var/lib/dittobench-openrouter-shim/ca-bundle.pem")
+	t.Setenv(codingEgressNetworkEnvironment, "")
+	t.Setenv(codingEgressProxyEnvironment, "")
+	t.Setenv(codingHostGatewayEnvironment, "")
+	t.Setenv("DITTOBENCH_CODING_PRIVATE_ROOT", privateRoot)
+	t.Setenv("DITTOBENCH_CODING_SOURCE_PORT", strconv.Itoa(port))
+	host, err := codingShadowHostFromEnvironment(8000, 11436)
+	if err == nil || host != nil || !strings.Contains(err.Error(), codingEgressProxyEnvironment) {
+		t.Fatalf("host=%v err=%v", host, err)
+	}
+	if _, statErr := os.Stat(privateRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("private root was created: %v", statErr)
+	}
+	rebound, err := net.Listen("tcp4", "0.0.0.0:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("source port was left bound: %v", err)
+	}
+	_ = rebound.Close()
+}

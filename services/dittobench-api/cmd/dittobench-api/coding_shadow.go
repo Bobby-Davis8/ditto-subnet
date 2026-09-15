@@ -27,7 +27,40 @@ const (
 	// the Compose validator is the privileged rootful sandbox-docker daemon that
 	// ordinary scoring uses.
 	codingDockerHostEnvironment = "DITTOBENCH_CODING_DOCKER_HOST"
+	// The coding runtime's own container settings. They never fall back to the
+	// ordinary scorer's DITTOBENCH_SANDBOX_* values, and the coding runtime has
+	// no CA bundle setting at all.
+	codingEgressNetworkEnvironment = "DITTOBENCH_CODING_EGRESS_NETWORK"
+	codingEgressProxyEnvironment   = "DITTOBENCH_CODING_EGRESS_PROXY"
+	codingHostGatewayEnvironment   = "DITTOBENCH_CODING_HOST_GATEWAY_IP"
+	codingSeccompEnvironment       = "DITTOBENCH_CODING_SECCOMP_PROFILE"
+	codingAppArmorEnvironment      = "DITTOBENCH_CODING_APPARMOR_PROFILE"
 )
+
+// codingRuntimeDockerFromEnvironment builds the coding runtime's Docker client
+// from DITTOBENCH_CODING_* settings only. A coding proxy or gateway equal to the
+// ordinary scorer's configured value is refused, so the two runtimes cannot be
+// silently pointed at one shared egress path.
+func codingRuntimeDockerFromEnvironment(getenv func(string) string, dockerHost string) (*sandbox.LocalDocker, error) {
+	settings := sandbox.CodingRuntimeSettings{
+		DockerHost:      dockerHost,
+		EgressNetwork:   strings.TrimSpace(getenv(codingEgressNetworkEnvironment)),
+		EgressProxy:     strings.TrimSpace(getenv(codingEgressProxyEnvironment)),
+		HostGatewayIP:   strings.TrimSpace(getenv(codingHostGatewayEnvironment)),
+		SeccompProfile:  strings.TrimSpace(getenv(codingSeccompEnvironment)),
+		AppArmorProfile: strings.TrimSpace(getenv(codingAppArmorEnvironment)),
+	}
+	sharedProxy := strings.TrimSpace(getenv("DITTOBENCH_SANDBOX_EGRESS_PROXY"))
+	sharedGateway := strings.TrimSpace(getenv("DITTOBENCH_SANDBOX_HOST_GATEWAY_IP"))
+	docker, err := sandbox.NewCodingRuntimeDocker(settings)
+	if err != nil || (sharedProxy != "" && sharedProxy == settings.EgressProxy) ||
+		(sharedGateway != "" && sharedGateway == settings.HostGatewayIP) {
+		return nil, errors.New("coding runtime requires its own " + codingEgressNetworkEnvironment + ", " +
+			codingEgressProxyEnvironment + " (http://<private IPv4>:<port>) and " + codingHostGatewayEnvironment +
+			" (private IPv4), distinct from the sandbox settings")
+	}
+	return docker, nil
+}
 
 // installCodingHost isolates the default-off coding runtime from ordinary
 // scoring. A construction failure disables every coding route (they answer
@@ -65,6 +98,12 @@ func codingShadowHostFromEnvironment(apiPort int, brokerPort int) (*codinghost.H
 		return nil, nil
 	}
 	dockerHost, err := codingDockerHostFromEnvironment(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	// Before any side effect: the coding runtime's own proxy, gateway and
+	// network, with no CA bundle and no fallback to the sandbox settings.
+	docker, err := codingRuntimeDockerFromEnvironment(os.Getenv, dockerHost)
 	if err != nil {
 		return nil, err
 	}
@@ -112,10 +151,6 @@ func codingShadowHostFromEnvironment(apiPort int, brokerPort int) (*codinghost.H
 	// A dedicated runtime: the ordinary scorer's LocalDocker stays on the stack
 	// daemon, while every coding harness and executor call reaches only the
 	// rootless daemon, which must also prove rootless isolation live.
-	docker := sandbox.NewLocalDocker()
-	docker.DockerHost = dockerHost
-	docker.RequireRootless = true
-	docker.RequireIsolatedDaemon = true
 	host, err := codinghost.New(codinghost.Config{
 		ControlToken: controlTokenFromEnv(), PrivateRoot: root,
 		SourceListener: listener, SourcePublicBaseURL: publicBase, Policy: policy,

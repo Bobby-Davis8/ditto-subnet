@@ -25,9 +25,27 @@ type execDocker struct{ host string }
 func (docker execDocker) command(ctx context.Context, args ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, "docker", args...)
 	if docker.host != "" {
-		command.Env = append(os.Environ(), "DOCKER_HOST="+docker.host)
+		command.Env = dedicatedDockerEnvironment(os.Environ(), docker.host)
 	}
 	return command
+}
+
+// dedicatedDockerEnvironment drops every inherited DOCKER_* selector (context,
+// TLS, config directory, API version, host) and proxy variable, then selects
+// exactly the dedicated host. It mirrors sandbox's rule for the same daemon.
+func dedicatedDockerEnvironment(environ []string, host string) []string {
+	out := make([]string, 0, len(environ)+1)
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(name)
+		switch {
+		case strings.HasPrefix(upper, "DOCKER_"),
+			upper == "HTTP_PROXY", upper == "HTTPS_PROXY", upper == "ALL_PROXY", upper == "NO_PROXY":
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, "DOCKER_HOST="+host)
 }
 
 func (docker execDocker) Output(ctx context.Context, args ...string) ([]byte, error) {

@@ -572,12 +572,14 @@ func (d *LocalDocker) docker(ctx context.Context, args ...string) *exec.Cmd {
 	return command
 }
 
-// dockerEnvironment is nil (inherit) unless DockerHost selects an endpoint.
+// dockerEnvironment is nil (inherit) unless DockerHost selects an endpoint. A
+// dedicated endpoint never inherits the process's Docker context, TLS, config
+// or proxy selectors.
 func (d *LocalDocker) dockerEnvironment() []string {
 	if d.DockerHost == "" {
 		return nil
 	}
-	return append(os.Environ(), "DOCKER_HOST="+d.DockerHost)
+	return dedicatedDockerEnvironment(os.Environ(), d.DockerHost)
 }
 
 // CleanupStale removes only resources carrying this scorer's ownership label.

@@ -76,6 +76,35 @@ func TestExecDockerSelectsOnlyTheConfiguredEndpoint(t *testing.T) {
 	}
 }
 
+func TestExecDockerDedicatedEndpointDropsInheritedSelectorsAndProxies(t *testing.T) {
+	directory := t.TempDir()
+	script := "#!/bin/sh\nexec /usr/bin/env\n"
+	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	for name, value := range map[string]string{
+		"DOCKER_HOST": "tcp://127.0.0.1:2375", "DOCKER_CONTEXT": "shared", "DOCKER_TLS_VERIFY": "1",
+		"DOCKER_CONFIG": "/shared/config", "HTTPS_PROXY": "http://172.30.0.2:3128", "no_proxy": "*",
+	} {
+		t.Setenv(name, value)
+	}
+	out, err := execDocker{host: "unix:///run/ditto-coding-executor/docker.sock"}.Output(t.Context(), "info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		upper := strings.ToUpper(line)
+		if strings.HasPrefix(upper, "DOCKER_") || strings.Contains(upper, "_PROXY=") {
+			selected = append(selected, line)
+		}
+	}
+	if len(selected) != 1 || selected[0] != "DOCKER_HOST=unix:///run/ditto-coding-executor/docker.sock" {
+		t.Fatalf("dedicated executor docker environment selectors = %q", selected)
+	}
+}
+
 func TestCertificationReadinessRequiresRootlessIsolatedDaemonAndImage(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("2", 64)
 	factory, err := NewPhaseFactory(validFactoryConfig())
