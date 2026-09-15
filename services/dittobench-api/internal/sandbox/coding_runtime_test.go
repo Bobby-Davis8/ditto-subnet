@@ -183,10 +183,13 @@ func TestDedicatedDockerEndpointInheritsNoDockerOrProxySelector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The oracle is independent of inheritedDockerSelector, so weakening the
+	// production rule cannot also weaken this check.
 	var selected []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		name, _, _ := strings.Cut(line, "=")
-		if inheritedDockerSelector(name) {
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "DOCKER_") || strings.HasSuffix(upper, "_PROXY") {
 			selected = append(selected, line)
 		}
 	}

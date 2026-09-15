@@ -86,6 +86,7 @@ func TestExecDockerDedicatedEndpointDropsInheritedSelectorsAndProxies(t *testing
 	for name, value := range map[string]string{
 		"DOCKER_HOST": "tcp://127.0.0.1:2375", "DOCKER_CONTEXT": "shared", "DOCKER_TLS_VERIFY": "1",
 		"DOCKER_CONFIG": "/shared/config", "HTTPS_PROXY": "http://172.30.0.2:3128", "no_proxy": "*",
+		"all_proxy": "socks5://172.30.0.2:1080", "http_proxy": "http://172.30.0.2:3128",
 	} {
 		t.Setenv(name, value)
 	}
