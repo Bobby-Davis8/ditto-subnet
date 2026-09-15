@@ -118,7 +118,11 @@ line. `native.py` takes these steps, in order:
 
 The approval digest is derived from the verified bytes. `run.py` compiles
 `native.py` from one read and records its digest (`LOADED_SHA256`), so cached
-bytecode or a later file swap can't stand in for the reviewed binding.
+bytecode or a later file swap can't stand in for the reviewed binding. Before
+compiling, `run.py` refuses a `native.py` that is not a single-link file owned
+by root or this principal, or that has a group- or world-writable ancestor:
+`Binding`'s own ownership checks run inside `native.py`, too late to refuse a
+substituted module.
 
 The closed approval record uses schema
 `dittobench-coding-native-controls-approval-v3`, purpose

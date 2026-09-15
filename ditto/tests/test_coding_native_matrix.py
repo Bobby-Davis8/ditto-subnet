@@ -804,6 +804,8 @@ def test_hash_only_invocation_is_refused_before_reading_anything(monkeypatch):
     for extra in (
         ["--native-approval-sha256", "a" * 64],
         ["--native-approval-sha", "a" * 64],
+        # A prefix of --native-approval-signature is not accepted as one.
+        ["--native-approval-sig", "/unread/signature"],
         [],
     ):
         monkeypatch.setattr(RUNNER.sys, "argv", [*base, *extra])
@@ -935,18 +937,120 @@ def test_ambient_docker_environment_never_selects_the_daemon(monkeypatch):
         )
 
 
-def test_runner_compiles_the_binding_it_hashes(monkeypatch):
+def protected_runner_copy(tmp_path, monkeypatch, native=None):
+    """run.py beside a native.py copy; ancestors are checked separately."""
+    directory = tmp_path / "qualification"
+    directory.mkdir()
+    runner = directory / "run.py"
+    runner.write_bytes(Path(RUNNER_FILE).read_bytes())
+    path = directory / "native.py"
+    real = Path(RUNNER_FILE).with_name("native.py").read_bytes()
+    path.write_bytes(real if native is None else native)
+    path.chmod(0o644)
+    monkeypatch.setattr(RUNNER, "__file__", str(runner))
+    monkeypatch.setattr(RUNNER, "protected_ancestors", lambda _path: None)
+    return path
+
+
+def test_runner_compiles_the_binding_it_hashes(monkeypatch, tmp_path):
     def forbidden(*_args, **_kwargs):
         pytest.fail("native.py must not load through an import loader")
 
+    path = protected_runner_copy(tmp_path, monkeypatch)
     monkeypatch.setattr(importlib.util, "spec_from_file_location", forbidden)
     loaded = RUNNER.load_native()
-    path = Path(RUNNER_FILE).with_name("native.py")
     expected = hashlib.sha256(path.read_bytes()).hexdigest()
     assert expected == loaded.LOADED_SHA256
     assert loaded.__file__ == str(path)
     assert callable(loaded.authorize)
     assert 'globals().get("LOADED_SHA256")' in path.read_text()
+
+
+def test_runner_refuses_an_editable_binding_before_compiling_it(monkeypatch, tmp_path):
+    # Binding's own ownership checks run inside native.py, too late to refuse a
+    # substituted module, so run.py checks before any byte is compiled.
+    path = protected_runner_copy(
+        tmp_path, monkeypatch, native=b"raise SystemExit('compiled')\n"
+    )
+    path.chmod(0o664)
+    with pytest.raises(ValueError, match="native binding rejected"):
+        RUNNER.load_native()
+    path.chmod(0o644)
+    link = path.with_name("second-link.py")
+    os.link(path, link)
+    with pytest.raises(ValueError, match="native binding rejected"):
+        RUNNER.load_native()
+    link.unlink()
+    with pytest.raises(SystemExit, match="compiled"):
+        RUNNER.load_native()
+    # A shared writable ancestor (here /tmp) is refused as well.
+    monkeypatch.setattr(RUNNER, "protected_ancestors", PROTECTED_ANCESTORS)
+    with pytest.raises(ValueError, match="native binding rejected"):
+        RUNNER.load_native()
+    PROTECTED_ANCESTORS(Path("/usr/bin/native.py"))
+
+
+PROTECTED_ANCESTORS = RUNNER.protected_ancestors
+
+
+@pytest.mark.usefixtures("host_approval")
+def test_host_verifier_is_protected_and_single_link_before_it_runs():
+    verifier = NATIVE.ROOT / NATIVE.VERIFIER
+    verifier.write_bytes(b"raise SystemExit('verifier ran')\n")
+    verifier.chmod(0o644)
+    with pytest.raises(SystemExit, match="verifier ran"):
+        NATIVE.load_verifier()
+    link = verifier.with_name("second-link.py")
+    os.link(verifier, link)
+    with pytest.raises(ValueError, match="native control approval rejected"):
+        NATIVE.load_verifier()
+    link.unlink()
+    refused = []
+
+    def unprotected(path):
+        refused.append(path)
+        raise ValueError("native control approval rejected")
+
+    NATIVE.protected_parents, real = unprotected, NATIVE.protected_parents
+    try:
+        with pytest.raises(ValueError, match="native control approval rejected"):
+            NATIVE.load_verifier()
+    finally:
+        NATIVE.protected_parents = real
+    assert refused == [verifier]
+
+
+def test_native_daemon_data_root_is_pinned():
+    identity = approval()["daemon_identity"]
+    NATIVE.daemon_identity_policy(identity)
+    with pytest.raises(ValueError):
+        NATIVE.daemon_identity_policy(
+            {**identity, "docker_root_dir": "/var/lib/other/docker"}
+        )
+
+
+def test_private_read_refuses_a_file_changed_while_read(monkeypatch, tmp_path):
+    monkeypatch.setattr(NATIVE, "private", lambda *_args, **_kwargs: None)
+    path = tmp_path / "approval.json"
+    path.write_bytes(b"{}")
+    real_fstat, calls = os.fstat, []
+
+    def changing(fd):
+        info = real_fstat(fd)
+        calls.append(fd)
+        if len(calls) == 1:
+            return info
+        fields = list(info)
+        return os.stat_result(
+            (*fields[:7], info.st_atime, info.st_mtime, info.st_ctime),
+            {"st_mtime_ns": info.st_mtime_ns + 1, "st_ctime_ns": info.st_ctime_ns},
+        )
+
+    assert NATIVE.read_private(path, 16) == b"{}"
+    monkeypatch.setattr(NATIVE.os, "fstat", changing)
+    calls.clear()
+    with pytest.raises(ValueError):
+        NATIVE.read_private(path, 16)
 
 
 CATALOG_DIR = ROOT / "services/dittobench-api/internal/codingenforcement/catalog"
