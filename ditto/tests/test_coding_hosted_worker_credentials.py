@@ -63,6 +63,13 @@ GATE_FREEZE = "Freeze the enabled gate once"
 DORMANT = "Explain dormant native worker credential materialization"
 INCLUDE = "Materialize the worker-owned credential files behind the enabled gate"
 # materialize.yml
+PRESET_INCLUDE = (
+    "Refuse a preset internal name, a preset gate or a credential-named variable"
+)
+BATCH = "Require the run to target exactly the one dedicated host"
+PIPELINING = (
+    "Require SSH pipelining on and no kept remote files before carrying secrets"
+)
 CHECK_MODE = "Refuse check mode for an enabled materialization"
 FREEZE_INPUTS = "Freeze the confirmation and source revision once"
 GATE = "Require the exact confirmation and source revision as frozen literals"
@@ -172,6 +179,9 @@ def test_main_refuses_presets_then_freezes_the_gate_and_includes() -> None:
 
 def test_materialize_task_order() -> None:
     assert [t["name"] for t in _docs(MATERIALIZE)] == [
+        PRESET_INCLUDE,
+        BATCH,
+        PIPELINING,
         CHECK_MODE,
         FREEZE_INPUTS,
         GATE,
@@ -196,6 +206,67 @@ def test_materialize_task_order() -> None:
         LIVE_AFTER,
         REPORT,
     ]
+
+
+def test_in_include_guards_are_start_at_task_proof_and_target_one_host() -> None:
+    for tasks, prefix, first in (
+        (_docs(MATERIALIZE), PREFIX, PRESET_INCLUDE),
+        (_docs(REMOVE), CLEANUP_PREFIX, PRESET_INCLUDE),
+    ):
+        names = [t["name"] for t in tasks]
+        # The first task inside the dynamic include repeats the refusal so
+        # --start-at-task (which begins at a main.yml task) cannot skip it.
+        assert names[0] == first
+        that = tasks[0]["ansible.builtin.assert"]["that"]
+        # A preset gate fact alone cannot open the run: the raw enabled flag must
+        # be boolean true.
+        assert any(
+            f"({prefix}enabled | default(false, true)) is sameas true" in _flat(line)
+            for line in that
+        )
+        assert (
+            any(
+                f"'^{prefix}" in _flat(line) and "(?!cleanup_)" in _flat(line)
+                for line in that
+            )
+            or prefix == CLEANUP_PREFIX
+        )
+        # The batch guard is next and pins the exact single host, not a
+        # -e-overridable inventory_hostname/group check.
+        assert names[1] == BATCH
+        batch = tasks[1]["ansible.builtin.assert"]["that"]
+        assert batch == ["ansible_play_batch == ['ditto-coding-hosted-v2']"]
+    # No role reads inventory_hostname or a groups membership for targeting.
+    for text in (MATERIALIZE, REMOVE):
+        assert "inventory_hostname in groups" not in text
+        assert "ansible_play_batch == ['ditto-coding-hosted-v2']" in text
+
+
+def test_pipelining_and_keep_remote_files_guard_precedes_secrets() -> None:
+    tasks = _docs(MATERIALIZE)
+    names = [t["name"] for t in tasks]
+    assert names[2] == PIPELINING
+    that = _task(PIPELINING, tasks)["ansible.builtin.assert"]["that"]
+    assert "(ansible_pipelining | default(false)) is sameas true" in that
+    assert any("DEFAULT_KEEP_REMOTE_FILES" in line for line in that)
+    # It runs before the first secret-carrying task (the env freeze).
+    assert names.index(PIPELINING) < names.index(FREEZE_SECRETS)
+    # The unlink module carries no secret, so cleanup needs no pipelining guard.
+    assert "DEFAULT_KEEP_REMOTE_FILES" not in REMOVE
+
+
+def test_unlink_module_reports_every_path() -> None:
+    src = UNLINK_MODULE.read_text()
+    for field in (
+        "refused",
+        "not_attempted",
+        "already_absent",
+        "private_dir_mode",
+        "private_dir_present",
+    ):
+        assert field in src, field
+    # Cleanup requires the owner but tolerates a wrong-mode directory (asymmetry).
+    assert "is not owned by the worker" in src
 
 
 def test_no_role_internal_data_flows_through_overridable_include_vars() -> None:
@@ -354,6 +425,12 @@ def test_docs_describe_every_guard() -> None:
         "ANSIBLE_CONFIG",
         "no_log",
         "library",
+        "ansible_play_batch == ['ditto-coding-hosted-v2']",
+        "pipelining",
+        "--limit ditto-coding-hosted-v2",
+        "--step",
+        "private_dir_mode",
+        "not_attempted",
     ):
         assert phrase in docs, phrase
 
@@ -475,17 +552,30 @@ def _rehearse_common(tasks, accounts_task, listing, relist, worker_procs) -> Non
     ]
 
 
-def _rehearsal_materialize(*, production_identity: bool = False) -> list[dict]:
+def _rehearsal_materialize(
+    *,
+    production_identity: bool = False,
+    real_batch: bool = False,
+    prepend_main: bool = True,
+) -> list[dict]:
     # Prepend main.yml's preset refusal and gate freeze so the inlined run
-    # mirrors main.yml -> materialize.yml, then rewrite paths and owner.
+    # mirrors main.yml -> materialize.yml, then rewrite paths and owner. When
+    # prepend_main is False the caller supplies main.yml itself (the gate cases),
+    # so the file is exactly the dynamically included materialize.yml and its
+    # own first-task guard is the operative one under --start-at-task.
     main = _docs(MAIN)
     tasks = [
-        copy.deepcopy(main[0]),
-        copy.deepcopy(main[1]),
+        *([copy.deepcopy(main[0]), copy.deepcopy(main[1])] if prepend_main else []),
         *copy.deepcopy(_docs(MATERIALIZE)),
     ]
     if not production_identity:
         _rehearse_identity(tasks, HOST)
+    if not real_batch:
+        # The bulk multi-host run cannot be a single dedicated host, so make the
+        # batch check tautological there; dedicated cases keep the real literal.
+        _task(BATCH, tasks)["ansible.builtin.assert"]["that"] = [
+            "ansible_play_batch == ansible_play_batch"
+        ]
     _rehearse_common(tasks, ACCOUNTS, LISTING, RELIST, WORKER_PROCS)
     _task(REPORT, tasks)["register"] = "rehearsal_report"
     tasks = _rewrite(tasks)
@@ -625,6 +715,9 @@ def _base_vars(root: Path) -> dict:
         "rehearsal_owner": pwd.getpwuid(os.getuid()).pw_name,
         "rehearsal_group": grp.getgrgid(os.getgid()).gr_name,
         "rehearsal_accounts": ACCOUNTS_FACT,
+        # The pipelining guard requires this on; the connection is local, but the
+        # rehearsal sets it true to model a pipelined SSH run.
+        "ansible_pipelining": True,
     }
 
 
@@ -696,7 +789,11 @@ def _assert_refused(root, task, rp, *, match_msg=True, files_before=0) -> None:
     outcome = _outcome(root, rp)
     assert outcome.get("task") == task, (root.name, outcome)
     if match_msg:
-        source = _docs(MAIN) if task in (PRESET,) else _docs(MATERIALIZE)
+        source = next(
+            doc
+            for doc in (_docs(MAIN), _docs(MATERIALIZE))
+            if any(t.get("name") == task for t in _walk(doc))
+        )
         expected = _flat(_task(task, source)["ansible.builtin.assert"]["fail_msg"])
         assert expected in [_flat(m) for m in outcome["messages"]], (root.name, outcome)
     assert len(list(_private(root).iterdir())) == files_before, root.name
@@ -890,8 +987,11 @@ def test_rehearsal_refuses_forged_facts_and_start_at_task_and_flip(tmp_path) -> 
     gate_root = tmp_path / "hosts" / "gate"
     _make_home(gate_root)
     materialize_file = tmp_path / "materialize.yml"
+    # The gate cases run the real main.yml (main_play) and include this file, so
+    # it must be exactly materialize.yml (no prepended main tasks): its own first
+    # in-include guard is what --start-at-task cannot skip.
     materialize_file.write_text(
-        yaml.safe_dump(_rehearsal_materialize(), sort_keys=False)
+        yaml.safe_dump(_rehearsal_materialize(prepend_main=False), sort_keys=False)
     )
     base = {
         **_base_vars(gate_root),
@@ -942,6 +1042,58 @@ def test_rehearsal_refuses_forged_facts_and_start_at_task_and_flip(tmp_path) -> 
     )
     _leak_free(out)
     assert not any(_private(gate_root).iterdir())
+
+    # --start-at-task the gate freeze skips main.yml's preset refusal. The
+    # presets must come through -e (highest precedence) so they survive the gate
+    # freeze set_fact; the in-include refusal, which --start-at-task cannot skip,
+    # still refuses a preset gate with enabled false and preset register/document
+    # facts with enabled true, writing nothing.
+    # The in-include guard's constant message proves that guard, not a later one,
+    # refused; a bypass that skips it would fail elsewhere or write.
+    in_include_msg = "--start-at-task skipped the enable flag"
+    disabled = {**base, f"{PREFIX}enabled": False}
+    out = _run_gate(
+        tmp_path,
+        "startat_gate",
+        disabled,
+        main_play,
+        materialize_file,
+        "--start-at-task",
+        GATE_FREEZE,
+        "-e",
+        json.dumps({f"{PREFIX}gate": True}),
+    )
+    _leak_free(out)
+    assert in_include_msg in out
+    assert not any(_private(gate_root).iterdir())
+    for i, preset in enumerate(
+        (
+            {f"{PREFIX}units": {"stdout_lines": []}},
+            {f"{PREFIX}units_after": {"stdout_lines": []}},
+            {f"{PREFIX}worker_procs": {"stdout": ""}},
+            {
+                f"{PREFIX}documents": {
+                    "hippius-environment.json": "{}",
+                    "image-storage.json": "{}",
+                    "provider-key": "attacker-key",
+                }
+            },
+        )
+    ):
+        out = _run_gate(
+            tmp_path,
+            f"startat_reg{i}",
+            enabled,
+            main_play,
+            materialize_file,
+            "--start-at-task",
+            GATE_FREEZE,
+            "-e",
+            json.dumps(preset),
+        )
+        _leak_free(out)
+        assert in_include_msg in out
+        assert not any(_private(gate_root).iterdir())
 
 
 def _run_gate(tmp_path, name, host_vars, play, materialize_file, *flags) -> str:
@@ -1006,6 +1158,67 @@ def test_rehearsal_removing_no_log_from_render_would_leak(tmp_path) -> None:
     assert any(v in output for v in STANDINS.values())
 
 
+@rehearsal
+def test_rehearsal_targeting_and_pipelining_guards(tmp_path) -> None:
+    # These use the real ansible_play_batch check (real_batch=True), so the
+    # target host must be named ditto-coding-hosted-v2.
+    target = "ditto-coding-hosted-v2"
+    real = _rehearsal_materialize(real_batch=True)
+
+    # A single dedicated host materializes.
+    ok_root = tmp_path / "hosts" / "batch_ok"
+    output = _run(
+        tmp_path, "batch_ok", {target: _mat_host(ok_root)}, [_play(real, "b")]
+    )
+    _leak_free(output)
+    _assert_materialized(ok_root, "b")
+
+    # An extra host in the same batch is refused for every host, nothing written.
+    a_root = tmp_path / "hosts" / "batch_a"
+    b_root = tmp_path / "hosts" / "batch_b"
+    hosts = {target: _mat_host(a_root), "extra-host": _mat_host(b_root)}
+    output = _run(tmp_path, "batch_extra", hosts, [_play(real, "b")])
+    _leak_free(output)
+    for r in (a_root, b_root):
+        assert _outcome(r, "b")["task"] == BATCH
+        assert not any(_private(r).iterdir())
+
+    # -e inventory_hostname cannot forge the batch: a wrong host is refused.
+    w_root = tmp_path / "hosts" / "batch_forged"
+    output = _run(
+        tmp_path,
+        "batch_forged",
+        {"wrong-host": _mat_host(w_root)},
+        [_play(real, "b")],
+        "-e",
+        f"inventory_hostname={target}",
+    )
+    _leak_free(output)
+    assert _outcome(w_root, "b")["task"] == BATCH
+    assert not any(_private(w_root).iterdir())
+
+    # Pipelining off is refused before any secret-carrying task.
+    p_root = tmp_path / "hosts" / "pipelining_off"
+    host = {**_mat_host(p_root), "ansible_pipelining": False}
+    output = _run(tmp_path, "pipelining_off", {target: host}, [_play(real, "b")])
+    _leak_free(output)
+    assert _outcome(p_root, "b")["task"] == PIPELINING
+    assert not any(_private(p_root).iterdir())
+
+    # ANSIBLE_KEEP_REMOTE_FILES=1 is refused too.
+    k_root = tmp_path / "hosts" / "keep_remote"
+    output = _run(
+        tmp_path,
+        "keep_remote",
+        {target: _mat_host(k_root)},
+        [_play(real, "b")],
+        extra_env={**STANDINS, "ANSIBLE_KEEP_REMOTE_FILES": "1"},
+    )
+    _leak_free(output)
+    assert _outcome(k_root, "b")["task"] == PIPELINING
+    assert not any(_private(k_root).iterdir())
+
+
 # ─── Cleanup rehearsal ────────────────────────────────────────────────────────
 
 C_PRESET = PRESET
@@ -1023,7 +1236,7 @@ C_LIVE_AFTER = "Refuse if any worker or custody unit went live during removal"
 C_REPORT = "Report only the source revision and which fixed files were removed or already absent"  # noqa: E501
 
 
-def _rehearsal_remove() -> list[dict]:
+def _rehearsal_remove(*, real_batch: bool = False) -> list[dict]:
     main = _docs(CLEANUP_MAIN)
     tasks = [
         copy.deepcopy(main[0]),
@@ -1031,6 +1244,10 @@ def _rehearsal_remove() -> list[dict]:
         *copy.deepcopy(_docs(REMOVE)),
     ]
     _rehearse_identity(tasks, C_HOST)
+    if not real_batch:
+        _task(BATCH, tasks)["ansible.builtin.assert"]["that"] = [
+            "ansible_play_batch == ansible_play_batch"
+        ]
     _rehearse_common(tasks, C_ACCOUNTS, C_LISTING, C_RELIST, C_WORKER_PROCS)
     _task(C_REPORT, tasks)["register"] = "rehearsal_report"
     return _rewrite(tasks)
