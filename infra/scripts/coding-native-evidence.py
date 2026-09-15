@@ -167,7 +167,10 @@ CATALOG_FILE = (
 FIXTURE_ROOT = "services/dittobench-api/internal/codingenforcement/fixtures"
 # The Go probe runner that measures evidence: its command, library and the
 # catalog package whose canonical encoding and matched rules it uses. Records
-# bind the reviewed checkout's hash of these trees, never a caller-supplied one.
+# carry the reviewed checkout's hash of these trees as supporting provenance
+# (tools.probe_runner_source_sha256). Acceptance pins the binary that actually
+# ran (tools.probe_runner_binary_sha256, measured on the host) to the
+# release-recorded runtime.probe_runner_sha256 (Peyton, 2026-09-15).
 RUNNER_ROOTS = (
     "services/dittobench-api/cmd/dittobench-coding-enforcement-probe",
     "services/dittobench-api/internal/codingenforcement/catalog",
@@ -268,7 +271,44 @@ RELEASE_KEYS = {
     "runtime_archive_sha256",
     "image_approval_sha256",
 }
-TOOL_KEYS = {*TOOL_FILES, "fixtures_sha256", "runner_sha256"}
+TOOL_KEYS = {
+    *TOOL_FILES,
+    "fixtures_sha256",
+    "probe_runner_source_sha256",
+    "probe_runner_binary_sha256",
+}
+RELEASE_INDEX_SCHEMA = "dittobench-coding-native-release-set-v3"
+MAX_RELEASE_INDEX = 64 << 10
+RELEASE_INDEX_KEYS = {
+    "schema",
+    "source_revision",
+    "images",
+    "runtime",
+    "independent_approval_required",
+    "native_imported",
+    "runtime_qualification",
+    "canary_completed",
+    "shadow_only",
+    "weight_eligible",
+}
+RELEASE_IMAGE_KEYS = {
+    "archive",
+    "approval",
+    "approval_sha256",
+    "archive_sha256",
+    "image_ref",
+    "config_digest",
+    "driver_profile",
+}
+RELEASE_RUNTIME_KEYS = {
+    "archive",
+    "archive_sha256",
+    "manifest_sha256",
+    "worker_sha256",
+    "probe_runner_sha256",
+    "python_sha256",
+    "debian_packages",
+}
 PHASE_KEYS = {"name", "started_at_unix", "completed_at_unix", "probes"}
 PROBE_KEYS = {"id", "language", "endpoint_sha256", "expect", "observed", "matched"}
 ENDPOINT_KEYS = {"role", "endpoint_sha256"}
@@ -867,7 +907,7 @@ class Checkout:
     def tools(self) -> dict[str, str]:
         result = {name: self.file_sha256(path) for name, path in TOOL_FILES.items()}
         result["fixtures_sha256"] = self.tree_sha256(FIXTURE_ROOT)
-        result["runner_sha256"] = canonical_sha256(
+        result["probe_runner_source_sha256"] = canonical_sha256(
             [{"root": root, "sha256": self.tree_sha256(root)} for root in RUNNER_ROOTS]
         )
         return result
@@ -1654,6 +1694,71 @@ def parse_preflight(raw: bytes, checkout: Checkout | None) -> dict[str, Any]:
     return value
 
 
+def parse_release_index(raw: bytes) -> dict[str, Any]:
+    """The release set index (``build-coding-native-release.py``), by digest.
+
+    Only its digests are used: the release-recorded probe runner binary, the
+    runtime archive and each image approval.
+    """
+
+    value = closed(
+        parse_canonical(raw, "release index"), RELEASE_INDEX_KEYS, "release index"
+    )
+    require(
+        same(value["schema"], RELEASE_INDEX_SCHEMA)
+        and value["independent_approval_required"] is True
+        and value["native_imported"] is False
+        and value["runtime_qualification"] is False
+        and value["canary_completed"] is False
+        and value["shadow_only"] is True
+        and value["weight_eligible"] is False
+        and type(value["source_revision"]) is str
+        and REVISION.fullmatch(value["source_revision"]) is not None,
+        "release index identity is malformed",
+    )
+    runtime = closed(value["runtime"], RELEASE_RUNTIME_KEYS, "release index runtime")
+    require(
+        all(
+            is_digest(runtime[name])
+            for name in (
+                "archive_sha256",
+                "manifest_sha256",
+                "worker_sha256",
+                "probe_runner_sha256",
+                "python_sha256",
+            )
+        )
+        and runtime["probe_runner_sha256"] != runtime["worker_sha256"],
+        "release index runtime digests are malformed",
+    )
+    images = value["images"]
+    require(
+        type(images) is dict and set(images) == set(LANGUAGES),
+        "release index images are malformed",
+    )
+    for language in LANGUAGES:
+        image = closed(images[language], RELEASE_IMAGE_KEYS, "release index image")
+        require(
+            is_digest(image["approval_sha256"]) and is_digest(image["archive_sha256"]),
+            "release index image digests are malformed",
+        )
+    return {
+        "sha256": sha256(raw),
+        "source_revision": value["source_revision"],
+        "runtime_archive_sha256": runtime["archive_sha256"],
+        "probe_runner_sha256": runtime["probe_runner_sha256"],
+        "image_approval_sha256": {
+            language: images[language]["approval_sha256"] for language in LANGUAGES
+        },
+    }
+
+
+def load_release_index(path: Path | None) -> dict[str, Any]:
+    require(path is not None, "the release index is required")
+    assert path is not None
+    return parse_release_index(read_input(path, MAX_RELEASE_INDEX, "release index"))
+
+
 def parse_custody_binding(raw: bytes) -> dict[str, Any]:
     value = closed(
         parse_canonical(raw, "custody binding"), CUSTODY_KEYS, "custody binding"
@@ -1854,6 +1959,7 @@ def verify_record(
     store: Store,
     checkout: Checkout,
     profiles: dict[str, dict[str, Any]],
+    release_index: dict[str, Any],
     host_preflight: dict[str, Any],
     host_preflight_sha256: str,
 ) -> dict[str, Any]:
@@ -1873,6 +1979,15 @@ def verify_record(
     )
     host = _host(record["host"], catalog)
     release = _release(record["release"])
+    require(
+        same(release["release_manifest_sha256"], release_index["sha256"]),
+        "record release manifest differs from the release index",
+    )
+    for name in ("source_revision", "runtime_archive_sha256", "image_approval_sha256"):
+        require(
+            same(release[name], release_index[name]),
+            f"record {name} differs from the release index",
+        )
     inputs = closed(record["inputs"], set(entry["inputs"]), "record inputs")
     for name, value in inputs.items():
         require(is_digest(value), "record input malformed")
@@ -1882,9 +1997,26 @@ def verify_record(
             f"record {name} differs from the supplied document",
         )
     endpoints = _endpoints(record["endpoints"], entry, profiles)
+    record_tools = closed(record["tools"], TOOL_KEYS, "record tools")
     require(
-        same(closed(record["tools"], TOOL_KEYS, "record tools"), tools),
+        same(
+            {
+                name: value
+                for name, value in record_tools.items()
+                if name != "probe_runner_binary_sha256"
+            },
+            tools,
+        ),
         "record tool hashes differ from the reviewed checkout",
+    )
+    # Runtime acceptance: the probe runner binary measured on the host must be
+    # the release-recorded one; its source-tree hash above is provenance only.
+    require(
+        same(
+            record_tools["probe_runner_binary_sha256"],
+            release_index["probe_runner_sha256"],
+        ),
+        "record probe runner binary differs from the release-recorded binary",
     )
     require(same(record["preconditions"], PRECONDITIONS), "record preconditions failed")
     require(same(record["residue"], RESIDUE), "record residue is not empty")
@@ -2125,6 +2257,7 @@ def verify(
     preflight_sha: str,
     record_shas: list[str],
     profiles: dict[str, dict[str, Any]],
+    release_index: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     catalog, tools = _context(checkout)
     host_preflight = parse_preflight(store.get(preflight_sha), checkout)
@@ -2139,6 +2272,7 @@ def verify(
                 store=store,
                 checkout=checkout,
                 profiles=profiles,
+                release_index=release_index,
                 host_preflight=host_preflight,
                 host_preflight_sha256=preflight_sha,
             )
@@ -2177,6 +2311,7 @@ def review(
     checkout: Checkout,
     selection: dict[str, str],
     profiles: dict[str, dict[str, Any]],
+    release_index: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     """Assemble the review. It carries no digest map unless everything verified."""
 
@@ -2210,6 +2345,7 @@ def review(
                 store=store,
                 checkout=checkout,
                 profiles=profiles,
+                release_index=release_index,
                 host_preflight=host_preflight,
                 host_preflight_sha256=selection["host_preflight"],
             )
@@ -2495,6 +2631,7 @@ def check_approval(
     store: Store,
     checkout: Checkout,
     profiles: dict[str, dict[str, Any]],
+    release_index: dict[str, Any],
     profile_pins: dict[str, str],
     review_raw: bytes,
     approval_raw: bytes,
@@ -2513,7 +2650,9 @@ def check_approval(
     verify_ed25519(openssl, key, approval_raw, signature)
 
     claimed = parse_review(review_raw)
-    rebuilt, ok = review(store, checkout, claimed["evidence_sha256"], profiles)
+    rebuilt, ok = review(
+        store, checkout, claimed["evidence_sha256"], profiles, release_index
+    )
     require(ok, "review evidence no longer verifies")
     require(
         canonical_bytes(rebuilt) == review_raw,
@@ -2674,22 +2813,32 @@ def _retain(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
 
 def _verify(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     profiles = load_profiles(_profile_paths(args))
+    release_index = load_release_index(args.release_index)
     with Store(args.store) as store:
         return verify(
-            store, Checkout(args.checkout), args.host_preflight, args.record, profiles
+            store,
+            Checkout(args.checkout),
+            args.host_preflight,
+            args.record,
+            profiles,
+            release_index,
         )
 
 
 def _review(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     selection = {name: getattr(args, name) for name in EVIDENCE}
     profiles = load_profiles(_profile_paths(args))
+    release_index = load_release_index(args.release_index)
     with Store(args.store) as store:
-        return review(store, Checkout(args.checkout), selection, profiles)
+        return review(
+            store, Checkout(args.checkout), selection, profiles, release_index
+        )
 
 
 def _check(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     signature = read_input(args.signature, SIGNATURE_BYTES, "curator signature")
     profiles = load_profiles(_profile_paths(args))
+    release_index = load_release_index(args.release_index)
     pins = {name: getattr(args, name) for name in PIN_NAMES}
     with Store(args.store) as store:
         return (
@@ -2697,6 +2846,7 @@ def _check(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
                 store=store,
                 checkout=Checkout(args.checkout),
                 profiles=profiles,
+                release_index=release_index,
                 profile_pins=pins,
                 review_raw=read_input(args.review, MAX_OBJECT, "review"),
                 approval_raw=read_input(args.approval, MAX_APPROVAL, "approval"),
@@ -2726,6 +2876,8 @@ def _endpoint_set(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
 
 
 def _profile_arguments(command: argparse.ArgumentParser, *, required: bool) -> None:
+    # The release index always binds records; profiles are optional for verify.
+    command.add_argument("--release-index", type=Path, required=True)
     for name in PROFILE_INPUTS:
         flag = "--" + name.removesuffix("_sha256").replace("_", "-")
         command.add_argument(
