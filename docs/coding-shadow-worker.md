@@ -168,6 +168,22 @@ false, and every target list ships empty.
   daemon at `tcp://127.0.0.1:2375`. The daemon must also prove, live, that it
   runs rootless and carries the isolated-daemon label. When the value is unset,
   which is the default, every coding gate is refused.
+- **Coding runtime settings.** The coding harness uses its own settings, never
+  the ordinary scorer's: `DITTOBENCH_CODING_EGRESS_NETWORK` (the dedicated
+  daemon's egress-restricted network), `DITTOBENCH_CODING_EGRESS_PROXY`
+  (exactly `http://<private IPv4>:<port>`) and
+  `DITTOBENCH_CODING_HOST_GATEWAY_IP` (the private IPv4 that
+  `host.docker.internal` names inside that daemon's network namespace). All
+  three are required and default to empty, which refuses every coding gate
+  before any side effect. They never fall back to `DITTOBENCH_SANDBOX_*`, and a
+  coding proxy or gateway equal to the configured sandbox value is refused.
+  The coding harness gets no CA bundle: no OpenRouter shim mount and no
+  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` or
+  `NODE_EXTRA_CA_CERTS`. Its memory, tmpfs, CPU and pids limits are fixed
+  (3g, 512m, 2, 512) and ignore the `DITTOBENCH_SANDBOX_*` overrides. It also
+  carries no GitHub token and never relaxes the private-harness guard. Docker
+  CLI calls to the dedicated daemon drop every inherited `DOCKER_*` selector
+  and proxy variable.
 - **Targets.** The worker takes a lease only for an exact target:
   `VALIDATOR_CODING_CANARY_AGENT_IDS` (1 to 16 canonical agent UUIDs) together
   with `VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY`, which must equal this
@@ -251,9 +267,10 @@ That change must provide:
   include `rootless`;
 - its Unix socket mounted into the `dittobench-api` container and named by
   `DITTOBENCH_CODING_DOCKER_HOST`, never the rootful sandbox socket;
-- the scorer's coding sandbox profile against that daemon:
-  `DITTOBENCH_SANDBOX_EGRESS_NETWORK` and `DITTOBENCH_SANDBOX_EGRESS_PROXY`
-  (the coding harness requires both), and a reachable host gateway;
+- the coding runtime's own profile against that daemon:
+  `DITTOBENCH_CODING_EGRESS_NETWORK`, `DITTOBENCH_CODING_EGRESS_PROXY` and
+  `DITTOBENCH_CODING_HOST_GATEWAY_IP` (never the `DITTOBENCH_SANDBOX_*`
+  values, and no CA bundle);
 - the reviewed runtime image `repository@sha256:digest` preloaded on that
   daemon with the supervisor-contract label, because nothing is pulled at
   certify;

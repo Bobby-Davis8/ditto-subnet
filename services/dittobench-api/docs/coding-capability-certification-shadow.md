@@ -112,7 +112,10 @@ inference-grant digest, and settlement-set digest; legacy unbound receipts are
 evidence history, never private-task authority.
 The host constructs the adapter only when `DITTOBENCH_CODING_CANARY_ENABLED` is
 set, `DITTOBENCH_CODING_DOCKER_HOST` names a dedicated rootless daemon socket,
-and the certification pack root passes `LoadPublicPack`. The loader checks the
+the coding runtime's own `DITTOBENCH_CODING_EGRESS_NETWORK`,
+`DITTOBENCH_CODING_EGRESS_PROXY` and `DITTOBENCH_CODING_HOST_GATEWAY_IP` are
+valid (they never fall back to the sandbox settings, and the coding harness
+gets no CA bundle), and the certification pack root passes `LoadPublicPack`. The loader checks the
 grader files against the manifest's `grader_files`, the visible workspace
 against its pinned listing digest, and rejects any other file or link. The
 sandbox scorer image carries that pack at
