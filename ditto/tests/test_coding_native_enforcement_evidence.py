@@ -42,9 +42,12 @@ CATALOG_DIR = ROOT / "services/dittobench-api/internal/codingenforcement/catalog
 GOLDEN_RECORD = CATALOG_DIR / "testdata/golden-record-v1.json"
 CANONICAL_VECTOR = CATALOG_DIR / "testdata/canonical-vector-v1.json"
 EXPECTATION_VECTORS = CATALOG_DIR / "testdata/expectation-vectors-v1.json"
+DAEMON_IDENTITY_VECTOR = json.loads(
+    (CATALOG_DIR / "testdata/daemon-identity-vector-v1.json").read_bytes()
+)
 # Pinned identically in catalog/canonical_test.go.
 GOLDEN_RECORD_SHA256 = (
-    "8ed4ce9e831a20ae9bee4c60a865c44a3340c6098d4074615938c7446d8aff6c"
+    "ff6acb22aab1b6241f3d6790ec6f0fda0c5deeed8fd11a7207745167457c5360"
 )
 CANONICAL_VECTOR_SHA256 = (
     "1948b8f75bd3f0c25825ed268d2390e89ffe1993a37790ee740c19e5cd491a74"
@@ -59,7 +62,8 @@ MACHINE = digest("synthetic-machine-id")
 BOOT = "11111111-2222-3333-4444-555555555555"
 OTHER_BOOT = "99999999-2222-3333-4444-555555555555"
 KERNEL = "6.12.43+deb13-cloud-amd64"
-DAEMON = digest("synthetic-daemon")
+DAEMON_IDENTITY = DAEMON_IDENTITY_VECTOR["identity"]
+DAEMON = DAEMON_IDENTITY_VECTOR["identity_sha256"]
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 MANIFEST = digest("release-manifest")
 RUNTIME = digest("runtime-archive")
@@ -426,6 +430,7 @@ def preflight_value(tool_hashes: dict, checked_at: int) -> dict:
             "boot_id": BOOT,
             "kernel_release": KERNEL,
         },
+        "daemon_identity": copy.deepcopy(DAEMON_IDENTITY),
         "daemon_identity_sha256": DAEMON,
         "tool_sha256": dict(tool_hashes),
         "nft_snapshot_sha256": digest("nft"),
@@ -2122,6 +2127,31 @@ def test_verify_bounds_the_post_collection_preflight_age(world):
             "tool hash differs",
         ),
         (lambda v: v.update(extra=1), "keys are not the closed set"),
+        (
+            lambda v: v["daemon_identity"].update(server_version="29.9.9"),
+            "daemon identity digest differs from its identity",
+        ),
+        (
+            lambda v: v.update(daemon_identity_sha256=digest("synthetic-daemon")),
+            "daemon identity digest differs from its identity",
+        ),
+        (
+            lambda v: v["daemon_identity"].update(rootless=False),
+            "not the native rootless daemon",
+        ),
+        (
+            lambda v: v["daemon_identity"].update(security_options=["name=cgroupns"]),
+            "not the native rootless daemon",
+        ),
+        (
+            lambda v: v["daemon_identity"].update(engine_id="has space"),
+            "not the native rootless daemon",
+        ),
+        (lambda v: v["daemon_identity"].pop("engine_id"), "closed set"),
+        (
+            lambda v: v.update(schema="dittobench-coding-native-host-preflight-v2"),
+            "schema is unknown",
+        ),
     ],
 )
 def test_host_preflight_refusals(world, change, reason):
@@ -2582,8 +2612,11 @@ def approval_value(review_value: dict, **overrides) -> dict:
         "binding_sha256": hashlib.sha256(
             (ROOT / EVIDENCE.NATIVE_BINDING_FILE).read_bytes()
         ).hexdigest(),
+        "evidence_tool_sha256": hashlib.sha256(SCRIPT.read_bytes()).hexdigest(),
+        "curator_signing_key_sha256": digest("synthetic curator key"),
         "machine_id_sha256": MACHINE,
         "boot_id": BOOT,
+        "daemon_identity": copy.deepcopy(DAEMON_IDENTITY),
         "issued_at_unix": T0 + 4200,
         "expires_at_unix": T0 + 4200 + 3600,
         "controls": 16,
@@ -2599,6 +2632,7 @@ def approval_value(review_value: dict, **overrides) -> dict:
             for language in EVIDENCE.LANGUAGES
         },
         "evidence_sha256": dict(review_value.get("evidence_sha256", {})),
+        "profile_pins": dict(PINS),
         "shadow_only": True,
         "weight_eligible": False,
     }
@@ -2616,12 +2650,12 @@ class Approval:
         self.review_value = review_value
         self.review = self.directory / "review.json"
         self.review.write_bytes(canonical(review_value))
-        self.value = approval_value(review_value)
+        self.value = approval_value(
+            review_value, curator_signing_key_sha256=self.curator.key_sha256
+        )
 
     def write(self, value=None, *, signer=None) -> tuple[Path, Path]:
-        body = (
-            json.dumps(value or self.value, indent=2, sort_keys=True).encode() + b"\n"
-        )
+        body = canonical(value or self.value)
         approval = self.directory / "approval.json"
         approval.write_bytes(body)
         signature = (signer or self.curator).sign(body, self.directory / "approval.sig")
@@ -2709,6 +2743,28 @@ def test_check_approval_accepts_a_signed_consistent_approval(signed, capsys):
 
 
 @needs_openssl
+def test_check_approval_refuses_a_signed_noncanonical_approval(signed):
+    body = json.dumps(signed.value, indent=2, sort_keys=True).encode() + b"\n"
+    approval = signed.directory / "noncanonical.json"
+    approval.write_bytes(body)
+    signature = signed.curator.sign(body, signed.directory / "noncanonical.sig")
+    with pytest.raises(EVIDENCE.Refusal, match="not canonical"):
+        signed.check(approval=approval, signature=signature)
+
+
+@needs_openssl
+def test_check_approval_binds_the_evidenced_daemon_on_another_boot(signed):
+    """A different boot fails even when the daemon identity is unchanged."""
+
+    value = copy.deepcopy(signed.value)
+    value["boot_id"] = OTHER_BOOT
+    approval, signature = signed.write(value)
+    with pytest.raises(EVIDENCE.Refusal, match="boot differs"):
+        signed.check(approval=approval, signature=signature)
+    assert value["daemon_identity"] == DAEMON_IDENTITY
+
+
+@needs_openssl
 def test_check_approval_refuses_without_a_signature(signed, capsys):
     approval, signature = signed.write()
     signature.unlink()
@@ -2733,7 +2789,7 @@ def test_check_approval_signature_refusals(signed):
 
     tampered = signed.directory / "tampered.json"
     tampered.write_bytes(
-        approval.read_bytes().replace(b'"controls": 16', b'"controls": 32')
+        approval.read_bytes().replace(b'"controls":16', b'"controls":32')
     )
     with pytest.raises(EVIDENCE.Refusal, match="does not verify"):
         signed.check(approval=tampered, signature=signature)
@@ -2884,6 +2940,38 @@ def mismatch(**overrides):
             mismatch(issued_at_unix=T0 + 100 + 21601, expires_at_unix=T0 + 30000),
             "older than six hours",
         ),
+        (
+            mismatch(curator_signing_key_sha256=digest("another curator")),
+            "names another curator signing key",
+        ),
+        (
+            mismatch(evidence_tool_sha256=digest("another verifier")),
+            "verifier hash differs from the reviewed evidence tool",
+        ),
+        (
+            lambda value: value["profile_pins"].update(
+                connectivity_endpoint_set_sha256=digest("another endpoint set")
+            ),
+            "approval profile pins differ",
+        ),
+        (
+            lambda value: value["daemon_identity"].update(server_version="29.1.4"),
+            "daemon identity differs from the evidence daemon",
+        ),
+        (
+            lambda value: value["daemon_identity"].update(
+                engine_id="4f0c2a8e-5b7d-4e19-9a61-2c4d8b0e7f15"
+            ),
+            "daemon identity differs from the evidence daemon",
+        ),
+        (
+            lambda value: value["daemon_identity"].update(
+                socket_path="/run/user/1000/docker.sock"
+            ),
+            "rejected by native.policy",
+        ),
+        (lambda value: value.pop("daemon_identity"), "rejected by native.policy"),
+        (mismatch(schema=EVIDENCE.APPROVAL_SCHEMA[:-1] + "2"), "schema is unknown"),
     ],
 )
 def test_check_approval_refuses_inconsistent_approvals(signed, change, reason):
@@ -3038,7 +3126,10 @@ def test_evidence_tool_names_no_host_or_custody_surface():
     for forbidden in (
         "/var/lib/ditto-coding-custody",
         "/run/ditto-coding",
-        "docker",
+        "/var/lib/ditto-coding",
+        "/usr/bin/docker",
+        "docker.sock",
+        "DOCKER_",
         "/usr/sbin/nft",
         "systemctl",
         "/etc/machine-id",
@@ -3052,10 +3143,19 @@ def test_evidence_tool_names_no_host_or_custody_surface():
     assert "subprocess.run(" in source and "Popen" not in source
 
 
-def test_pinned_native_consumers_stay_untouched():
+def test_native_consumers_name_only_the_signature_verifier():
+    """native.py compiles the evidence tool to verify the curator signature.
+
+    It names that one file, and neither it, run.py nor the host preflight names
+    a collector, the probe runner or the Go enforcement packages.
+    """
+
     native = (ROOT / EVIDENCE.NATIVE_BINDING_FILE).read_text()
     inspector = (ROOT / "infra/scripts/inspect-coding-native-host.py").read_text()
-    for source in (native, inspector, (ROOT / EVIDENCE.NATIVE_RUNNER_FILE).read_text()):
+    runner = (ROOT / EVIDENCE.NATIVE_RUNNER_FILE).read_text()
+    verifier = 'VERIFIER = "infra/scripts/coding-native-evidence.py"'
+    assert native.count("coding-native-evidence") == 1 and verifier in native
+    for source in (native.replace(verifier, ""), inspector, runner):
         for name in TOOL_NAMES:
             assert name not in source
 
@@ -3507,7 +3607,10 @@ def test_connectivity_profile_rules_match_the_deployer(changes):
 def approval_for(world: World, issued: int) -> tuple["Approval", Path, Path]:
     signer = Approval(world)
     value = approval_value(
-        signer.review_value, issued_at_unix=issued, expires_at_unix=issued + 3600
+        signer.review_value,
+        issued_at_unix=issued,
+        expires_at_unix=issued + 3600,
+        curator_signing_key_sha256=signer.curator.key_sha256,
     )
     approval, signature = signer.write(value)
     return signer, approval, signature
