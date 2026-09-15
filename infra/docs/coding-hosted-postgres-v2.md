@@ -153,8 +153,11 @@ The role behaves as follows:
   variable named `coding_hosted_postgres_environment_*` except the `enabled`,
   `confirmation`, `source_revision` and `host` inputs and the captured gate,
   whether set by extra vars, inventory or vars files. Presetting the captured
-  gate only enables materialization, which every guard still decides. Extra vars
-  outrank registered results and set_facts. Without this check, a preset result such as
+  gate only enables materialization, which every guard still decides. A preset
+  loop `item` is refused too. Both checks list variable names with `varnames`
+  and never render a value, because `is defined` would render a raising
+  template and print its error. Extra vars outrank registered results and
+  set_facts. Without this check, a preset result such as
   `coding_hosted_postgres_environment_units` would disable the live-unit guard,
   and a preset `coding_hosted_postgres_environment_document` would replace both
   the file and the digest used to verify it. The separate removal role's
@@ -163,6 +166,12 @@ The role behaves as follows:
 - It gathers no facts. Host identity and the worker and custodian accounts come
   from registered `setup` and `getent` probes, because an `ansible_facts` extra
   var replaces gathered facts but not a registered result.
+- Every variable it reads is a documented input, a prefixed name the preset
+  check refuses, the refused loop `item`, or a magic variable extra vars cannot
+  override. `inventory_hostname` and `group_names` are host variables that an
+  extra var replaces, so group membership is proved from `groups` and
+  `ansible_play_hosts_all` instead: every host in the play must belong to
+  `role_coding_hosted`. Every message is fixed text.
 - Every operator input is captured once, with no loop item in scope and with a
   `default(..., true)` guard, so a lazily templated value cannot render one
   thing for a guard and another inside a loop, and a template that errors while
@@ -178,7 +187,11 @@ The role behaves as follows:
   `reloading`, `refreshing` (systemd 256 and later), `maintenance`, a future
   state or an unparseable line all refuse. An empty listing means no such unit
   is loaded and is allowed. The role stops nothing.
-- It writes each copy with `no_log` and without a diff.
+- It writes each copy with `no_log` and without a diff. Every target-side
+  module whose arguments, loop or result carry the password, the document, a
+  captured input or a checksum runs under `no_log`, so the module never writes
+  its invocation parameters to the target's journal and
+  `ansible_inject_invocation` returns nothing sensitive.
 - The unit state is re-checked after the write and again after verification.
   A unit could start between the pre-write listing and the write, so if any unit
   is no longer `inactive` or `failed` the role fails loudly, warning that a copy
@@ -219,7 +232,9 @@ tree, imported statically as the playbook does, under the repo's `ansible.cfg`
 and `-v --diff`, with a stand-in password. That rehearsal proves that a lazily
 templated gate, a gate templated to the password, a string `"true"` and
 `--start-at-task` at the write, the render, a guard or the include write
-nothing; that a lazily templated `host` writes the safe captured address rather
+nothing; that a preset loop `item`, a raising password variable, and an
+`inventory_hostname` and `group_names` forged for a host outside the group are
+refused; that `-vvv` with `ansible_inject_invocation` prints nothing sensitive; that a lazily templated `host` writes the safe captured address rather
 than the loop-time one; that preset results and document variables, forged
 `ansible_facts`, `refreshing`, `maintenance` and unknown unit states, and
 trailing-newline inputs are refused before anything is written; and that no
