@@ -45,6 +45,7 @@ CURATOR_SIGNING_KEY_SHA256 = (
 )
 PROFILE_PINS = {
     "connectivity_endpoint_set_sha256",
+    "enforcement_images_sha256",
     "execution_profile_sha256",
     "grading_profile_sha256",
 }
