@@ -1,81 +1,124 @@
 """Native PostgreSQL environment removal stays default-off, surgical and silent."""
 
 import copy
+import hashlib
+import importlib.util
 import json
 import os
 import pwd
 import re
+import shutil
 import socket
+import stat
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).parents[2]
 ROLE = ROOT / "infra/ansible/roles/coding_hosted_postgres_environment_cleanup"
-TASKS = (ROLE / "tasks/main.yml").read_text()
+MAIN = (ROLE / "tasks/main.yml").read_text()
+REMOVE = (ROLE / "tasks/remove.yml").read_text()
+MODULE_NAME = "coding_hosted_postgres_environment_unlink"
+MODULE_PATH = ROLE / f"library/{MODULE_NAME}.py"
 # Parsed tasks without YAML comments, for forbidden-token scans.
-PARSED = yaml.safe_dump(yaml.safe_load(TASKS), width=10_000)
+PARSED = yaml.safe_dump(yaml.safe_load(REMOVE), width=10_000)
+PARSED_MAIN = yaml.safe_dump(yaml.safe_load(MAIN), width=10_000)
+MATERIALIZE_ROLE = ROOT / "infra/ansible/roles/coding_hosted_postgres_environment"
 # The materialization role's guarded tasks live in its dynamically included file.
-MATERIALIZE = yaml.safe_load(
-    (
-        ROOT
-        / "infra/ansible/roles/coding_hosted_postgres_environment/tasks/materialize.yml"
-    ).read_text()
-)
+MATERIALIZE = yaml.safe_load((MATERIALIZE_ROLE / "tasks/materialize.yml").read_text())
 MATERIALIZE_HOST = "Require the exact host, source, database address and confirmation"
+MATERIALIZE_PRESET = "Refuse preset registered results and undocumented role inputs"
+PLAYBOOK = (
+    ROOT / "infra/ansible/playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml"
+)
+REPO_ANSIBLE_CFG = ROOT / "infra/ansible/ansible.cfg"
 
 CUSTODY = "/var/lib/ditto-coding-custody/private/postgres-environment.json"
 HOSTED = "/var/lib/ditto-coding-hosted/private/postgres-environment.json"
 COPIES = [CUSTODY, HOSTED]
-PARENTS = [
-    "/var/lib/ditto-coding-custody",
-    "/var/lib/ditto-coding-custody/private",
-    "/var/lib/ditto-coding-hosted",
-    "/var/lib/ditto-coding-hosted/private",
-]
 OWNERS = ("ditto-coding-custody", "ditto-coding-hosted")
+COPY_ITEMS = [
+    {"path": CUSTODY, "owner": "ditto-coding-custody"},
+    {"path": HOSTED, "owner": "ditto-coding-hosted"},
+]
+PARENT_ITEMS = [
+    {"path": "/var/lib/ditto-coding-custody", "owner": "ditto-coding-custody"},
+    {"path": "/var/lib/ditto-coding-custody/private", "owner": "ditto-coding-custody"},
+    {"path": "/var/lib/ditto-coding-hosted", "owner": "ditto-coding-hosted"},
+    {"path": "/var/lib/ditto-coding-hosted/private", "owner": "ditto-coding-hosted"},
+]
+PARENTS = [item["path"] for item in PARENT_ITEMS]
 PREFIX = "coding_hosted_postgres_environment_cleanup_"
+MATERIALIZE_PREFIX = "coding_hosted_postgres_environment_"
 INPUTS = {
     f"{PREFIX}enabled": False,
     f"{PREFIX}confirmation": "",
     f"{PREFIX}source_revision": "",
 }
-REVISION_VAR = f"{PREFIX}source_revision"
-VALIDATED_REVISION = (
-    f"{{{{ {REVISION_VAR} if {REVISION_VAR} is string and {REVISION_VAR} is "
-    f"match('^[0-9a-f]{{40}}$') and {REVISION_VAR} | length == 40 else 'invalid' }}}}"
-)
+FROZEN_GATE = f"{PREFIX}frozen_enabled"
+FROZEN_REVISION = f"{PREFIX}frozen_revision"
+FROZEN_CONFIRMATION = f"{PREFIX}frozen_confirmation"
+ALLOWED_AT_GUARD = sorted([*INPUTS, FROZEN_GATE])
+GATE = f"{FROZEN_GATE} is sameas true"
+REVISION_MESSAGE = f"source_revision={{{{ {FROZEN_REVISION} }}}}"
+CONFIRMATION = "REMOVE NATIVE CODING POSTGRES ENVIRONMENT"
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 REHEARSAL_GATE = "DITTO_ANSIBLE_REHEARSAL"
-PLAYBOOK = (
-    ROOT / "infra/ansible/playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml"
-)
 
+FREEZE_GATE = "Freeze the removal gate once, neutralising templates and loops"
+INCLUDE = "Remove the native PostgreSQL environment copies only when explicitly enabled"
+EXPLAIN = "Explain dormant native PostgreSQL environment removal"
 PRESET = "Refuse preset registered results and undocumented role inputs"
+FREEZE_INPUTS = "Freeze the removal inputs once, neutralising templates and loops"
 IDENTITY = "Probe this machine's identity into a result extra vars cannot preset"
 HOST = "Require the exact host, source and removal confirmation"
 LISTING = "List live worker and custody units"
 LIVE = "Refuse to remove credentials unless every listed unit is inactive or failed"
 PARENT_STAT = "Inspect the reader directories without following links"
-PARENT_CHECK = "Refuse a linked or non-directory parent"
+PARENT_CHECK = "Refuse a linked, non-directory, foreign-owned or shared-writable parent"
 COPY_STAT = "Inspect both exact copies as link metadata only"
 COPY_CHECK = (
     "Refuse anything but an absent copy or a regular single-link copy owned by its "
     "reader"
 )
 REMOVAL = "Unlink the present copies and report any partial removal"
-UNLINK = "Unlink each exact copy that exists and nothing else"
+UNLINK = (
+    "Unlink each exact copy that exists through a pinned directory and nothing else"
+)
 PARTIAL = "Report the copies unlinked before the removal failure and stop"
+RELIST = "Re-list live worker and custody units after removal"
+LIVE_AFTER = "Refuse if any unit became active during removal"
 AFTER_STAT = "Reinspect both exact paths without following links"
 AFTER_CHECK = "Require both exact copies to be absent"
 REPORT = "Report only the source revision and exact paths removed or already absent"
 
+UNIT_PATTERN = (
+    "^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\\\S+[.]service)"
+    "\\\\s+\\\\S+\\\\s+(inactive|failed)(\\\\s|$)"
+)
+LISTING_ARGV = [
+    "/usr/bin/systemctl",
+    "list-units",
+    "--all",
+    "--plain",
+    "--no-legend",
+    "--full",
+    "ditto-coding-hosted-worker.service",
+    "ditto-coding-custody@*.service",
+]
 
-def _block() -> list[dict]:
-    return yaml.safe_load(TASKS)[1]["block"]
+
+def _main() -> list[dict]:
+    return yaml.safe_load(MAIN)
+
+
+def _remove() -> list[dict]:
+    return yaml.safe_load(REMOVE)
 
 
 def _walk(tasks: list[dict]) -> Iterator[dict]:
@@ -86,7 +129,7 @@ def _walk(tasks: list[dict]) -> Iterator[dict]:
 
 
 def _task(name: str, tasks: list[dict] | None = None) -> dict:
-    (task,) = [task for task in _walk(tasks or _block()) if task["name"] == name]
+    (task,) = [task for task in _walk(tasks or _remove()) if task["name"] == name]
     return task
 
 
@@ -100,32 +143,195 @@ def _module(task: dict) -> str:
         "changed_when",
         "check_mode",
         "rescue",
+        "no_log",
     }
     return module
 
 
-def _flat(text: str) -> str:
+def _flat(text: object) -> str:
     return " ".join(str(text).split())
 
 
-def test_default_off_with_exact_confirmation_source_and_probed_host() -> None:
+def _messages(task: dict) -> list[str]:
+    return [
+        _flat(arguments[key])
+        for arguments in task.values()
+        if isinstance(arguments, dict)
+        for key in ("fail_msg", "msg")
+        if key in arguments
+    ]
+
+
+def _live_check(task: dict) -> str:
+    (that,) = task["ansible.builtin.assert"]["that"]
+    return _flat(that)
+
+
+def _expected_live_check(register: str) -> str:
+    return _flat(
+        f"{register}.stdout_lines | reject('match', '{UNIT_PATTERN}') "
+        "| list | length == 0"
+    )
+
+
+def _names(tasks: list[dict]) -> set[str]:
+    """Every variable name a task file creates by register or set_fact."""
+    names = set()
+    for task in _walk(tasks):
+        if "register" in task:
+            names.add(task["register"])
+        names.update(task.get("ansible.builtin.set_fact", {}))
+    return names
+
+
+# --------------------------------------------------------------------------- #
+# Structural tests                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_gate_is_frozen_once_behind_a_dynamic_include() -> None:
     defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
     assert defaults == INPUTS
-    explain, outer = yaml.safe_load(TASKS)
-    assert explain["when"] == (
-        "not (coding_hosted_postgres_environment_cleanup_enabled | bool)"
-    )
+    main = _main()
+    # A no_log freeze, a dynamic include gated on the frozen fact, and the dormant
+    # explanation. No block and no per-task gate left to re-evaluate.
+    assert [task["name"] for task in main] == [FREEZE_GATE, INCLUDE, EXPLAIN]
+    freeze, include, explain = main
+    assert freeze["no_log"] is True
+    assert freeze["ansible.builtin.set_fact"] == {
+        FROZEN_GATE: (
+            f"{{{{ ({PREFIX}enabled | default(false, true)) is sameas true }}}}"
+        )
+    }
+    assert include["ansible.builtin.include_tasks"] == "remove.yml"
+    assert include["when"] == GATE
+    assert explain["when"] == f"not ({GATE})"
     assert "no credential file is removed" in explain["ansible.builtin.debug"]["msg"]
-    assert outer["when"] == "coding_hosted_postgres_environment_cleanup_enabled | bool"
-    assert "vars" not in outer
-    assert [task["name"] for task in _block()[:3]] == [PRESET, IDENTITY, HOST]
+    # A static import would defeat --start-at-task; a block gate is re-evaluated.
+    assert "import_tasks" not in PARSED_MAIN and "block" not in PARSED_MAIN
+    # The raw flag is rendered only by the freeze.
+    assert [t["name"] for t in main if f"{PREFIX}enabled" in json.dumps(t)] == [
+        FREEZE_GATE
+    ]
+    (play,) = yaml.safe_load(PLAYBOOK.read_text())
+    assert play["gather_facts"] is False
 
+
+def test_no_bool_filter_can_print_a_coerced_value() -> None:
+    # ansible-core 2.21 prints any non-boolean string the bool filter coerces in
+    # a deprecation warning, even under no_log, so neither file uses it.
+    for text in (PARSED_MAIN, PARSED):
+        assert not re.search(r"\|\s*bool\b", text)
+    assert "sameas true" in PARSED_MAIN
+
+
+def test_preset_refusal_runs_first_and_is_the_single_source_of_truth() -> None:
+    tasks = _remove()
+    assert tasks[0]["name"] == PRESET
+    assert not any(
+        "register" in task or "ansible.builtin.set_fact" in task
+        for task in _walk(tasks[:1])
+    )
+    (that,) = _task(PRESET)["ansible.builtin.assert"]["that"]
+    assert _flat(that) == _flat(
+        f"lookup('ansible.builtin.varnames', '^{PREFIX}', wantlist=True) | sort == "
+        "[" + ", ".join(f"'{name}'" for name in ALLOWED_AT_GUARD) + "]"
+    )
+    # Main freezes only the gate before the guard; everything remove.yml creates
+    # is prefixed and absent from the allow-list, so presetting it is refused.
+    assert _names(_main()) == {FROZEN_GATE}
+    created = _names(tasks)
+    assert created == {
+        FROZEN_CONFIRMATION,
+        FROZEN_REVISION,
+        f"{PREFIX}identity",
+        f"{PREFIX}units",
+        f"{PREFIX}directories",
+        f"{PREFIX}copies",
+        f"{PREFIX}unlinked",
+        f"{PREFIX}units_after_removal",
+        f"{PREFIX}after",
+    }
+    assert all(name.startswith(PREFIX) for name in created)
+    assert not created & set(ALLOWED_AT_GUARD)
+    message = _task(PRESET)["ansible.builtin.assert"]["fail_msg"]
+    assert "{{" not in message and "Nothing was removed" in message
+
+
+def test_prefix_patterns_stay_distinct_from_the_materialization_role() -> None:
+    cleanup_names = set(INPUTS) | _names(_main()) | _names(_remove())
+    materialize_defaults = yaml.safe_load(
+        (MATERIALIZE_ROLE / "defaults/main.yml").read_text()
+    )
+    materialize_main = yaml.safe_load((MATERIALIZE_ROLE / "tasks/main.yml").read_text())
+    materialize_names = (
+        set(materialize_defaults) | _names(materialize_main) | _names(MATERIALIZE)
+    )
+    assert materialize_names and cleanup_names
+    # This role's guard pattern never matches a materialization name, and every
+    # name this role creates is one the materialization guard excludes.
+    cleanup_pattern = re.compile(f"^{PREFIX}")
+    assert not any(cleanup_pattern.match(name) for name in materialize_names)
+    assert all(cleanup_pattern.match(name) for name in cleanup_names)
+    (materialize_that,) = _task(MATERIALIZE_PRESET, MATERIALIZE)[
+        "ansible.builtin.assert"
+    ]["that"]
+    lookup, exclusion = re.findall(r"'(\^[a-z_]+)'", _flat(materialize_that))[:2]
+    assert lookup == f"^{MATERIALIZE_PREFIX}"
+    assert exclusion == f"^{PREFIX}"
+    assert all(re.match(lookup, name) for name in cleanup_names)
+    assert all(re.match(exclusion, name) for name in cleanup_names)
+    assert not any(re.match(exclusion, name) for name in materialize_names)
+
+
+def test_inputs_are_frozen_once_and_never_rendered_into_messages() -> None:
+    freeze = _task(FREEZE_INPUTS)
+    assert freeze["no_log"] is True
+    assert freeze["ansible.builtin.set_fact"] == {
+        FROZEN_CONFIRMATION: f"{{{{ {PREFIX}confirmation | default('', true) }}}}",
+        FROZEN_REVISION: f"{{{{ {PREFIX}source_revision | default('', true) }}}}",
+    }
+    tasks = _remove()
+    assert [task["name"] for task in tasks[:4]] == [
+        PRESET,
+        FREEZE_INPUTS,
+        IDENTITY,
+        HOST,
+    ]
+    after_freeze = tasks[tasks.index(freeze) + 1 :]
+    for raw in INPUTS:
+        offenders = [
+            task["name"]
+            for task in _walk(after_freeze)
+            if re.search(rf"\b{raw}\b", json.dumps(task))
+        ]
+        assert offenders == [], (raw, offenders)
+    # No message renders anything until the host check has validated the frozen
+    # revision's exact shape; after that a message may name only that revision,
+    # registered results and check mode.
+    host_index = tasks.index(_task(HOST))
+    for task in _walk(tasks[: host_index + 1]):
+        assert all("{{" not in message for message in _messages(task)), task["name"]
+    allowed = {
+        FROZEN_REVISION,
+        f"{PREFIX}unlinked",
+        f"{PREFIX}copies",
+        "ansible_check_mode",
+    }
+    for task in _walk(tasks[host_index + 1 :]):
+        for message in _messages(task):
+            referenced = set(
+                re.findall(r"\b(coding_hosted_\w+|ansible_\w+)\b", message)
+            )
+            assert referenced <= allowed, (task["name"], referenced - allowed)
+
+
+def test_probed_host_check_matches_the_materialization_literals() -> None:
     identity = _task(IDENTITY)
     assert identity["ansible.builtin.setup"] == {
         "gather_subset": ["!all", "!min", "platform", "distribution"]
     }
     assert identity["register"] == f"{PREFIX}identity"
-
     # Same literals as the materialization host check, both read from a
     # registered probe: a -e ansible_facts value replaces gathered facts.
     materialize_host = _task(MATERIALIZE_HOST, MATERIALIZE)
@@ -145,42 +351,19 @@ def test_default_off_with_exact_confirmation_source_and_probed_host() -> None:
     assert _task(HOST)["ansible.builtin.assert"]["that"] == [
         inventory,
         *probed,
-        f"{REVISION_VAR} is string",
-        f"{REVISION_VAR} is match('^[0-9a-f]{{40}}$')",
-        f"{REVISION_VAR} | length == 40",
-        f"{PREFIX}confirmation == 'REMOVE NATIVE CODING POSTGRES ENVIRONMENT'",
+        f"{FROZEN_REVISION} is string",
+        f"{FROZEN_REVISION} is match('^[0-9a-f]{{40}}$')",
+        f"{FROZEN_REVISION} | length == 40",
+        f"{FROZEN_CONFIRMATION} == '{CONFIRMATION}'",
     ]
     hostname = "ansible_hostname == 'ditto-coding-hosted-v2'"
     assert f"{PREFIX}identity.ansible_facts.{hostname}" in probed
     assert PARSED.count("ansible_facts") == PARSED.count(
         f"{PREFIX}identity.ansible_facts"
     )
-    (play,) = yaml.safe_load(PLAYBOOK.read_text())
-    assert play["gather_facts"] is False
-
-
-def test_preset_results_and_undocumented_inputs_are_refused_before_any_register() -> (
-    None
-):
-    block = _block()
-    preset = block[0]
-    assert preset["name"] == PRESET
-    assert not any("register" in task for task in _walk([preset]))
-    registered = [task["register"] for task in _walk(block) if "register" in task]
-    assert len(registered) == len(set(registered)) == 6
-    assert all(name.startswith(PREFIX) for name in registered)
-    that = preset["ansible.builtin.assert"]["that"]
-    assert that[:-1] == [f"{name} is not defined" for name in registered]
-    assert _flat(that[-1]) == _flat(
-        f"lookup('ansible.builtin.varnames', '^{PREFIX}', wantlist=True) | sort == "
-        + "["
-        + ", ".join(f"'{name}'" for name in sorted(INPUTS))
-        + "]"
-    )
-    assert f"source_revision={VALIDATED_REVISION}" in _flat(
-        preset["ansible.builtin.assert"]["fail_msg"]
-    )
-    assert "Nothing was removed" in preset["ansible.builtin.assert"]["fail_msg"]
+    # A '$' anchor alone accepts one trailing newline; the exact length refuses it.
+    assert re.match("^[0-9a-f]{40}$", REVISION + "\n")
+    assert len(REVISION + "\n") != 40
 
 
 ALLOWED_UNIT_LINES = [
@@ -207,56 +390,72 @@ REFUSED_UNIT_LINES = [
 
 
 def test_live_unit_refusal_is_an_allow_list_over_the_materialization_listing() -> None:
-    names = [task["name"] for task in _block()]
-    assert names[3:5] == [LISTING, LIVE]
+    names = [task["name"] for task in _remove()]
+    assert names[4:6] == [LISTING, LIVE]
     listing = _task(LISTING)
-    original = _task("List live worker and custody units", MATERIALIZE)
+    original = _task(LISTING, MATERIALIZE)
     assert listing["ansible.builtin.command"] == original["ansible.builtin.command"]
+    assert listing["ansible.builtin.command"]["argv"] == LISTING_ARGV
     assert listing["register"] == f"{PREFIX}units"
     assert listing["check_mode"] is False and listing["changed_when"] is False
-    (refuse,) = _task(LIVE)["ansible.builtin.assert"]["that"]
-    pattern = (
-        "^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\\\S+[.]service)"
-        "\\\\s+\\\\S+\\\\s+(inactive|failed)(\\\\s|$)"
-    )
-    assert _flat(refuse) == _flat(
-        f"{PREFIX}units.stdout_lines | reject('match', '{pattern}') "
-        "| list | length == 0"
-    )
+    assert _live_check(_task(LIVE)) == _expected_live_check(f"{PREFIX}units")
     # Jinja decodes the doubled backslashes; Ansible's match test is re.match.
-    regex = re.compile(pattern.replace("\\\\", "\\"))
+    regex = re.compile(UNIT_PATTERN.replace("\\\\", "\\"))
     for line in ALLOWED_UNIT_LINES:
         assert regex.match(line), line
     for line in REFUSED_UNIT_LINES:
         assert not regex.match(line), line
-    # The listing is the only systemctl use; nothing is stopped, killed or disabled.
-    assert PARSED.count("systemctl") == 1
+    # The listings are the only systemctl use; nothing is stopped or killed.
+    assert PARSED.count("systemctl") == 2  # before and after removal
     for forbidden in ("systemd", "service:", "state: stopped", "kill", "is-active"):
         assert forbidden not in PARSED, forbidden
 
 
+def test_unit_state_is_rechecked_after_removal() -> None:
+    names = [task["name"] for task in _remove()]
+    relist = _task(RELIST)
+    assert relist["ansible.builtin.command"]["argv"] == LISTING_ARGV
+    assert relist["register"] == f"{PREFIX}units_after_removal"
+    assert relist["check_mode"] is False and relist["changed_when"] is False
+    assert names.index(RELIST) == names.index(REMOVAL) + 1
+    assert names.index(LIVE_AFTER) == names.index(RELIST) + 1
+    assert _live_check(_task(LIVE_AFTER)) == _expected_live_check(
+        f"{PREFIX}units_after_removal"
+    )
+    assert "mid-removal" in _task(LIVE_AFTER)["ansible.builtin.assert"]["fail_msg"]
+
+
 def test_only_the_two_exact_copies_are_ever_removed() -> None:
-    tasks = list(_walk(yaml.safe_load(TASKS)))
-    modules = {_module(task) for task in tasks}
+    assert {_module(task) for task in _main()} == {
+        "ansible.builtin.set_fact",
+        "ansible.builtin.include_tasks",
+        "ansible.builtin.debug",
+    }
+    tasks = list(_walk(_remove()))
     # No file, shell, copy, find or other module that could create, recurse or read.
-    assert modules == {
+    assert {_module(task) for task in tasks} == {
         "block",
         "ansible.builtin.assert",
         "ansible.builtin.command",
         "ansible.builtin.debug",
         "ansible.builtin.fail",
+        "ansible.builtin.set_fact",
         "ansible.builtin.setup",
         "ansible.builtin.stat",
+        MODULE_NAME,
     }
     commands = [task["name"] for task in tasks if "ansible.builtin.command" in task]
-    assert commands == [LISTING, UNLINK]
+    assert commands == [LISTING, RELIST]
+    assert sorted(path.name for path in (ROLE / "library").iterdir()) == [
+        f"{MODULE_NAME}.py"
+    ]
     unlink = _task(UNLINK)
-    assert unlink["ansible.builtin.command"] == {
-        "argv": ["/usr/bin/unlink", "{{ item }}"]
+    assert unlink[MODULE_NAME] == {
+        "path": "{{ item.path }}",
+        "owner": "{{ item.owner }}",
     }
-    assert unlink["loop"] == COPIES
-    assert unlink["changed_when"] is True
-    literals = set(re.findall(r"/var/lib/[^\s'\",\]}]*", TASKS))
+    assert unlink["loop"] == COPY_ITEMS
+    literals = set(re.findall(r"/var/lib/[^\s'\",\]}]*", REMOVE))
     assert literals == {*COPIES, *PARENTS}
     for forbidden in (
         "state: absent",
@@ -270,8 +469,19 @@ def test_only_the_two_exact_copies_are_ever_removed() -> None:
         "with_",
         "removes:",
         "*.json",
+        "/usr/bin/unlink",
     ):
         assert forbidden not in PARSED, forbidden
+    source = MODULE_PATH.read_text()
+    for forbidden in (
+        "shutil",
+        "rmtree",
+        "rmdir",
+        "os.remove(",
+        "subprocess",
+        "open(path",
+    ):
+        assert forbidden not in source, forbidden
 
 
 def _only(tasks: list[dict], module: str) -> dict:
@@ -294,12 +504,13 @@ def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
     assert set(homes) == set(OWNERS)
     assert [item["owner"] for item in written] == list(OWNERS)
     assert [item["path"] for item in written] == COPIES
+    assert written == COPY_ITEMS
 
     assert _task(COPY_STAT)["loop"] == written
-    assert _task(UNLINK)["loop"] == [item["path"] for item in written]
+    assert _task(UNLINK)["loop"] == written
     assert _task(AFTER_STAT)["loop"] == [item["path"] for item in written]
 
-    parents: list[str] = []
+    parents: list[dict] = []
     for item in written:
         (directory,) = [
             entry
@@ -308,15 +519,20 @@ def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
         ]
         assert directory["owner"] == item["owner"]
         assert str(Path(directory["path"]).parent) == homes[item["owner"]]
-        parents += [homes[item["owner"]], directory["path"]]
-    assert _task(PARENT_STAT)["loop"] == parents == PARENTS
-    assert set(re.findall(r"/var/lib/[^\s'\",\]}]*", TASKS)) == {*parents, *COPIES}
+        parents += [
+            {"path": homes[item["owner"]], "owner": item["owner"]},
+            {"path": directory["path"], "owner": item["owner"]},
+        ]
+    assert _task(PARENT_STAT)["loop"] == parents == PARENT_ITEMS
+    assert _only(MATERIALIZE, "ansible.builtin.file")["ansible.builtin.file"][
+        "mode"
+    ] == ("0700")
 
 
 def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
-    block = _block()
-    assert [task["name"] for task in block] == [
+    assert [task["name"] for task in _remove()] == [
         PRESET,
+        FREEZE_INPUTS,
         IDENTITY,
         HOST,
         LISTING,
@@ -326,24 +542,24 @@ def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
         COPY_STAT,
         COPY_CHECK,
         REMOVAL,
+        RELIST,
+        LIVE_AFTER,
         AFTER_STAT,
         AFTER_CHECK,
         REPORT,
     ]
     for name in (PARENT_STAT, COPY_STAT, AFTER_STAT):
-        stat = _task(name)["ansible.builtin.stat"]
-        assert stat["follow"] is False
-        assert stat["get_checksum"] is False
-        assert stat["get_mime"] is False
-        assert stat["get_attributes"] is False
-    assert _task(PARENT_STAT)["loop"] == PARENTS
-    assert _task(PARENT_CHECK)["ansible.builtin.assert"]["that"] == [
-        "not item.stat.exists or (item.stat.isdir and not item.stat.islnk)"
-    ]
-    assert _task(COPY_STAT)["loop"] == [
-        {"path": CUSTODY, "owner": "ditto-coding-custody"},
-        {"path": HOSTED, "owner": "ditto-coding-hosted"},
-    ]
+        arguments = _task(name)["ansible.builtin.stat"]
+        assert arguments["follow"] is False
+        assert arguments["get_checksum"] is False
+        assert arguments["get_mime"] is False
+        assert arguments["get_attributes"] is False
+    (parent,) = _task(PARENT_CHECK)["ansible.builtin.assert"]["that"]
+    assert _flat(parent) == (
+        "not item.stat.exists or (item.stat.isdir and not item.stat.islnk and "
+        "item.stat.pw_name | default('') == item.item.owner and "
+        "not item.stat.wgrp and not item.stat.woth)"
+    )
     (sealed,) = _task(COPY_CHECK)["ansible.builtin.assert"]["that"]
     assert _flat(sealed) == (
         "not item.stat.exists or (item.stat.isreg and not item.stat.islnk and "
@@ -351,10 +567,9 @@ def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
     )
     # Removal is limited to the copies whose lstat result proved them present.
     assert _flat(_task(UNLINK)["when"]) == (
-        "item in (coding_hosted_postgres_environment_cleanup_copies.results | "
+        f"item.path in ({PREFIX}copies.results | "
         "selectattr('stat.exists') | map(attribute='item.path') | list)"
     )
-    assert _task(AFTER_STAT)["loop"] == COPIES
     assert _task(AFTER_CHECK)["ansible.builtin.assert"]["that"] == [
         "not item.stat.exists"
     ]
@@ -368,10 +583,11 @@ def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
         "gcloud",
         "set -x",
     ):
-        assert forbidden not in PARSED, forbidden
+        assert forbidden not in PARSED + PARSED_MAIN, forbidden
     # The only lookup lists variable names; nothing reads env, files or pipes.
     assert PARSED.count("lookup(") == 1
     assert PARSED.count("lookup('ansible.builtin.varnames'") == 1
+    assert "lookup(" not in PARSED_MAIN
 
 
 def test_removal_failure_reports_partial_progress_and_still_fails() -> None:
@@ -382,13 +598,13 @@ def test_removal_failure_reports_partial_progress_and_still_fails() -> None:
     unlinked = f"{PREFIX}unlinked"
     assert _task(UNLINK)["register"] == unlinked
     succeeded = (
-        f"{unlinked}.results | default([]) | selectattr('rc', 'defined') | "
-        "selectattr('rc', 'equalto', 0) | map(attribute='item')"
+        f"{unlinked}.results | default([]) | selectattr('state', 'defined') | "
+        "selectattr('state', 'equalto', 'removed') | map(attribute='item.path')"
     )
     # ansible.builtin.fail re-raises: a rescued removal failure still fails the host.
     assert _flat(_task(PARTIAL)["ansible.builtin.fail"]["msg"]) == _flat(
         "Native Coding PostgreSQL environment cleanup failed during removal; "
-        f"source_revision={{{{ {REVISION_VAR} }}}}; "
+        f"{REVISION_MESSAGE}; "
         f"removed={{{{ {succeeded} | list | to_json }}}}; "
         f"not_removed={{{{ {PREFIX}copies.results | selectattr('stat.exists') | "
         f"map(attribute='item.path') | reject('in', {succeeded} | list) "
@@ -397,18 +613,17 @@ def test_removal_failure_reports_partial_progress_and_still_fails() -> None:
     )
 
 
-def test_revision_is_reported_on_success_and_in_every_failure_message() -> None:
+def test_validated_revision_is_reported_after_the_host_check_only() -> None:
     for name in (PRESET, HOST):
         message = _flat(_task(name)["ansible.builtin.assert"]["fail_msg"])
-        assert message.endswith(f"source_revision={VALIDATED_REVISION}"), name
-    # Later guards run only after HOST validated the revision's exact shape.
-    for name in (LIVE, PARENT_CHECK, COPY_CHECK, AFTER_CHECK):
+        assert "source_revision=" not in message and "{{" not in message, name
+    for name in (LIVE, PARENT_CHECK, COPY_CHECK, LIVE_AFTER, AFTER_CHECK):
         message = _flat(_task(name)["ansible.builtin.assert"]["fail_msg"])
-        assert message.endswith(f"source_revision={{{{ {REVISION_VAR} }}}}"), name
+        assert message.endswith(REVISION_MESSAGE), name
     report = _flat(_task(REPORT)["ansible.builtin.debug"]["msg"])
     assert report == _flat(
         "Native Coding PostgreSQL environment cleanup; "
-        f"source_revision={{{{ {REVISION_VAR} }}}}; "
+        f"{REVISION_MESSAGE}; "
         "{{ 'would_remove' if ansible_check_mode else 'removed' }}={{ "
         f"{PREFIX}copies.results | selectattr('stat.exists') | "
         "map(attribute='item.path') | list | to_json }}; already_absent={{ "
@@ -435,9 +650,8 @@ def test_playbook_fixture_ci_and_docs_registration() -> None:
     workflow = (ROOT / ".github/workflows/infra-ci.yml").read_text()
     assert "playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml" in workflow
     assert "tests/coding-hosted-postgres-environment-cleanup.yml" in workflow
-    docs = (ROOT / "infra/docs/coding-hosted-postgres-v2.md").read_text()
-    section = _flat(docs.split("## Removal and rotation", 1)[1])
-    assert "REMOVE NATIVE CODING POSTGRES ENVIRONMENT" in section
+    section = _removal_docs()
+    assert CONFIRMATION in section
     assert "platform-db-password" in section
     assert "does not rotate" in section
     assert "`inactive` or `failed`" in section
@@ -445,9 +659,36 @@ def test_playbook_fixture_ci_and_docs_registration() -> None:
     assert "extra vars" in section
 
 
-def test_docs_name_every_password_holder_and_order_rotation() -> None:
+def _removal_docs() -> str:
     docs = (ROOT / "infra/docs/coding-hosted-postgres-v2.md").read_text()
-    section = _flat(docs.split("## Removal and rotation", 1)[1])
+    return _flat(docs.split("## Removal and rotation", 1)[1])
+
+
+def test_docs_describe_every_removal_bypass_guard_and_residual() -> None:
+    section = _removal_docs()
+    for phrase in (
+        "frozen once",
+        "dynamic `include_tasks`",
+        "`--start-at-task`",
+        "`is sameas true`",
+        "deprecation warning",
+        "`default(..., true)`",
+        "never renders an input",
+        "`O_NOFOLLOW`",
+        "`unlinkat`",
+        "owned by its reader",
+        "re-checked after the unlink",
+        "mid-removal",
+        "`exception`",
+        "lookup('file', lookup('env', 'DITTO_CODING_PG_PASSWORD'))",
+        "`DITTO_ANSIBLE_REHEARSAL=1`",
+        "SHA-1, MD5 and SHA-256",
+    ):
+        assert phrase in section, phrase
+
+
+def test_docs_name_every_password_holder_and_order_rotation() -> None:
+    section = _removal_docs()
     assert "does not revoke any credential" in section
     runtime = (
         ROOT / "apps/platform/ditto/api_server/coding_hosted_runtime.py"
@@ -491,7 +732,9 @@ def test_rehearsal_runs_only_in_the_infra_ansible_job() -> None:
     infra = yaml.safe_load((workflows / "infra-ci.yml").read_text())
     this_file = str(Path(__file__).relative_to(ROOT))
     for trigger in ("pull_request", "push"):
-        assert this_file in infra[True][trigger]["paths"]
+        paths = infra[True][trigger]["paths"]
+        assert this_file in paths
+        assert "pyproject.toml" in paths and "uv.lock" in paths
     # The materialization rehearsal shares the gate, so select this file's step.
     (step,) = [
         step
@@ -524,41 +767,392 @@ def test_rehearsal_runs_only_in_the_infra_ansible_job() -> None:
             assert REHEARSAL_GATE not in other.read_text(), other.name
 
 
-# Local rehearsal: the role's own enabled tasks run through ansible-core 2.21.2
-# against a temporary tree. Only this test rewrites paths, owners and the unit
-# listing; the role has no such inputs. Normal passes drop the identity probe
-# and host check, which only the dedicated forged-identity pass keeps.
+# --------------------------------------------------------------------------- #
+# Directory-fd unlink module: exercised directly, without ansible-core        #
+# --------------------------------------------------------------------------- #
 
+
+def _unlink_module() -> Any:
+    spec = importlib.util.spec_from_file_location(MODULE_NAME, MODULE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Never leave a __pycache__ beside the role's module.
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+def _reader_tree(root: Path, home: str = "ditto-coding-custody") -> Path:
+    """Create <root>/var/lib/<home>/private as 0700 directories; return private."""
+    private = root / "var/lib" / home / "private"
+    private.mkdir(parents=True)
+    for directory in (private.parent, private):
+        directory.chmod(0o700)
+    return private
+
+
+def _plant(private: Path, body: str = "[]") -> Path:
+    target = private / "postgres-environment.json"
+    target.write_text(body)
+    target.chmod(0o600)
+    return target
+
+
+def test_unlink_module_removes_only_a_regular_owned_single_link_copy(tmp_path) -> None:
+    module = _unlink_module()
+    uid = os.getuid()
+    private = _reader_tree(tmp_path.resolve())
+    target = _plant(private)
+    sibling = private / "custody-key.pem"
+    sibling.write_text("key")
+    path = str(target)
+    assert module.remove_copy(path, uid, check_mode=True) == "would_remove"
+    assert target.exists()
+    assert module.remove_copy(path, uid) == "removed"
+    assert not target.exists() and sibling.read_text() == "key"
+    assert private.is_dir()
+    assert module.remove_copy(path, uid) == "absent"
+    shutil.rmtree(private.parent)
+    assert module.remove_copy(path, uid) == "absent"
+
+
+def test_unlink_module_refuses_links_directories_hard_links_and_foreign_owners(
+    tmp_path,
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    module = _unlink_module()
+    uid = os.getuid()
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside")
+
+    link = _reader_tree(tmp_path / "link") / "postgres-environment.json"
+    link.symlink_to(outside)
+    directory = _reader_tree(tmp_path / "directory") / "postgres-environment.json"
+    directory.mkdir()
+    hard = _plant(_reader_tree(tmp_path / "hard"))
+    os.link(hard, hard.with_name("evidence-link.json"))
+    foreign = _plant(_reader_tree(tmp_path / "foreign"))
+
+    for path, owner_uid in (
+        (link, uid),
+        (directory, uid),
+        (hard, uid),
+        (foreign, uid + 1),
+    ):
+        with pytest.raises(module.UnsafeCopy):
+            module.remove_copy(str(path), owner_uid)
+    assert link.is_symlink() and outside.read_text() == "outside"
+    assert directory.is_dir()
+    assert hard.read_text() == "[]" and hard.stat().st_nlink == 2
+    # uid + 1 does not own the home, so the refusal comes before the file check.
+    assert foreign.read_text() == "[]"
+
+
+def test_unlink_module_refuses_linked_foreign_or_shared_writable_parents(
+    tmp_path,
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    module = _unlink_module()
+    uid = os.getuid()
+    elsewhere = _plant(_reader_tree(tmp_path / "elsewhere"))
+
+    linked_private = tmp_path / "linked_private/var/lib/ditto-coding-custody"
+    linked_private.mkdir(parents=True, mode=0o700)
+    linked_private.chmod(0o700)
+    (linked_private / "private").symlink_to(elsewhere.parent)
+
+    linked_home = tmp_path / "linked_home/var/lib"
+    linked_home.mkdir(parents=True)
+    (linked_home / "ditto-coding-custody").symlink_to(elsewhere.parent.parent)
+
+    writable = _reader_tree(tmp_path / "writable")
+    _plant(writable)
+    writable.chmod(0o770)
+
+    file_parent = tmp_path / "file_parent/var/lib/ditto-coding-custody"
+    file_parent.mkdir(parents=True)
+    file_parent.chmod(0o700)
+    (file_parent / "private").write_text("not a directory")
+
+    cases = [
+        (linked_private / "private/postgres-environment.json", uid),
+        (linked_home / "ditto-coding-custody/private/postgres-environment.json", uid),
+        (writable / "postgres-environment.json", uid),
+        (file_parent / "private/postgres-environment.json", uid),
+        (elsewhere, uid + 1),
+    ]
+    for path, owner_uid in cases:
+        with pytest.raises(module.UnsafeCopy):
+            module.remove_copy(str(path), owner_uid)
+    assert elsewhere.read_text() == "[]"
+    assert (writable / "postgres-environment.json").read_text() == "[]"
+
+
+def test_unlink_module_checks_the_owner_and_mode_of_both_reader_directories(
+    tmp_path, monkeypatch
+) -> None:
+    # An unprivileged test cannot chown, so report another owner through fstat
+    # for exactly one pinned directory at a time: the home, then private.
+    tmp_path = tmp_path.resolve()
+    module = _unlink_module()
+    uid = os.getuid()
+    target = _plant(_reader_tree(tmp_path))
+    real_fstat = os.fstat
+    for foreign_call in (0, 1):
+        calls: list[int] = []
+
+        def fstat(
+            fd: int, foreign_call: int = foreign_call, calls: list[int] = calls
+        ) -> os.stat_result:
+            info = real_fstat(fd)
+            calls.append(fd)
+            if len(calls) - 1 != foreign_call:
+                return info
+            fields = list(info)
+            fields[stat.ST_UID] = uid + 1
+            return os.stat_result(fields)
+
+        monkeypatch.setattr(module.os, "fstat", fstat)
+        with pytest.raises(module.UnsafeCopy, match="not owned by the reader"):
+            module.remove_copy(str(target), uid)
+        monkeypatch.setattr(module.os, "fstat", real_fstat)
+        assert len(calls) == foreign_call + 1
+    # A group-writable home is refused as well as a group-writable private.
+    target.parent.parent.chmod(0o770)
+    with pytest.raises(module.UnsafeCopy, match="reader home directory is writable"):
+        module.remove_copy(str(target), uid)
+    target.parent.parent.chmod(0o700)
+    assert module.remove_copy(str(target), uid) == "removed"
+
+
+def test_unlink_module_refuses_every_path_but_an_exact_copy() -> None:
+    module = _unlink_module()
+    for path in (
+        "var/lib/ditto-coding-custody/private/postgres-environment.json",
+        "/var/lib/ditto-coding-custody/private/../private/postgres-environment.json",
+        "/var/lib//ditto-coding-custody/private/postgres-environment.json",
+        "/var/lib/ditto-coding-custody/private/postgres-environment.json/",
+        "/var/lib/ditto-coding-custody/keys/postgres-environment.json",
+        "/var/lib/ditto-coding-custody/private/custody-key.pem",
+        "/private/postgres-environment.json",
+    ):
+        with pytest.raises(module.UnsafeCopy):
+            module.split_target(path)
+    assert module.split_target(CUSTODY) == [
+        "var",
+        "lib",
+        "ditto-coding-custody",
+        "private",
+    ]
+
+
+def test_unlink_module_removes_through_the_pinned_directory_after_a_parent_swap(
+    tmp_path,
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    module = _unlink_module()
+    uid = os.getuid()
+    private = _reader_tree(tmp_path)
+    target = _plant(private)
+    victim = _plant(_reader_tree(tmp_path / "victim", home="ditto-coding-hosted"))
+    fd = module.open_private_directory(str(target), uid)
+    try:
+        # The reader swaps its private directory for a symlink to another
+        # directory holding a same-named file after the parents were pinned.
+        moved = private.with_name("private-moved")
+        private.rename(moved)
+        private.symlink_to(victim.parent)
+        # A path-based unlink would now resolve into the victim directory.
+        assert os.path.realpath(target) == str(victim)
+        assert module.unlink_in(fd, uid) == "removed"
+    finally:
+        os.close(fd)
+    assert victim.read_text() == "[]"
+    assert not (moved / "postgres-environment.json").exists()
+
+
+def test_unlink_module_never_removes_a_directory_or_link_target_swapped_in_late(
+    tmp_path, monkeypatch
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    module = _unlink_module()
+    uid = os.getuid()
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside")
+    real_lstat = module.lstat_entry
+
+    def swap_after_inspection(replacement: str):
+        def inspect(dir_fd: int) -> os.stat_result:
+            info = real_lstat(dir_fd)
+            os.unlink("postgres-environment.json", dir_fd=dir_fd)
+            if replacement == "directory":
+                os.mkdir("postgres-environment.json", dir_fd=dir_fd)
+            else:
+                os.symlink(outside, "postgres-environment.json", dir_fd=dir_fd)
+            monkeypatch.setattr(module, "lstat_entry", real_lstat)
+            return info
+
+        return inspect
+
+    directory_case = _plant(_reader_tree(tmp_path / "directory"))
+    monkeypatch.setattr(module, "lstat_entry", swap_after_inspection("directory"))
+    with pytest.raises(module.UnsafeCopy):
+        module.remove_copy(str(directory_case), uid)
+    assert directory_case.is_dir()
+
+    link_case = _plant(_reader_tree(tmp_path / "link"))
+    monkeypatch.setattr(module, "lstat_entry", swap_after_inspection("symlink"))
+    # unlinkat removes the reader's own symlink entry, never the file it names.
+    assert module.remove_copy(str(link_case), uid) == "removed"
+    assert not link_case.is_symlink() and outside.read_text() == "outside"
+
+
+def test_unlink_module_source_pins_directories_and_never_follows_links() -> None:
+    source = _flat(MODULE_PATH.read_text())
+    assert (
+        "_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC"
+        in source
+    )
+    assert "os.open(component, _DIRECTORY_FLAGS, dir_fd=fd)" in source
+    assert "os.unlink(NAME, dir_fd=dir_fd)" in source
+    assert "os.stat(NAME, dir_fd=dir_fd, follow_symlinks=False)" in source
+    assert "supports_check_mode=True" in source
+
+
+# --------------------------------------------------------------------------- #
+# Local rehearsal (gated): run the real role, main.yml, remove.yml and its     #
+# module, through ansible-core 2.21.2 against temporary trees, under the       #
+# repo's ansible.cfg and -v --diff, and prove no forged input removes a copy   #
+# or leaks the controller password.                                            #
+# --------------------------------------------------------------------------- #
+
+# A stand-in, never a real credential. It holds characters JSON, YAML and repr
+# escape, plus a canary no escaping changes, so every printed form is found.
+CANARY = "Kq7vCanaryZ3w9"
+REHEARSAL_PASSWORD = f'rehearsal-only "stand-in"=pass\\word/42 {CANARY}'
+PASSWORD_LOOKUP = 'lookup("env", "DITTO_CODING_PG_PASSWORD")'
 STOPPED_UNITS = (
     "ditto-coding-hosted-worker.service loaded failed failed Worker\n"
     "ditto-coding-custody@0.service loaded inactive dead Custody\n"
     "ditto-coding-custody@1.service not-found inactive dead ditto-coding-custody@1\n"
 )
+LIVE_UNITS = {
+    "live_custody": "ditto-coding-custody@0.service loaded active running Custody",
+    "live_worker": (
+        "ditto-coding-hosted-worker.service loaded deactivating stop-sigterm Worker"
+    ),
+    "activating": "ditto-coding-hosted-worker.service loaded activating start Worker",
+    "reloading": "ditto-coding-custody@0.service loaded reloading reload Custody",
+    "refreshing": (
+        "ditto-coding-custody@2.service loaded refreshing refresh-extensions Custody"
+    ),
+    "maintenance": "ditto-coding-custody@3.service loaded maintenance cleaning Custody",
+    "unknown_state": "ditto-coding-hosted-worker.service loaded quiescent idle Worker",
+    "unparseable": "● ditto-coding-custody@0.service loaded inactive dead Custody",
+}
+
+# The rehearsal needs uvx, network access and coreutils, so root pytest shards
+# skip it and run only the tests above. The infra-ci Ansible job sets the gate;
+# with it set nothing else can skip, so a missing tool fails.
+rehearsal = pytest.mark.skipif(
+    os.environ.get(REHEARSAL_GATE) != "1",
+    reason=f"set {REHEARSAL_GATE}=1 to run the ansible-core rehearsal",
+)
 
 
-def _rehearsal_tasks(*, identity: bool = False) -> list[dict]:
-    block = copy.deepcopy(_block())
-    if not identity:
-        assert [block.pop(1)["name"], block.pop(1)["name"]] == [IDENTITY, HOST]
-    _task(LISTING, block)["ansible.builtin.command"]["argv"] = [
-        "/usr/bin/printf",
-        "%s",
-        "{{ rehearsal_units }}",
-    ]
-    _task(REPORT, block)["register"] = "rehearsal_report"
+def _document() -> str:
+    """The bytes the materialization role writes, with the stand-in password."""
+    return json.dumps(
+        [
+            "POSTGRES_HOST=10.30.0.5",
+            "POSTGRES_PORT=5432",
+            "POSTGRES_USER=ditto",
+            "POSTGRES_DB=ditto_platform_prod",
+            "POSTGRES_COMMAND_TIMEOUT=30",
+            "POSTGRES_POOL_MIN_SIZE=1",
+            "POSTGRES_POOL_MAX_SIZE=4",
+            f"POSTGRES_PASSWORD={REHEARSAL_PASSWORD}",
+        ]
+    )
 
-    def rewrite(value):
-        if isinstance(value, dict):
-            return {key: rewrite(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [rewrite(item) for item in value]
-        if isinstance(value, str) and value in OWNERS:
-            return "{{ rehearsal_owners['" + value + "'] }}"
-        if isinstance(value, str):
-            return value.replace("/var/lib/", "{{ rehearsal_root }}/var/lib/")
-        return value
 
-    tasks = rewrite(block)
+def _leak_forms() -> set[str]:
+    forms = {
+        REHEARSAL_PASSWORD,
+        CANARY,
+        json.dumps(REHEARSAL_PASSWORD)[1:-1],
+        repr(REHEARSAL_PASSWORD)[1:-1],
+        yaml.safe_dump(REHEARSAL_PASSWORD).splitlines()[0].strip("'"),
+        yaml.safe_dump(REHEARSAL_PASSWORD, default_style='"').strip()[1:-1],
+    }
+    for payload in (REHEARSAL_PASSWORD, _document()):
+        for algorithm in ("sha1", "md5", "sha256"):
+            forms.add(hashlib.new(algorithm, payload.encode()).hexdigest())
+    return forms
+
+
+def _rewrite(node: Any, *, local_identity: bool) -> Any:
+    """Point the role at a temporary tree: paths, owners, unit listings and,
+    unless forged identity is under test, the identity comparison."""
+    if isinstance(node, dict):
+        out = {
+            key: (
+                value
+                if key == "ansible.builtin.assert"
+                else _rewrite(value, local_identity=local_identity)
+            )
+            for key, value in node.items()
+        }
+        command = out.get("ansible.builtin.command")
+        if command and command.get("argv", [None])[0] == "/usr/bin/systemctl":
+            units = (
+                "{{ rehearsal_units_after_removal | default(rehearsal_units) }}"
+                if out.get("register") == f"{PREFIX}units_after_removal"
+                else "{{ rehearsal_units }}"
+            )
+            out["ansible.builtin.command"] = {"argv": ["/usr/bin/printf", "%s", units]}
+        if out.get("name") == REPORT:
+            out["register"] = "rehearsal_report"
+        if "ansible.builtin.assert" in out and local_identity:
+            that = [
+                re.sub(
+                    rf"^({PREFIX}identity\.ansible_facts\.(ansible_\w+)) == '[^']+'$",
+                    r"\1 == rehearsal_probe.ansible_facts.\2",
+                    line,
+                )
+                for line in out["ansible.builtin.assert"]["that"]
+            ]
+            out["ansible.builtin.assert"] = dict(
+                out["ansible.builtin.assert"], that=that
+            )
+        return out
+    if isinstance(node, list):
+        return [_rewrite(item, local_identity=local_identity) for item in node]
+    if isinstance(node, str) and node in OWNERS:
+        return "{{ rehearsal_owners['" + node + "'] }}"
+    if isinstance(node, str):
+        return node.replace("/var/lib/", "{{ rehearsal_root }}/var/lib/")
+    return node
+
+
+def _build_role(dst: Path, *, local_identity: bool) -> None:
+    role = dst / "roles/coding_hosted_postgres_environment_cleanup"
+    (role / "tasks").mkdir(parents=True)
+    shutil.copytree(ROLE / "defaults", role / "defaults")
+    shutil.copytree(
+        ROLE / "library",
+        role / "library",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    (role / "tasks/main.yml").write_text(MAIN)
+    tasks = _rewrite(copy.deepcopy(_remove()), local_identity=local_identity)
     rendered = json.dumps(tasks)
     assert rendered.count("/var/lib/") == rendered.count(
         "{{ rehearsal_root }}/var/lib/"
@@ -566,81 +1160,115 @@ def _rehearsal_tasks(*, identity: bool = False) -> list[dict]:
     assert "systemctl" not in rendered
     assert not any(f'"{owner}"' in rendered for owner in OWNERS)
     assert _task(PRESET, tasks) == _task(PRESET)
-    return tasks
+    assert _task(FREEZE_INPUTS, tasks) == _task(FREEZE_INPUTS)
+    (role / "tasks/remove.yml").write_text(yaml.safe_dump(tasks, sort_keys=False))
 
 
-def _play(tasks: list[dict], rehearsal_pass: str) -> dict:
-    outcome = "{{ rehearsal_root }}/outcome-{{ rehearsal_pass }}.json"
+def _record(outcome: str, content: str) -> dict:
+    # The harness never prints what it records, so output holds only the role's.
+    return {
+        "ansible.builtin.copy": {"dest": outcome, "content": content},
+        "check_mode": False,
+        "no_log": True,
+        "diff": False,
+    }
+
+
+def _play(rehearsal_pass: str) -> dict:
+    outcome = "{{ rehearsal_root }}/outcome-" + rehearsal_pass + ".json"
     return {
         "name": f"Rehearse cleanup ({rehearsal_pass})",
         "hosts": "all",
         "strategy": "free",
-        "connection": "local",
         "gather_facts": False,
         "become": False,
-        "vars": {
-            "ansible_python_interpreter": "{{ ansible_playbook_python }}",
-            "rehearsal_pass": rehearsal_pass,
-            # Exactly the three documented inputs, as the role defaults provide.
-            f"{PREFIX}enabled": True,
-            f"{PREFIX}confirmation": "REMOVE NATIVE CODING POSTGRES ENVIRONMENT",
-            f"{PREFIX}source_revision": REVISION,
-        },
+        "vars": {"ansible_python_interpreter": "{{ ansible_playbook_python }}"},
         "tasks": [
             {
-                "name": "Rehearse the enabled cleanup tasks",
+                "name": "Probe this machine for the local-identity comparison",
+                "ansible.builtin.setup": {
+                    "gather_subset": ["!all", "!min", "platform", "distribution"]
+                },
+                "register": "rehearsal_probe",
+            },
+            {
+                "name": "Rehearse the role",
                 "block": [
-                    *tasks,
+                    # A static import, like the playbook's roles: list, so
+                    # --start-at-task sees exactly the tasks it sees in production.
+                    {
+                        "name": "Import the role",
+                        "ansible.builtin.import_role": {
+                            "name": "coding_hosted_postgres_environment_cleanup"
+                        },
+                    },
                     {
                         "name": "Record completion",
-                        "ansible.builtin.copy": {
-                            "dest": outcome,
-                            "content": (
-                                "{{ {'report': rehearsal_report.msg} | to_json }}"
-                            ),
-                        },
-                        "check_mode": False,
+                        **_record(
+                            outcome,
+                            "{{ {'report': rehearsal_report.msg | default(none)}"
+                            " | to_json }}",
+                        ),
                     },
                 ],
                 "rescue": [
                     {
                         "name": "Record refusal",
-                        "ansible.builtin.copy": {
-                            "dest": outcome,
-                            "content": (
-                                "{{ {'task': ansible_failed_task.name, 'messages': "
-                                "[ansible_failed_result.msg | default('')] + "
-                                "(ansible_failed_result.results | default([]) "
-                                "| selectattr('failed', 'defined') "
-                                "| selectattr('failed') "
-                                "| map(attribute='msg') | list)} | to_json }}"
-                            ),
-                        },
-                        "check_mode": False,
+                        **_record(
+                            outcome,
+                            "{{ {'task': ansible_failed_task.name, 'messages': "
+                            "[ansible_failed_result.msg | default('')] + "
+                            "(ansible_failed_result.results | default([]) "
+                            "| selectattr('failed', 'defined') "
+                            "| selectattr('failed') "
+                            "| map(attribute='msg') | list)} | to_json }}",
+                        ),
                     }
                 ],
-            }
+            },
         ],
     }
 
 
-def _run(tmp_path: Path, name: str, hosts: dict, play: dict, *flags) -> None:
+def _run(
+    tmp_path: Path,
+    name: str,
+    hosts: dict[str, dict],
+    *flags: str,
+    rehearsal_pass: str = "first",
+    local_identity: bool = True,
+    residual: str | None = None,
+) -> str:
     work = tmp_path / name
     work.mkdir()
+    _build_role(work, local_identity=local_identity)
     # Every rehearsal host is in the real group, so only identity can refuse it.
     inventory = {"all": {"children": {"role_coding_hosted": {"hosts": hosts}}}}
     (work / "inventory.yml").write_text(yaml.safe_dump(inventory))
-    (work / "rehearsal.yml").write_text(yaml.safe_dump([play], sort_keys=False))
+    (work / "play.yml").write_text(
+        yaml.safe_dump([_play(rehearsal_pass)], sort_keys=False)
+    )
+    # The repo's own ansible.cfg, verbatim: its default callback with yaml results,
+    # and roles_path=roles resolved beside it, reach the temporary role.
+    shutil.copy(REPO_ANSIBLE_CFG, work / "ansible.cfg")
+    config = REPO_ANSIBLE_CFG.read_text()
+    assert re.search(r"^stdout_callback\s*=\s*default$", config, re.M)
+    assert re.search(r"^callback_result_format\s*=\s*yaml$", config, re.M)
+    assert re.search(r"^roles_path\s*=\s*roles$", config, re.M)
     environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("ANSIBLE_") and key != "DITTO_CODING_PG_PASSWORD"
     }
     environment |= {
+        "ANSIBLE_CONFIG": str(work / "ansible.cfg"),
         "ANSIBLE_HOME": str(work / "ansible-home"),
         "ANSIBLE_LOCAL_TEMP": str(work / "ansible-tmp"),
+        "ANSIBLE_LOG_PATH": str(work / "ansible.log"),
         "ANSIBLE_NOCOLOR": "1",
-        "ANSIBLE_RETRY_FILES_ENABLED": "0",
+        # The operator never exports it for cleanup; the rehearsal does, so the
+        # lookup cases have a real value to try to exfiltrate.
+        "DITTO_CODING_PG_PASSWORD": REHEARSAL_PASSWORD,
     }
     completed = subprocess.run(
         [
@@ -650,10 +1278,12 @@ def _run(tmp_path: Path, name: str, hosts: dict, play: dict, *flags) -> None:
             "ansible-playbook",
             "-f",
             "10",
+            "-v",
+            "--diff",
             "-i",
             "inventory.yml",
             *flags,
-            "rehearsal.yml",
+            "play.yml",
         ],
         cwd=work,
         env=environment,
@@ -662,26 +1292,41 @@ def _run(tmp_path: Path, name: str, hosts: dict, play: dict, *flags) -> None:
         timeout=900,
         check=False,
     )
-    assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr
+    log = work / "ansible.log"
+    output = "\n".join(
+        [completed.stdout, completed.stderr, log.read_text() if log.exists() else ""]
+    )
+    assert completed.returncode == 0, output[-6000:]
+    leaked = [
+        line
+        for line in output.splitlines()
+        if any(form in line for form in _leak_forms())
+    ]
+    if residual is None:
+        assert leaked == [], (name, [line[:160] for line in leaked])
+    else:
+        # The documented residual: ansible-core prints a raised templating error
+        # through the task result's preserved exception field, even under no_log.
+        assert leaked, name
+        assert all(residual in line for line in leaked), (name, leaked)
+    return output
 
 
-def _outcome(root: Path, rehearsal_pass: str = "first") -> dict:
-    return json.loads((root / f"outcome-{rehearsal_pass}.json").read_text())
-
-
-def _write(path: Path, body: str = "[]") -> Path:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.write_text(body)
-    path.chmod(0o600)
-    return path
+def _outcome(root: Path, rehearsal_pass: str = "first") -> dict | None:
+    path = root / f"outcome-{rehearsal_pass}.json"
+    return json.loads(path.read_text()) if path.exists() else None
 
 
 def _tree(root: Path) -> tuple[Path, Path]:
-    custody = _write(root / CUSTODY.lstrip("/"))
-    hosted = _write(root / HOSTED.lstrip("/"))
-    _write(custody.parent / "custody-key.pem", "key")
-    _write(hosted.parent / "evidence-receipt.json", "{}")
+    custody = _plant(_reader_tree(root, "ditto-coding-custody"), _document())
+    hosted = _plant(_reader_tree(root, "ditto-coding-hosted"), _document())
+    (custody.parent / "custody-key.pem").write_text("key")
+    (hosted.parent / "evidence-receipt.json").write_text("{}")
     return custody, hosted
+
+
+def _kept(pair: tuple[Path, Path]) -> bool:
+    return all(path.read_text() == _document() for path in pair)
 
 
 def _paths(root: Path, items: list[str]) -> str:
@@ -698,18 +1343,21 @@ def _report(root: Path, verb: str, removed: list[str], absent: list[str]) -> str
 
 def _expected_refusal(task: str) -> str:
     message = _flat(_task(task)["ansible.builtin.assert"]["fail_msg"])
-    return message.replace(VALIDATED_REVISION, REVISION).replace(
-        f"{{{{ {REVISION_VAR} }}}}", REVISION
-    )
+    return message.replace(f"{{{{ {FROZEN_REVISION} }}}}", REVISION)
 
 
 def _assert_refused(root: Path, task: str, rehearsal_pass: str = "first") -> None:
     outcome = _outcome(root, rehearsal_pass)
-    assert outcome.get("task") == task, (root.name, outcome)
+    assert outcome is not None and outcome.get("task") == task, (root.name, outcome)
     assert _expected_refusal(task) in [_flat(item) for item in outcome["messages"]], (
         root.name,
         outcome,
     )
+
+
+def _assert_dormant(root: Path, pair: tuple[Path, Path]) -> None:
+    assert _outcome(root) == {"report": None}, root.name
+    assert _kept(pair), root.name
 
 
 def _hosts(roots: dict[str, Path], owners: dict[str, str]) -> dict[str, dict]:
@@ -717,6 +1365,10 @@ def _hosts(roots: dict[str, Path], owners: dict[str, str]) -> dict[str, dict]:
         root.mkdir(parents=True)
     return {
         name: {
+            "ansible_connection": "local",
+            f"{PREFIX}enabled": True,
+            f"{PREFIX}confirmation": CONFIRMATION,
+            f"{PREFIX}source_revision": REVISION,
             "rehearsal_root": str(root),
             "rehearsal_units": STOPPED_UNITS,
             "rehearsal_owners": owners,
@@ -725,49 +1377,36 @@ def _hosts(roots: dict[str, Path], owners: dict[str, str]) -> dict[str, dict]:
     }
 
 
-# The rehearsal needs uvx, network access and coreutils, so root pytest shards
-# skip it and run only the structural tests above. The infra-ci Ansible job sets
-# the gate; with it set nothing else can skip, so a missing tool fails.
-rehearsal = pytest.mark.skipif(
-    os.environ.get(REHEARSAL_GATE) != "1",
-    reason=f"set {REHEARSAL_GATE}=1 to run the ansible-core rehearsal",
-)
-
-LIVE_UNITS = {
-    "live_custody": "ditto-coding-custody@0.service loaded active running Custody",
-    "live_worker": (
-        "ditto-coding-hosted-worker.service loaded deactivating stop-sigterm Worker"
-    ),
-    "activating": "ditto-coding-hosted-worker.service loaded activating start Worker",
-    "reloading": "ditto-coding-custody@0.service loaded reloading reload Custody",
-    "refreshing": (
-        "ditto-coding-custody@2.service loaded refreshing refresh-extensions Custody"
-    ),
-    "unknown_state": "ditto-coding-hosted-worker.service loaded quiescent idle Worker",
-    "unparseable": "● ditto-coding-custody@0.service loaded inactive dead Custody",
-}
+def _local_owners() -> dict[str, str]:
+    return dict.fromkeys(OWNERS, pwd.getpwuid(os.getuid()).pw_name)
 
 
 @rehearsal
 def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
     tmp_path,
 ) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
     # Permission bits drive the partial-removal case; root would bypass them.
     assert os.geteuid() != 0, "run the rehearsal unprivileged"
-    owners = dict.fromkeys(OWNERS, pwd.getpwuid(os.getuid()).pw_name)
+    owners = _local_owners()
     names = [
         "absent",
         "present",
         "no_units",
         *LIVE_UNITS,
+        "started_during_removal",
         "symlink",
         "hardlink",
         "directory",
         "other_owner",
+        "shared_parent",
         "linked_parent",
         "linked_home",
         "preset_result",
+        "preset_frozen_input",
         "undocumented_input",
+        "materialization_names",
         "partial",
     ]
     roots = {name: tmp_path / "hosts" / name for name in names}
@@ -775,55 +1414,86 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
     hosts["no_units"]["rehearsal_units"] = ""
     for name, line in LIVE_UNITS.items():
         hosts[name]["rehearsal_units"] = STOPPED_UNITS + line + "\n"
+    hosts["started_during_removal"]["rehearsal_units_after_removal"] = (
+        STOPPED_UNITS + LIVE_UNITS["live_custody"] + "\n"
+    )
     hosts["other_owner"]["rehearsal_owners"] = {
         **owners,
         "ditto-coding-hosted": "rehearsal-other-reader",
     }
     # Inventory values are refused exactly like extra vars.
     hosts["preset_result"][f"{PREFIX}copies"] = {"results": []}
+    hosts["preset_frozen_input"][FROZEN_REVISION] = REVISION
     hosts["undocumented_input"][f"{PREFIX}paths"] = [str(tmp_path / "elsewhere")]
+    # The materialization role's inputs and result names never trip this guard.
+    hosts["materialization_names"] |= {
+        f"{MATERIALIZE_PREFIX}enabled": True,
+        f"{MATERIALIZE_PREFIX}host": "10.30.0.5",
+        f"{MATERIALIZE_PREFIX}units": {"stdout_lines": []},
+    }
 
     present = _tree(roots["present"])
     no_units = _tree(roots["no_units"])
-    kept = {name: _tree(roots[name]) for name in (*LIVE_UNITS, "other_owner")}
-    kept |= {
-        name: _tree(roots[name]) for name in ("preset_result", "undocumented_input")
+    materialization_names = _tree(roots["materialization_names"])
+    started = _tree(roots["started_during_removal"])
+    kept = {
+        name: _tree(roots[name])
+        for name in (
+            *LIVE_UNITS,
+            "other_owner",
+            "shared_parent",
+            "preset_result",
+            "preset_frozen_input",
+            "undocumented_input",
+        )
     }
-    outside = _write(roots["symlink"] / "outside/unrelated.json", "outside")
-    symlink_custody = roots["symlink"] / CUSTODY.lstrip("/")
-    symlink_custody.parent.mkdir(mode=0o700, parents=True)
+    kept["shared_parent"][1].parent.chmod(0o770)
+    outside = roots["symlink"] / "outside/unrelated.json"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("outside")
+    symlink_custody = _reader_tree(roots["symlink"]) / "postgres-environment.json"
     symlink_custody.symlink_to(outside)
-    symlink_hosted = _write(roots["symlink"] / HOSTED.lstrip("/"))
+    symlink_hosted = _plant(
+        _reader_tree(roots["symlink"], "ditto-coding-hosted"), _document()
+    )
     _, linked = _tree(roots["hardlink"])
     second_link = linked.parent / "evidence-link.json"
     os.link(linked, second_link)
-    directory = roots["directory"] / HOSTED.lstrip("/")
-    _write(directory / "attempt-receipt.json", "{}")
-    parent_custody = _write(roots["linked_parent"] / CUSTODY.lstrip("/"))
-    elsewhere = _write(
-        roots["linked_parent"] / "elsewhere/postgres-environment.json", "elsewhere"
+    directory = _reader_tree(roots["directory"], "ditto-coding-hosted") / (
+        "postgres-environment.json"
     )
-    hosted_home = roots["linked_parent"] / "var/lib/ditto-coding-hosted"
-    hosted_home.mkdir(mode=0o700, parents=True)
+    directory.mkdir()
+    (directory / "attempt-receipt.json").write_text("{}")
+    parent_custody = _plant(_reader_tree(roots["linked_parent"]), _document())
+    elsewhere = _plant(_reader_tree(roots["linked_parent"] / "elsewhere"), _document())
+    hosted_home = _reader_tree(roots["linked_parent"], "ditto-coding-hosted").parent
+    (hosted_home / "private").rmdir()
     (hosted_home / "private").symlink_to(elsewhere.parent)
-    home_hosted = _write(roots["linked_home"] / HOSTED.lstrip("/"))
-    real_home = roots["linked_home"] / "real-custody-home"
-    home_copy = _write(real_home / "private/postgres-environment.json")
+    home_hosted = _plant(
+        _reader_tree(roots["linked_home"], "ditto-coding-hosted"), _document()
+    )
+    real_home = _reader_tree(roots["linked_home"] / "real").parent
+    home_copy = _plant(real_home / "private", _document())
     (roots["linked_home"] / "var/lib/ditto-coding-custody").symlink_to(real_home)
     partial = _tree(roots["partial"])
     # The custody unlink succeeds; the hosted unlink then fails with EACCES.
     partial[1].parent.chmod(0o500)
 
     try:
-        _run(tmp_path, "run", hosts, _play(_rehearsal_tasks(), "first"))
+        _run(tmp_path, "run", hosts)
     finally:
         partial[1].parent.chmod(0o700)
+        kept["shared_parent"][1].parent.chmod(0o700)
 
     assert _outcome(roots["absent"]) == {
         "report": _report(roots["absent"], "removed", [], COPIES)
     }
     assert not (roots["absent"] / "var").exists()
-    for name, pair in (("present", present), ("no_units", no_units)):
+    for name, pair in (
+        ("present", present),
+        ("no_units", no_units),
+        ("materialization_names", materialization_names),
+    ):
         assert _outcome(roots[name]) == {
             "report": _report(roots[name], "removed", COPIES, [])
         }
@@ -833,32 +1503,38 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
     assert (present[0].parent / "custody-key.pem").read_text() == "key"
     assert (present[1].parent / "evidence-receipt.json").read_text() == "{}"
 
+    # A unit that started during removal is reported loudly after the unlink.
+    _assert_refused(roots["started_during_removal"], LIVE_AFTER)
+    assert not any(path.exists() for path in started)
+
     refusals = {
         **dict.fromkeys(LIVE_UNITS, LIVE),
         "symlink": COPY_CHECK,
         "hardlink": COPY_CHECK,
         "directory": COPY_CHECK,
-        "other_owner": COPY_CHECK,
+        "other_owner": PARENT_CHECK,
+        "shared_parent": PARENT_CHECK,
         "linked_parent": PARENT_CHECK,
         "linked_home": PARENT_CHECK,
         "preset_result": PRESET,
+        "preset_frozen_input": PRESET,
         "undocumented_input": PRESET,
     }
     for name, task in refusals.items():
         _assert_refused(roots[name], task)
     for pair in kept.values():
-        assert all(path.read_text() == "[]" for path in pair)
+        assert _kept(pair)
     assert symlink_custody.is_symlink() and outside.read_text() == "outside"
-    assert symlink_hosted.read_text() == "[]"
-    assert linked.read_text() == "[]" and second_link.read_text() == "[]"
-    assert linked.stat().st_nlink == 2
+    assert symlink_hosted.read_text() == _document()
+    assert linked.read_text() == _document() and second_link.stat().st_nlink == 2
     assert (directory / "attempt-receipt.json").read_text() == "{}"
-    assert parent_custody.read_text() == "[]"
-    assert elsewhere.read_text() == "elsewhere"
-    assert home_hosted.read_text() == "[]" and home_copy.read_text() == "[]"
+    assert parent_custody.read_text() == _document()
+    assert elsewhere.read_text() == _document()
+    assert home_hosted.read_text() == _document()
+    assert home_copy.read_text() == _document()
 
     outcome = _outcome(roots["partial"])
-    assert outcome["task"] == PARTIAL, outcome
+    assert outcome is not None and outcome["task"] == PARTIAL, outcome
     assert _flat(outcome["messages"][0]) == (
         "Native Coding PostgreSQL environment cleanup failed during removal; "
         f"source_revision={REVISION}; "
@@ -866,75 +1542,218 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
         f"not_removed={_paths(roots['partial'], [HOSTED])}; "
         "reinspect both paths and reconcile by hand before re-running."
     )
-    assert not partial[0].exists() and partial[1].read_text() == "[]"
+    assert not partial[0].exists() and partial[1].read_text() == _document()
 
     # Registered results persist for a whole playbook run, so the idempotent
     # re-run is a separate invocation, exactly as an operator would re-run it.
-    _run(
-        tmp_path,
-        "second",
-        {"present": hosts["present"]},
-        _play(_rehearsal_tasks(), "second"),
-    )
+    _run(tmp_path, "second", {"present": hosts["present"]}, rehearsal_pass="second")
     assert _outcome(roots["present"], "second") == {
         "report": _report(roots["present"], "removed", [], COPIES)
     }
 
 
 @rehearsal
-def test_rehearsal_refuses_extra_vars_that_preset_a_result_or_forge_identity(
+def test_rehearsal_lazy_and_lookup_inputs_are_frozen_once_without_leaking(
     tmp_path,
 ) -> None:
-    owners = dict.fromkeys(OWNERS, pwd.getpwuid(os.getuid()).pw_name)
-    roots = {
-        name: tmp_path / "hosts" / name for name in ("forged_units", "forged_host")
-    }
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    owners = _local_owners()
+    names = [
+        "lazy_enabled",
+        "enabled_password",
+        "enabled_undefined_lookup",
+        "enabled_string_true",
+        "lazy_revision_refused",
+        "lazy_revision_frozen",
+        "revision_undefined_lookup",
+        "revision_password",
+        "confirmation_undefined_lookup",
+        "revision_newline",
+    ]
+    roots = {name: tmp_path / "hosts" / name for name in names}
     hosts = _hosts(roots, owners)
-    hosts["forged_units"]["rehearsal_units"] = LIVE_UNITS["live_custody"] + "\n"
-    copies = {name: _tree(root) for name, root in roots.items()}
+    pairs = {name: _tree(root) for name, root in roots.items()}
+    # A block-level gate was re-evaluated per task and loop item: this flag was
+    # false for every guard and true inside the removal loops.
+    hosts["lazy_enabled"][f"{PREFIX}enabled"] = "{{ item is defined }}"
+    # A flag that renders to the password: the bool filter would print it in a
+    # deprecation warning; sameas refuses it silently.
+    hosts["enabled_password"][f"{PREFIX}enabled"] = f"{{{{ {PASSWORD_LOOKUP} }}}}"
+    hosts["enabled_undefined_lookup"][f"{PREFIX}enabled"] = (
+        f"{{{{ {{}}[{PASSWORD_LOOKUP}] }}}}"
+    )
+    hosts["enabled_string_true"][f"{PREFIX}enabled"] = "true"
+    hosts["lazy_revision_refused"][f"{PREFIX}source_revision"] = (
+        f"{{{{ '{REVISION}' if item is defined else 'not-a-revision' }}}}"
+    )
+    hosts["lazy_revision_frozen"][f"{PREFIX}source_revision"] = (
+        f"{{{{ 'not-a-revision' if item is defined else '{REVISION}' }}}}"
+    )
+    # The confirmed leak: this revision printed the password three times.
+    hosts["revision_undefined_lookup"][f"{PREFIX}source_revision"] = (
+        f"{{{{ {{}}[{PASSWORD_LOOKUP}] }}}}"
+    )
+    hosts["revision_password"][f"{PREFIX}source_revision"] = (
+        f"{{{{ {PASSWORD_LOOKUP} }}}}"
+    )
+    hosts["confirmation_undefined_lookup"][f"{PREFIX}confirmation"] = (
+        f"{{{{ {{}}[{PASSWORD_LOOKUP}] }}}}"
+    )
+    hosts["revision_newline"][f"{PREFIX}source_revision"] = REVISION + "\n"
 
-    # The review's exact override, then one complete enough to satisfy the unit
-    # allow-list if the preset guard were missing. Both stop at the guard.
-    for index, forged in enumerate(
-        ({"stdout": ""}, {"stdout": "", "stdout_lines": []})
+    _run(tmp_path, "lazy", hosts)
+
+    for name in (
+        "lazy_enabled",
+        "enabled_password",
+        "enabled_undefined_lookup",
+        "enabled_string_true",
     ):
-        _run(
-            tmp_path,
-            f"units-{index}",
-            {"forged_units": hosts["forged_units"]},
-            _play(_rehearsal_tasks(), f"forged-{index}"),
-            "-e",
-            json.dumps({f"{PREFIX}units": forged}),
-        )
-        _assert_refused(roots["forged_units"], PRESET, f"forged-{index}")
+        _assert_dormant(roots[name], pairs[name])
+    # Frozen once with no loop item, the lazy revision stays the valid value.
+    assert _outcome(roots["lazy_revision_frozen"]) == {
+        "report": _report(roots["lazy_revision_frozen"], "removed", COPIES, [])
+    }
+    for name in (
+        "lazy_revision_refused",
+        "revision_undefined_lookup",
+        "revision_password",
+        "confirmation_undefined_lookup",
+        "revision_newline",
+    ):
+        _assert_refused(roots[name], HOST)
+        assert _kept(pairs[name]), name
+
+
+@rehearsal
+def test_rehearsal_extra_vars_cannot_preset_forge_or_lazily_open_the_gate(
+    tmp_path,
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    owners = _local_owners()
+    runs: list[tuple[str, dict[str, Any], str | None]] = [
+        # The review's exact override, then one complete enough to satisfy the
+        # unit allow-list if the preset guard were missing.
+        ("units_stdout", {f"{PREFIX}units": {"stdout": ""}}, PRESET),
+        ("units_lines", {f"{PREFIX}units": {"stdout": "", "stdout_lines": []}}, PRESET),
+        # The confirmed lazy-gate repro; the removal must stay dormant.
+        ("lazy_gate", {f"{PREFIX}enabled": "{{ item is defined }}"}, None),
+        # The confirmed template-error leak through source_revision.
+        (
+            "lookup_revision",
+            {f"{PREFIX}source_revision": f"{{{{ {{}}[{PASSWORD_LOOKUP}] }}}}"},
+            HOST,
+        ),
+        # Presetting the frozen gate only enables removal; every guard still runs.
+        ("forged_gate", {FROZEN_GATE: True, f"{PREFIX}confirmation": ""}, HOST),
+    ]
+    for name, extra_vars, refused_at in runs:
+        root = tmp_path / "hosts" / name
+        hosts = _hosts({name: root}, owners)
+        if name in ("units_stdout", "units_lines"):
+            hosts[name]["rehearsal_units"] = LIVE_UNITS["live_custody"] + "\n"
+        if name == "forged_gate":
+            hosts[name][f"{PREFIX}enabled"] = False
+        pair = _tree(root)
+        _run(tmp_path, name, hosts, "-e", json.dumps(extra_vars))
+        if refused_at is None:
+            _assert_dormant(root, pair)
+        else:
+            _assert_refused(root, refused_at)
+            assert _kept(pair), name
 
     # Forged facts that match the dedicated host must not pass the probed check.
     assert socket.gethostname().split(".")[0] != "ditto-coding-hosted-v2"
-    forged_facts = {
+    identity = {
         "hostname": "ditto-coding-hosted-v2",
         "architecture": "x86_64",
         "distribution": "Debian",
         "distribution_major_version": "13",
     }
+    forged_facts = {
+        **identity,
+        **{f"ansible_{key}": value for key, value in identity.items()},
+    }
+    root = tmp_path / "hosts/forged_host"
+    hosts = _hosts({"forged_host": root}, owners)
+    pair = _tree(root)
     _run(
         tmp_path,
         "identity",
-        {"forged_host": hosts["forged_host"]},
-        _play(_rehearsal_tasks(identity=True), "first"),
+        hosts,
         "-e",
         json.dumps({"ansible_facts": forged_facts}),
+        local_identity=False,
     )
-    _assert_refused(roots["forged_host"], HOST)
-    for pair in copies.values():
-        assert all(path.read_text() == "[]" for path in pair)
+    _assert_refused(root, HOST)
+    assert _kept(pair)
+
+
+@rehearsal
+def test_rehearsal_start_at_task_cannot_skip_the_guards(tmp_path) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    owners = _local_owners()
+    for name, task in (("unlink", UNLINK), ("preset", PRESET), ("include", INCLUDE)):
+        root = tmp_path / "hosts" / name
+        hosts = _hosts({name: root}, owners)
+        pair = _tree(root)
+        _run(tmp_path, name, hosts, "--start-at-task", task)
+        assert _kept(pair), name
+        if task == INCLUDE:
+            # Starting at the include skips the freeze: the undefined frozen
+            # gate fails the host instead of removing anything.
+            outcome = _outcome(root)
+            assert outcome is not None and outcome["task"] == INCLUDE, outcome
+        else:
+            # Tasks inside the dynamically included file are invisible to
+            # --start-at-task, so nothing in the play ran at all.
+            assert _outcome(root) is None, name
 
 
 @rehearsal
 def test_rehearsal_check_mode_reports_without_removing(tmp_path) -> None:
-    owners = dict.fromkeys(OWNERS, pwd.getpwuid(os.getuid()).pw_name)
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
     root = tmp_path / "hosts/dry_run"
-    hosts = _hosts({"dry_run": root}, owners)
-    copies = _tree(root)
-    _run(tmp_path, "check", hosts, _play(_rehearsal_tasks(), "first"), "--check")
+    hosts = _hosts({"dry_run": root}, _local_owners())
+    pair = _tree(root)
+    _run(tmp_path, "check", hosts, "--check")
     assert _outcome(root) == {"report": _report(root, "would_remove", COPIES, [])}
-    assert all(path.read_text() == "[]" for path in copies)
+    assert _kept(pair)
+
+
+@rehearsal
+def test_rehearsal_raising_templates_fail_closed_and_leak_only_through_core(
+    tmp_path,
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    # The documented residual. A template that raises, rather than rendering
+    # undefined, is not neutralised by default(..., true), and ansible-core 2.21.2
+    # prints the raised message through the result's preserved exception field
+    # even under no_log. The role still fails closed at the freeze and never
+    # prints the value itself.
+    owners = _local_owners()
+    names = ["enabled_file_lookup", "revision_file_lookup"]
+    roots = {name: tmp_path / "hosts" / name for name in names}
+    hosts = _hosts(roots, owners)
+    pairs = {name: _tree(root) for name, root in roots.items()}
+    raising = f"{{{{ lookup('file', {PASSWORD_LOOKUP}) }}}}"
+    hosts["enabled_file_lookup"][f"{PREFIX}enabled"] = raising
+    hosts["revision_file_lookup"][f"{PREFIX}source_revision"] = raising
+    _run(
+        tmp_path,
+        "residual",
+        hosts,
+        residual="The lookup plugin 'file' failed: Unable to access the file",
+    )
+    for name, task in (
+        ("enabled_file_lookup", FREEZE_GATE),
+        ("revision_file_lookup", FREEZE_INPUTS),
+    ):
+        outcome = _outcome(roots[name])
+        assert outcome is not None and outcome["task"] == task, (name, outcome)
+        assert _kept(pairs[name]), name
