@@ -122,34 +122,53 @@ source revision with no trailing newline, and the exact target host.
 
 ## What the role refuses
 
-- The enabled gate is decided once, in a single top-level task with no loop
-  variable in scope, and the enabled branch runs through a dynamic
-  `include_tasks`. ansible re-templates a variable on every read, so a lazily
-  templated extra var such as `-e '{"..._enabled": "{{ item is defined }}"}'`
-  evaluates false at the gate and true inside a write loop; a block-level `when`
-  is pushed down to every child task and re-evaluated with the loop variable in
-  scope. Reading the gate once and using a dynamic include closes that flip and
-  also `--start-at-task`, which cannot jump into a dynamically included file and
-  so cannot skip the guards.
+- The enabled gate is frozen once in `main.yml` with `is sameas true` (never
+  `| bool`, which prints the coerced value in a deprecation warning even under
+  `no_log`), in a task with no loop variable in scope, and the enabled branch
+  runs through a dynamic `include_tasks`. ansible re-templates a variable on
+  every read, so a lazily templated extra var such as
+  `-e '{"..._enabled": "{{ item is defined }}"}'` evaluates false at the gate and
+  true inside a write loop; a block-level `when` is pushed down to every child
+  task. Freezing the gate once and using a dynamic include closes that flip.
+- The preset refusal is enforced twice: once in `main.yml` before the gate is
+  frozen, and again as the first task inside the dynamically included
+  `materialize.yml` / `remove.yml`. `--start-at-task` can begin at the `main.yml`
+  gate freeze and skip the static refusal, but it cannot jump into a dynamic
+  include, so the in-include refusal always runs. It refuses any
+  `coding_hosted_worker_credentials_*` variable other than the three inputs and
+  the gate (a preset registered result, a preset capture such as
+  `coding_hosted_worker_credentials_documents`, or an undocumented input), any
+  `DITTO_CODING_WORKER_*` / `DITTO_CODING_HIPPIUS_*` Ansible variable, and it
+  asserts the raw `coding_hosted_worker_credentials_enabled is sameas true`, so a
+  preset gate fact alone (with the flag false or unset) cannot open the run. The
+  refusal pattern excludes the cleanup role's prefix, and the cleanup refusal
+  excludes this one's, so neither matches the other's variables.
+- The run must target exactly the one dedicated host. `hosts: role_coding_hosted`
+  makes an `inventory_hostname`/group check tautological, and a host reports its
+  own name, so the role asserts `ansible_play_batch == ['ditto-coding-hosted-v2']`
+  — a value computed from the run's targeting that `-e` cannot override — so a
+  role-labelled VM that merely reports this hostname is never reached without
+  `--limit ditto-coding-hosted-v2`.
+- The write module carries the credentials to the host, so before any
+  secret-carrying task the role refuses unless SSH pipelining is on
+  (`ansible_pipelining`) and `ANSIBLE_KEEP_REMOTE_FILES` is unset, so the
+  module is never left in the host's remote temp directory. The repo
+  `ansible.cfg` turns pipelining on. This is advisory (an operator can force
+  either), a defence against accidental misconfiguration.
 - Every accepted input is captured once with `set_fact` and validated as a
   frozen literal. A `set_fact` result is a plain value, not a trusted template,
   so it never re-templates in a later scope. The confirmation and source
   revision are matched exactly, and a value that a nested template rendered into
   a literal `{{`, `{%` or `{#` is refused.
-- Any `coding_hosted_worker_credentials_*` variable other than the three
-  documented inputs, including a preset registered result, a preset capture such
-  as `coding_hosted_worker_credentials_documents`, or an undocumented input, is
-  refused before anything is inspected. The refusal pattern excludes the cleanup
-  role's prefix, and the cleanup refusal excludes this one's, so neither matches
-  the other's variables.
 - The playbook gathers no facts. Host identity and the worker and custodian
   accounts come from a registered `setup` and `getent`, because an
   `ansible_facts` extra var replaces gathered facts.
 - The worker and every custody instance must be stopped. The live-unit guard is
-  an allow-list, defined once in the role's `assert_units_idle.yml` and reused by
-  the pre-write and post-write checks: only `inactive` or `failed` pass, so
-  `active`, `activating`, `deactivating`, `reloading`, `refreshing` (systemd 256
-  and later), `maintenance`, a future state or an unparseable line all refuse.
+  an allow-list read directly from the registered `systemctl` result in an
+  inlined assert (no overridable include variable), by both the pre-write and
+  post-write checks: only `inactive` or `failed` pass, so `active`,
+  `activating`, `deactivating`, `reloading`, `refreshing` (systemd 256 and
+  later), `maintenance`, a future state or an unparseable line all refuse.
   An empty listing means no such unit is loaded and is allowed. The role stops
   nothing.
 - No process may be running as the worker UID. The listed units are not enough:
@@ -232,16 +251,34 @@ operator's own shell, and secrets must be exported only in that same shell: a
 hostile templated input can then only surface a value already present to that
 same operator.
 
+A second, interactive-only residual: `ansible-playbook --step` prompts before
+each task and lets the operator answer `n` (skip) to a guard then `c` (continue)
+past the rest. `--step` is an operator-run interactive choice, not something an
+attacker supplies through `-e`, and there is no reliable `--step` signal to
+detect on ansible-core 2.21.2; run these playbooks without `--step`.
+
 ## Cleanup and rotation
 
 `coding_hosted_worker_credentials_cleanup` (playbook
 `gcp-coding-hosted-worker-credentials-cleanup.yml`, confirmation
-`REMOVE NATIVE CODING WORKER CREDENTIALS`) removes only the three fixed files. It
-refuses unless the units are stopped, inspects each path without following
-links, and removes each with `unlink` semantics — never `file: state=absent` on
-a path that could be a directory or symlink. It reports any partial removal and
-verifies absence. It reads no secret, so export nothing for it. It keeps the
-directories.
+`REMOVE NATIVE CODING WORKER CREDENTIALS`) removes only the three fixed files
+through the `coding_hosted_worker_credentials_unlink` module. It refuses unless
+the units are stopped and no process runs as the worker UID, opens every path
+component with `O_NOFOLLOW`, and removes each name with `unlinkat` — never
+`file: state=absent` on a path that could be a directory or symlink. The module
+returns `removed`, `already_absent`, `refused` and `not_attempted` lists on every
+path, so a partial removal (for example a later name that is a symlink after
+earlier names were unlinked) names exactly what was removed, what refused and
+why, and what was not attempted. It also removes and reports any leftover
+`.<name>.*.tmp` a partial write may have left. It reads no secret, so export
+nothing for it. It keeps the directories.
+
+Asymmetry with the write module: the write module requires the private directory
+to be mode `0700` and each destination mode `0600`, but cleanup only requires the
+directory to be owned by the worker and not group/other writable, so a directory
+left at a wrong mode can still be cleaned up; the observed directory mode is
+reported (`private_dir_mode`) for the operator to reconcile. Removing a file does
+not depend on the file's own mode.
 
 ### Removal is not revocation
 
