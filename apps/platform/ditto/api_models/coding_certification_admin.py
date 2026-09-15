@@ -35,6 +35,9 @@ _SS58 = r"^[1-9A-HJ-NP-Za-km-z]{47,48}$"
 CODING_CERTIFICATION_ALLOWLIST_SCHEMA = "ditto-coding-certification-allowlist-v1"
 CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES = 16
 
+CodingCertificationAllowlistKey = tuple[str, str, str, str]
+"""``(agent_id, artifact_sha256, screened_image_sha256, validator_hotkey)``."""
+
 
 class CodingCertificationAllowlistEntry(BaseModel):
     """One exact certifiable tuple. Every field must match; nothing is a wildcard."""
@@ -43,6 +46,8 @@ class CodingCertificationAllowlistEntry(BaseModel):
 
     agent_id: UUID
     artifact_sha256: Annotated[str, Field(pattern=_SHA256)]
+    screened_image_sha256: Annotated[str, Field(pattern=_SHA256)]
+    """The agent's verified screened-image archive digest; a rebuild never matches."""
     validator_hotkey: Annotated[str, Field(pattern=_SS58)]
 
     @field_validator("agent_id")
@@ -52,14 +57,33 @@ class CodingCertificationAllowlistEntry(BaseModel):
             raise ValueError("coding certification allowlist agent_id is nil")
         return value
 
-    def key(self) -> tuple[str, str, str]:
-        return (str(self.agent_id), self.artifact_sha256, self.validator_hotkey)
+    def key(self) -> CodingCertificationAllowlistKey:
+        return (
+            str(self.agent_id),
+            self.artifact_sha256,
+            self.screened_image_sha256,
+            self.validator_hotkey,
+        )
 
 
 def canonical_coding_certification_allowlist_entries(
     entries: list[CodingCertificationAllowlistEntry],
 ) -> list[CodingCertificationAllowlistEntry]:
     return sorted(entries, key=lambda entry: entry.key())
+
+
+def coding_certification_allowlist_entry_json(
+    entry: CodingCertificationAllowlistEntry,
+) -> dict[str, str]:
+    """The stored and checksummed form of one exact tuple."""
+
+    agent_id, artifact_sha256, screened_image_sha256, validator_hotkey = entry.key()
+    return {
+        "agent_id": agent_id,
+        "artifact_sha256": artifact_sha256,
+        "screened_image_sha256": screened_image_sha256,
+        "validator_hotkey": validator_hotkey,
+    }
 
 
 def coding_certification_allowlist_checksum(
@@ -74,17 +98,8 @@ def coding_certification_allowlist_checksum(
             "schema": CODING_CERTIFICATION_ALLOWLIST_SCHEMA,
             "enabled": enabled,
             "entries": [
-                {
-                    "agent_id": agent_id,
-                    "artifact_sha256": artifact_sha256,
-                    "validator_hotkey": validator_hotkey,
-                }
-                for agent_id, artifact_sha256, validator_hotkey in (
-                    entry.key()
-                    for entry in canonical_coding_certification_allowlist_entries(
-                        entries
-                    )
-                )
+                coding_certification_allowlist_entry_json(entry)
+                for entry in canonical_coding_certification_allowlist_entries(entries)
             ],
         },
         sort_keys=True,

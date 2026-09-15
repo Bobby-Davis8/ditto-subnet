@@ -306,6 +306,7 @@ async def lock_coding_certification_lease(
     if not allowlist.admits(
         agent_id=lease.agent_id,
         artifact_sha256=lease.artifact_sha256,
+        screened_image_sha256=lease.screened_image_sha256,
         validator_hotkey=lease.validator_hotkey,
     ):
         raise CodingCertificationAllowlistRefusedError()
@@ -328,11 +329,17 @@ def _admitted_tuple_filter(
     return tuple_(
         CodingCertificationLease.agent_id,
         CodingCertificationLease.artifact_sha256,
+        CodingCertificationLease.screened_image_sha256,
         CodingCertificationLease.validator_hotkey,
     ).in_(
         [
-            (UUID(agent_id), artifact_sha256, validator_hotkey)
-            for agent_id, artifact_sha256, validator_hotkey in sorted(allowlist.tuples)
+            (UUID(agent_id), artifact_sha256, screened_image_sha256, validator_hotkey)
+            for (
+                agent_id,
+                artifact_sha256,
+                screened_image_sha256,
+                validator_hotkey,
+            ) in sorted(allowlist.tuples)
         ]
     )
 
@@ -435,25 +442,34 @@ async def issue_coding_certification_lease(
     allowlist = await active_coding_certification_allowlist(session)
     # Decide the allowlist before any row lock (lock order: allowlist, agent,
     # lease, grant), so a refused caller never waits on or holds the agent row.
-    artifact_sha256 = await session.scalar(
-        select(Agent.sha256).where(Agent.agent_id == agent_id)
-    )
-    if artifact_sha256 is None:
+    identity = (
+        await session.execute(
+            select(Agent.sha256, Agent.screened_image_sha256).where(
+                Agent.agent_id == agent_id
+            )
+        )
+    ).one_or_none()
+    if identity is None:
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease is not available"
         )
+    artifact_sha256, screened_image_sha256 = identity
     if not allowlist.admits(
         agent_id=agent_id,
         artifact_sha256=artifact_sha256,
+        screened_image_sha256=screened_image_sha256,
         validator_hotkey=validator_hotkey,
     ):
         raise CodingCertificationAllowlistRefusedError()
     agent = await session.get(
         Agent, agent_id, with_for_update=True, populate_existing=True
     )
+    # A rebuild or re-upload that landed between the unlocked tuple check and
+    # the row lock is a different identity; refuse rather than mint for it.
     if (
         agent is None
         or agent.sha256 != artifact_sha256
+        or agent.screened_image_sha256 != screened_image_sha256
         or not _screened_image_is_complete(agent)
     ):
         raise CodingCertificationLeaseNotAvailableError(

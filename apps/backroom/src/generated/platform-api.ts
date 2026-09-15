@@ -12745,6 +12745,8 @@ export interface components {
             agent_id: string;
             /** Artifact Sha256 */
             artifact_sha256: string;
+            /** Screened Image Sha256 */
+            screened_image_sha256: string;
             /** Validator Hotkey */
             validator_hotkey: string;
         };

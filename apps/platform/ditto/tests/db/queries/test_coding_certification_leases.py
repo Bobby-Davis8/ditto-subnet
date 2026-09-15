@@ -60,7 +60,7 @@ def _policy() -> CoreQualificationPolicy:
 
 async def admit_certification_tuples(
     session: AsyncSession,
-    *tuples: tuple[UUID, str, str],
+    *tuples: tuple[UUID, str, str, str],
 ) -> int:
     """Append an allowlist revision admitting ``tuples`` plus every current entry.
 
@@ -75,11 +75,12 @@ async def admit_certification_tuples(
             (allowlist_entries_from_row(current) or []) if current is not None else []
         )
         keys = {entry.key() for entry in entries}
-        for agent_id, artifact_sha256, validator_hotkey in tuples:
+        for agent_id, artifact_sha256, screened_image_sha256, validator in tuples:
             entry = CodingCertificationAllowlistEntry(
                 agent_id=agent_id,
                 artifact_sha256=artifact_sha256,
-                validator_hotkey=validator_hotkey,
+                screened_image_sha256=screened_image_sha256,
+                validator_hotkey=validator,
             )
             if entry.key() not in keys:
                 entries.append(entry)
@@ -100,10 +101,15 @@ async def _admit(session: AsyncSession, agent: Agent, *validators: str) -> None:
     await admit_certification_tuples(
         session,
         *(
-            (agent.agent_id, agent.sha256, validator)
+            (agent.agent_id, agent.sha256, _image(agent), validator)
             for validator in (validators or (_VALIDATOR, _OTHER_VALIDATOR))
         ),
     )
+
+
+def _image(agent: Agent) -> str:
+    assert agent.screened_image_sha256 is not None
+    return agent.screened_image_sha256
 
 
 async def _seed_agent(session: AsyncSession, *, screened: bool = True) -> Agent:
@@ -295,7 +301,9 @@ async def test_issue_claim_abort_and_stale_artifact_are_fail_closed(
     stale = await _seed_agent(session)
     await _seed_observation(session, stale)
     # Admit the changed artifact so the refusal below is the stale qualification.
-    await admit_certification_tuples(session, (stale.agent_id, "99" * 32, _VALIDATOR))
+    await admit_certification_tuples(
+        session, (stale.agent_id, "99" * 32, _image(stale), _VALIDATOR)
+    )
     async with session.begin():
         agent_row = await session.get(Agent, stale.agent_id)
         assert agent_row is not None

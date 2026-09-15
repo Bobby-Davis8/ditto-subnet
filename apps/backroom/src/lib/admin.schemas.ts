@@ -5870,11 +5870,16 @@ export function codingCertificationAllowlistConfirmation(enabled: boolean, entry
     : 'APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL'
 }
 
-export const codingCertificationAllowlistEntrySchema = z.object({
+const codingCertificationAllowlistEntryShape = {
   agent_id: z.string().uuid(),
   artifact_sha256: z.string().regex(CODING_SHA256),
+  screened_image_sha256: z.string().regex(CODING_SHA256),
   validator_hotkey: z.string().regex(CODING_SS58_HOTKEY),
-} satisfies PlatformResponseShape<GeneratedCodingCertificationAllowlistEntry>)
+} satisfies PlatformResponseShape<GeneratedCodingCertificationAllowlistEntry>
+
+export const codingCertificationAllowlistEntrySchema = z.object(
+  codingCertificationAllowlistEntryShape,
+)
 
 const codingCertificationAllowlistIntegritySchema = z.enum(['valid', 'invalid'])
 const codingCertificationAllowlistEffectSchema = z.enum(['refuse_all', 'exact_tuples'])
@@ -5926,8 +5931,9 @@ export const setCodingCertificationAllowlistInputSchema = z
   .object({
     expectedRevision: z.number().int().nonnegative(),
     enabled: z.boolean(),
+    // Strict: a misspelled or missing tuple field is refused, never dropped.
     entries: z
-      .array(codingCertificationAllowlistEntrySchema)
+      .array(z.strictObject(codingCertificationAllowlistEntryShape))
       .max(CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES)
       .default([]),
     reason: auditReasonSchema(8),
@@ -5960,7 +5966,8 @@ export const setCodingCertificationAllowlistInputSchema = z
       })
     }
     const keys = value.entries.map(
-      (entry) => `${entry.agent_id}|${entry.artifact_sha256}|${entry.validator_hotkey}`,
+      (entry) =>
+        `${entry.agent_id}|${entry.artifact_sha256}|${entry.screened_image_sha256}|${entry.validator_hotkey}`,
     )
     if (new Set(keys).size !== keys.length) {
       context.addIssue({

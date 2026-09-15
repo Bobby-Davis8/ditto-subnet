@@ -51,6 +51,7 @@ def _entry(agent_id: str, validator: str = _VALIDATOR) -> dict[str, str]:
     return {
         "agent_id": agent_id,
         "artifact_sha256": "ab" * 32,
+        "screened_image_sha256": "cd" * 32,
         "validator_hotkey": validator,
     }
 
@@ -144,6 +145,29 @@ async def test_allowlist_defaults_to_refuse_all_and_writes_audited_revisions(
             enabled=True,
             entries=[_entry(str(uuid4())) for _ in range(17)],
         ),
+        # The tuple binds the screened image: omitting it or passing anything
+        # but a lowercase SHA-256 is refused, never treated as a wildcard.
+        _payload(
+            expected_revision=0,
+            enabled=True,
+            entries=[
+                {
+                    key: value
+                    for key, value in _entry(first_agent).items()
+                    if key != "screened_image_sha256"
+                }
+            ],
+        ),
+        _payload(
+            expected_revision=0,
+            enabled=True,
+            entries=[{**_entry(first_agent), "screened_image_sha256": "*"}],
+        ),
+        _payload(
+            expected_revision=0,
+            enabled=True,
+            entries=[{**_entry(first_agent), "screened_image_sha256": "CD" * 32}],
+        ),
         {
             **_payload(
                 expected_revision=0, enabled=True, entries=[_entry(first_agent)]
@@ -175,6 +199,7 @@ async def test_allowlist_defaults_to_refuse_all_and_writes_audited_revisions(
         key=lambda item: (
             item["agent_id"],
             item["artifact_sha256"],
+            item["screened_image_sha256"],
             item["validator_hotkey"],
         ),
     )
@@ -221,7 +246,13 @@ async def test_lease_audit_is_admin_only_paginated_newest_first_and_redacted(
             agent = await _seed_agent(session)
             await _seed_observation(session, agent, evidence_sha256=f"{index}1" * 32)
             await admit_certification_tuples(
-                session, (agent.agent_id, agent.sha256, _VALIDATOR)
+                session,
+                (
+                    agent.agent_id,
+                    agent.sha256,
+                    agent.screened_image_sha256 or "",
+                    _VALIDATOR,
+                ),
             )
             async with session.begin():
                 issued = await issue_coding_certification_lease(

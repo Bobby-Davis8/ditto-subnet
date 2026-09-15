@@ -412,13 +412,22 @@ async def revoke_unlisted_coding_certification_inference_grants(
                 tuple_(
                     CodingCertificationLease.agent_id,
                     CodingCertificationLease.artifact_sha256,
+                    CodingCertificationLease.screened_image_sha256,
                     CodingCertificationInferenceGrant.validator_hotkey,
                 ).in_(
                     [
-                        (UUID(agent_id), artifact_sha256, validator_hotkey)
-                        for agent_id, artifact_sha256, validator_hotkey in sorted(
-                            allowlist.tuples
+                        (
+                            UUID(agent_id),
+                            artifact_sha256,
+                            screened_image_sha256,
+                            validator_hotkey,
                         )
+                        for (
+                            agent_id,
+                            artifact_sha256,
+                            screened_image_sha256,
+                            validator_hotkey,
+                        ) in sorted(allowlist.tuples)
                     ]
                 )
             )

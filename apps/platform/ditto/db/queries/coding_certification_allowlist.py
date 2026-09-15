@@ -5,7 +5,10 @@ revision, or a stored revision that cannot be parsed or whose checksum
 disagrees, Platform refuses every certification lease issue, claim, harness
 launch, inference grant, and receipt. Only an intact enabled revision admits
 anything, and then only its exact ``(agent_id, artifact_sha256,
-validator_hotkey)`` tuples. No revision can reopen global access.
+screened_image_sha256, validator_hotkey)`` tuples. The screened-image digest is
+the agent's verified ``agents.screened_image_sha256`` (the digest every lease,
+receipt, and core-qualification observation binds), so a rebuilt image never
+matches a tuple written for the previous one. No revision can reopen global access.
 
 Lock order: every transaction that authorizes on the allowlist takes the shared
 transaction advisory lock before it locks any lease, agent, or grant row, and a
@@ -26,9 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ditto.api_models.coding_certification_admin import (
     CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES,
     CodingCertificationAllowlistEntry,
+    CodingCertificationAllowlistKey,
     CodingCertificationAllowlistRevision,
     canonical_coding_certification_allowlist_entries,
     coding_certification_allowlist_checksum,
+    coding_certification_allowlist_entry_json,
 )
 from ditto.db.models import (
     CodingCertificationAllowlistRevision as CodingCertificationAllowlistRevisionRow,
@@ -62,12 +67,24 @@ class CodingCertificationAllowlist:
 
     revision: int
     """Latest stored revision, or ``0`` when none exists (refuse all)."""
-    tuples: frozenset[tuple[str, str, str]]
+    tuples: frozenset[CodingCertificationAllowlistKey]
 
     def admits(
-        self, *, agent_id: UUID, artifact_sha256: str, validator_hotkey: str
+        self,
+        *,
+        agent_id: UUID,
+        artifact_sha256: str,
+        screened_image_sha256: str | None,
+        validator_hotkey: str,
     ) -> bool:
-        return (str(agent_id), artifact_sha256, validator_hotkey) in self.tuples
+        if screened_image_sha256 is None:
+            return False
+        return (
+            str(agent_id),
+            artifact_sha256,
+            screened_image_sha256,
+            validator_hotkey,
+        ) in self.tuples
 
 
 async def _lock(session: AsyncSession, *, shared: bool) -> None:
@@ -222,14 +239,7 @@ async def insert_coding_certification_allowlist_revision(
         parent_revision=current_revision,
         enabled=enabled,
         entries=[
-            {
-                "agent_id": agent_id,
-                "artifact_sha256": artifact_sha256,
-                "validator_hotkey": validator_hotkey,
-            }
-            for agent_id, artifact_sha256, validator_hotkey in (
-                entry.key() for entry in canonical
-            )
+            coding_certification_allowlist_entry_json(entry) for entry in canonical
         ],
         checksum=coding_certification_allowlist_checksum(
             enabled=enabled, entries=canonical

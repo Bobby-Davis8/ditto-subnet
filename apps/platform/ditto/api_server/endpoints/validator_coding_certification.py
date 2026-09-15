@@ -228,6 +228,7 @@ async def _submit_coding_certification(
         if not allowlist.admits(
             agent_id=agent_id,
             artifact_sha256=agent.sha256,
+            screened_image_sha256=agent.screened_image_sha256,
             validator_hotkey=payload.validator_hotkey,
         ):
             # Nothing was written; no receipt row exists for a refused tuple.

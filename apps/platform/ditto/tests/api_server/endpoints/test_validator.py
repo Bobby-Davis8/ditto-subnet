@@ -13369,7 +13369,8 @@ async def _seed_claimed_certification_lease(
                 assert agent is not None
                 artifact_sha256 = agent.sha256
             admitted = await admit_certification_tuples(
-                session, (agent_id, artifact_sha256, _VALIDATOR_HOTKEY)
+                session,
+                (agent_id, artifact_sha256, screened_image_sha256, _VALIDATOR_HOTKEY),
             )
     async with maker() as session, session.begin():
         agent = await session.get(Agent, agent_id)
@@ -13999,6 +14000,7 @@ async def test_shadow_coding_certification_never_persists_a_refused_tuple(
     other = {
         "agent_id": str(uuid4()),
         "artifact_sha256": _SHA256,
+        "screened_image_sha256": "12" * 32,
         "validator_hotkey": _VALIDATOR_HOTKEY,
     }
     tightened = await client.post(
@@ -14056,6 +14058,7 @@ async def test_shadow_coding_certification_corrupt_allowlist_refuses_claimed_rec
                     {
                         "agent_id": str(second_agent),
                         "artifact_sha256": _SHA256,
+                        "screened_image_sha256": "12" * 32,
                         "validator_hotkey": _VALIDATOR_HOTKEY,
                     }
                 ],
@@ -14075,7 +14078,7 @@ async def test_shadow_coding_certification_corrupt_allowlist_refuses_claimed_rec
     assert await _certification_state(session_maker, second_lease) == ("claimed", 0)
     async with session_maker() as session:
         await admit_certification_tuples(
-            session, (second_agent, _SHA256, _VALIDATOR_HOTKEY)
+            session, (second_agent, _SHA256, "12" * 32, _VALIDATOR_HOTKEY)
         )
     admitted = await client.post(second_endpoint, json=second_payload)
     assert admitted.status_code == 200, admitted.text

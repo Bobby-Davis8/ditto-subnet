@@ -1427,7 +1427,7 @@ class CodingCertificationAllowlistRevision(Base):
     No row, or a latest ``enabled=false`` revision, refuses every certification
     lease, claim, harness launch, inference grant, and receipt. An enabled
     revision admits only its 1-16 exact ``(agent_id, artifact_sha256,
-    validator_hotkey)`` tuples.
+    screened_image_sha256, validator_hotkey)`` tuples.
     """
 
     __tablename__ = "coding_certification_allowlist_revisions"

@@ -11,8 +11,9 @@ all of these hold in one transaction:
 
 - a permitted validator hotkey and valid sr25519 signature;
 - the strict operator allowlist admits this exact
-  `(agent_id, artifact_sha256, validator_hotkey)` tuple (see below; nothing is
-  admitted by default);
+  `(agent_id, artifact_sha256, screened_image_sha256, validator_hotkey)` tuple,
+  where the screened image is the agent's current verified
+  `agents.screened_image_sha256` (see below; nothing is admitted by default);
 - a complete, content-addressed screened image on the agent;
 - no receipt (`certified`, `failed`, or `unsupported`) already exists for the
   identity `(agent, artifact, screened image, benchmark, coding contract)`,
@@ -139,8 +140,17 @@ entries fail to parse or whose checksum does not bind them, Platform refuses
 every certification lease issue, claim, harness launch, grant offer, grant
 exchange, and receipt. No revision can reopen global access: an enabled
 revision must list 1 to 16 exact `(agent_id, artifact_sha256,
-validator_hotkey)` tuples, there are no wildcards, and there is no admin
-certification bypass.
+screened_image_sha256, validator_hotkey)` tuples, there are no wildcards, and
+there is no admin certification bypass.
+
+`screened_image_sha256` is the SHA-256 of the agent's verified screened-image
+archive (`agents.screened_image_sha256`, set only once Platform has streamed and
+verified the archive). It is the same digest every lease, receipt, and core
+qualification observation binds. Issue compares the agent's current digest,
+and every later gate compares the lease's frozen digest, so a screened-image
+rebuild never matches a tuple written for the previous image: the rebuilt
+image needs a new revision, and that write aborts the old image's in-flight
+leases.
 
 The check runs in the one lease authority gate shared by claim, harness launch,
 grant offer, grant exchange, and receipt submission, and on lease issue and new

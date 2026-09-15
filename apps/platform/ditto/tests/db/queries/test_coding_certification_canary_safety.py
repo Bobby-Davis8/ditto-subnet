@@ -104,7 +104,11 @@ async def _qualified_agent(
     await _seed_observation(session, agent, evidence_sha256=evidence * 32)
     if admit:
         await admit_certification_tuples(
-            session, *((agent.agent_id, agent.sha256, v) for v in admit)
+            session,
+            *(
+                (agent.agent_id, agent.sha256, agent.screened_image_sha256 or "", v)
+                for v in admit
+            ),
         )
     return agent
 
@@ -251,6 +255,7 @@ async def _append_corrupt_revision(session: AsyncSession, agent: Agent) -> None:
     """A stored revision whose checksum does not bind its entries."""
 
     agent_id, artifact_sha256 = agent.agent_id, agent.sha256
+    screened_image_sha256 = agent.screened_image_sha256
     async with session.begin():
         current = await session.scalar(
             select(func.max(CodingCertificationAllowlistRevision.revision))
@@ -263,6 +268,7 @@ async def _append_corrupt_revision(session: AsyncSession, agent: Agent) -> None:
                     {
                         "agent_id": str(agent_id),
                         "artifact_sha256": artifact_sha256,
+                        "screened_image_sha256": screened_image_sha256,
                         "validator_hotkey": _VALIDATOR,
                     }
                 ],
@@ -281,6 +287,7 @@ def _entry(
     return CodingCertificationAllowlistEntry(
         agent_id=agent.agent_id,
         artifact_sha256=agent.sha256,
+        screened_image_sha256=agent.screened_image_sha256 or "",
         validator_hotkey=validator,
     )
 
@@ -634,18 +641,79 @@ async def test_enabled_allowlist_refuses_unlisted_issue_before_any_row(
     await _set_allowlist(session, [_entry(agent, _OTHER_VALIDATOR)])
     await refused()
 
-    wrong_artifact = CodingCertificationAllowlistEntry(
-        agent_id=agent.agent_id,
-        artifact_sha256="99" * 32,
-        validator_hotkey=_VALIDATOR,
-    )
+    wrong_artifact = _entry(agent).model_copy(update={"artifact_sha256": "99" * 32})
     await _set_allowlist(session, [wrong_artifact])
     await refused()
 
-    await _set_allowlist(session, [wrong_artifact, _entry(agent)])
+    # Every field is exact: a tuple naming another screened image never matches.
+    wrong_image = _entry(agent).model_copy(update={"screened_image_sha256": "98" * 32})
+    await _set_allowlist(session, [wrong_image])
+    await refused()
+
+    await _set_allowlist(session, [wrong_artifact, wrong_image, _entry(agent)])
     await refused(_OTHER_VALIDATOR)
     assert await _issue(session, agent)
     assert await _lease_count(session) == 1
+
+
+async def test_allowlist_binds_the_screened_image_so_a_rebuild_never_matches(
+    session: AsyncSession,
+) -> None:
+    agent = await _qualified_agent(session, admit=())
+    old_entry = _entry(agent)
+    await _set_allowlist(session, [old_entry])
+    claimed = await _issue_and_claim(session, agent)
+    grant_id = await _live_grant(session, claimed)
+
+    # A screened-image rebuild keeps the agent and artifact but changes the
+    # verified archive digest (and its locators).
+    rebuilt_image = "ce" * 32
+    async with session.begin():
+        row = await session.get(Agent, agent.agent_id, populate_existing=True)
+        assert row is not None
+        row.screened_image_sha256 = rebuilt_image
+        row.screened_image_id = "sha256:" + "fa" * 32
+        row.screened_image_upload_id = uuid4()
+    rebuilt = await _lease(session, claimed)
+    assert rebuilt.screened_image_sha256 == old_entry.screened_image_sha256
+    async with session.begin():
+        fresh = await session.get(Agent, agent.agent_id, populate_existing=True)
+    assert fresh is not None
+    await _seed_observation(session, fresh, evidence_sha256="44" * 32)
+
+    # The old tuple no longer admits issue for the rebuilt image, before any row.
+    async with session.begin():
+        with pytest.raises(CodingCertificationAllowlistRefusedError):
+            await issue_coding_certification_lease(
+                session,
+                validator_hotkey=_VALIDATOR,
+                agent_id=agent.agent_id,
+                bench_version=_BENCH_VERSION,
+            )
+    assert await _lease_count(session) == 1
+    # The claimed lease for the previous image cannot reach its harness.
+    async with session.begin():
+        with pytest.raises(CodingCertificationLeaseNotAvailableError):
+            await authorize_coding_certification_harness_delivery(
+                session, lease_id=claimed, validator_hotkey=_VALIDATOR
+            )
+
+    # Admitting the rebuilt image aborts the old-image lease and revokes its grant.
+    new_entry = old_entry.model_copy(update={"screened_image_sha256": rebuilt_image})
+    # (The abort revokes the grant, so the separate grant sweep finds none.)
+    assert await _set_allowlist(session, [new_entry]) == (1, 0)
+    aborted = await _lease(session, claimed)
+    assert aborted.status == "aborted" and aborted.aborted_allowlist_revision
+    assert (await _grant(session, grant_id)).status == "revoked"
+    async with session.begin():
+        reissued = await issue_coding_certification_lease(
+            session,
+            validator_hotkey=_VALIDATOR,
+            agent_id=agent.agent_id,
+            bench_version=_BENCH_VERSION,
+        )
+    assert reissued.row.screened_image_sha256 == rebuilt_image
+    assert reissued.authority.screened_image_sha256 == rebuilt_image
 
 
 async def test_shared_gate_refuses_claim_harness_and_grants_for_a_refused_tuple(
@@ -839,7 +907,12 @@ async def test_allowlist_revisions_are_append_only_revisioned_and_fail_closed(
     await _set_allowlist(session, [_entry(agent)])
     # Rolled-back transactions below expire ``agent``; keep a detached copy.
     snapshot = cast(
-        Agent, SimpleNamespace(agent_id=agent.agent_id, sha256=agent.sha256)
+        Agent,
+        SimpleNamespace(
+            agent_id=agent.agent_id,
+            sha256=agent.sha256,
+            screened_image_sha256=agent.screened_image_sha256,
+        ),
     )
 
     async with session.begin():

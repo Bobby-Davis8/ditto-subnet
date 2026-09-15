@@ -92,7 +92,8 @@ envelope:
 - `set_coding_certification_allowlist` (write) appends one complete, strict
   allowlist revision. Its catalog schema is an open object; the exact fields
   are in `get_backroom_tool_help`: `expectedRevision`, `enabled`, 1 to 16 exact
-  `{agent_id, artifact_sha256, validator_hotkey}` entries when enabled (none
+  `{agent_id, artifact_sha256, screened_image_sha256, validator_hotkey}`
+  entries when enabled (none
   when `enabled=false`), a reason, and
   `APPLY CODING CERTIFICATION ALLOWLIST ENABLED <count>` or
   `APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL`. Shape, duplicate, and

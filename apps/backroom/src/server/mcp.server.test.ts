@@ -8114,8 +8114,10 @@ describe('Backroom MCP tools', () => {
     const entry = {
       agent_id: agentId,
       artifact_sha256: 'b'.repeat(64),
+      screened_image_sha256: 'c'.repeat(64),
       validator_hotkey: '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
     }
+    const { screened_image_sha256: _image, ...entryWithoutImage } = entry
     const applied = {
       enabled: true,
       integrity: 'valid',
@@ -8142,6 +8144,7 @@ describe('Backroom MCP tools', () => {
         'APPLY CODING CERTIFICATION ALLOWLIST ENABLED <entry count>',
         'APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL',
         'aborted_lease_count',
+        'screened_image_sha256',
         'no admin certification bypass',
       ]) {
         expect(help.guidance).toContain(needle)
@@ -8160,6 +8163,11 @@ describe('Backroom MCP tools', () => {
         { ...base, enabled: false, entries: [], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST DISABLED' },
         { ...base, enabled: true, entries: [entry, entry], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST ENABLED 2' },
         { ...base, enabled: true, entries: [{ ...entry, agent_id: 'not-a-uuid' }], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST ENABLED 1' },
+        // The tuple binds the exact screened image: no omission, wildcard, or extra field.
+        { ...base, enabled: true, entries: [entryWithoutImage], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST ENABLED 1' },
+        { ...base, enabled: true, entries: [{ ...entry, screened_image_sha256: '*' }], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST ENABLED 1' },
+        { ...base, enabled: true, entries: [{ ...entry, screened_image_sha256: 'C'.repeat(64) }], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST ENABLED 1' },
+        { ...base, enabled: true, entries: [{ ...entry, screened_image_digest: 'c'.repeat(64) }], confirmation: 'APPLY CODING CERTIFICATION ALLOWLIST ENABLED 1' },
       ]) {
         const response = await client.callTool({
           name: 'set_coding_certification_allowlist',
