@@ -13966,6 +13966,21 @@ async def test_shadow_coding_certification_accepts_receipt_in_window_and_complet
     assert await _certification_state(session_maker, lease_id) == ("completed", 1)
     replay = await client.post(endpoint, json=payload)
     assert replay.status_code == 200 and replay.json()["idempotent"] is True
+    # A second, different receipt for the completed lease is a conflict; it
+    # never adds a row or reopens the lease.
+    double = await client.post(
+        endpoint,
+        json=_coding_certification_payload(
+            agent_id,
+            lease_id,
+            receipt=_unused_inference_receipt(
+                issued_at=now - timedelta(minutes=4),
+                certification_id="cert-endpoint-double",
+            ),
+        ),
+    )
+    assert double.status_code == 409, double.text
+    assert await _certification_state(session_maker, lease_id) == ("completed", 1)
 
     audit = await client.get(
         f"/api/v1/admin/coding-certification-leases?agent_id={agent_id}",

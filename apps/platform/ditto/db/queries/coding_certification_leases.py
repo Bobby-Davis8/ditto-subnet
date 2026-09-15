@@ -53,6 +53,9 @@ _INFLIGHT = (
 MAX_CLAIMED_ATTEMPTS_PER_IDENTITY = 3
 CLAIMED_ATTEMPT_WINDOW = timedelta(hours=24)
 RECEIPT_GRACE = timedelta(seconds=CODING_CERTIFICATION_RECEIPT_GRACE_SECONDS)
+# ``coding_certifications_expiry_check``: a receipt expires within 24 hours of
+# its ``issued_at``. Used only for a completed lease whose receipt is missing.
+CERTIFICATION_MAX_VALIDITY = timedelta(hours=24)
 
 
 class CodingCertificationLeaseNotAvailableError(RuntimeError):
@@ -206,6 +209,71 @@ async def _expire_due_leases(
     for row in rows:
         await _expire_if_due(session, row, now=now)
     await session.flush()
+
+
+async def certification_valid_until(
+    session: AsyncSession,
+    *,
+    agent_id: UUID,
+    artifact_sha256: str,
+    screened_image_sha256: str,
+    bench_version: int,
+    coding_contract_version: int,
+    now: datetime,
+) -> datetime | None:
+    """When the identity's still-valid certification result expires, else ``None``.
+
+    Contract v1 renews an unchanged identity only after its certification
+    expires. The authority is the accepted receipt's own ``expires_at``
+    (``coding_capability_certifications``), compared with the caller's database
+    time read after the agent row lock, which every receipt write also holds.
+    Conservatively, every accepted receipt counts, whatever its status
+    (``certified``, ``failed``, or ``unsupported``), settlement binding,
+    validator, or lease linkage, so a failed result, a legacy receipt without
+    a lease, and a certified result all block issue until they expire, and none
+    blocks it after.
+
+    A ``completed`` lease is written only with its receipt. If that receipt is
+    ever missing, the lease blocks for the longest validity any receipt for it
+    could have had: a receipt's ``issued_at`` is at most the lease deadline and
+    ``coding_certifications_expiry_check`` bounds ``expires_at`` to 24 hours
+    after it.
+    """
+
+    receipt_expiry = await session.scalar(
+        select(func.max(CodingCapabilityCertification.expires_at)).where(
+            CodingCapabilityCertification.agent_id == agent_id,
+            CodingCapabilityCertification.artifact_sha256 == artifact_sha256,
+            CodingCapabilityCertification.screened_image_sha256
+            == screened_image_sha256,
+            CodingCapabilityCertification.bench_version == bench_version,
+            CodingCapabilityCertification.coding_contract_version
+            == coding_contract_version,
+            CodingCapabilityCertification.expires_at > now,
+        )
+    )
+    unreceipted_deadline = await session.scalar(
+        select(func.max(CodingCertificationLease.deadline)).where(
+            CodingCertificationLease.agent_id == agent_id,
+            CodingCertificationLease.artifact_sha256 == artifact_sha256,
+            CodingCertificationLease.screened_image_sha256 == screened_image_sha256,
+            CodingCertificationLease.bench_version == bench_version,
+            CodingCertificationLease.coding_contract_version == coding_contract_version,
+            CodingCertificationLease.status
+            == CodingCertificationLeaseStatus.COMPLETED.value,
+            CodingCertificationLease.deadline > now - CERTIFICATION_MAX_VALIDITY,
+            ~select(CodingCapabilityCertification.certification_row_id)
+            .where(
+                CodingCapabilityCertification.lease_id
+                == CodingCertificationLease.lease_id
+            )
+            .exists(),
+        )
+    )
+    candidates = [_aware(receipt_expiry)] if receipt_expiry is not None else []
+    if unreceipted_deadline is not None:
+        candidates.append(_aware(unreceipted_deadline) + CERTIFICATION_MAX_VALIDITY)
+    return max(candidates, default=None)
 
 
 async def revoke_live_certification_inference_grants(
@@ -430,6 +498,12 @@ async def issue_coding_certification_lease(
 ) -> CodingCertificationLeaseResult:
     """Mint one canary lease if current core qualification still holds.
 
+    An identity renews: a ``completed`` lease stays terminal, but once every
+    certification result for the identity has expired on the database clock a
+    fresh lease may be issued, still under the allowlist and the claimed-attempt
+    budget. Issue refuses while any lease for the identity is in flight or any
+    of its results is still valid (:func:`certification_valid_until`).
+
     Domain refusals are raised before a lease row is minted. The only writes
     that may precede one are deadline expiry and grant revocation, which the
     caller commits with the refusal rather than rolling back.
@@ -479,26 +553,6 @@ async def issue_coding_certification_lease(
     assert agent.screened_image_id is not None
     assert agent.screened_image_ref is not None
     assert agent.screened_image_upload_id is not None
-    # Contract v1: an accepted receipt (certified, failed, or unsupported) is the
-    # terminal certification result for this exact identity, whichever
-    # validator produced it. Only a run that ended without a receipt may rerun.
-    receipted = await session.scalar(
-        select(CodingCapabilityCertification.certification_row_id)
-        .where(
-            CodingCapabilityCertification.agent_id == agent.agent_id,
-            CodingCapabilityCertification.artifact_sha256 == agent.sha256,
-            CodingCapabilityCertification.screened_image_sha256
-            == agent.screened_image_sha256,
-            CodingCapabilityCertification.bench_version == bench_version,
-            CodingCapabilityCertification.coding_contract_version
-            == coding_contract_version,
-        )
-        .limit(1)
-    )
-    if receipted is not None:
-        raise CodingCertificationLeaseNotAvailableError(
-            "coding certification already has a terminal receipt for this artifact"
-        )
     await lock_core_qualification_bench(session, bench_version=bench_version)
     policy = await latest_core_qualification_policy(
         session, bench_version=bench_version
@@ -556,6 +610,20 @@ async def issue_coding_certification_lease(
             return result_from_row(inflight, idempotent=True)
         raise CodingCertificationLeaseConflictError(
             "coding certification lease already exists for this artifact"
+        )
+    valid_until = await certification_valid_until(
+        session,
+        agent_id=agent.agent_id,
+        artifact_sha256=agent.sha256,
+        screened_image_sha256=agent.screened_image_sha256,
+        bench_version=bench_version,
+        coding_contract_version=coding_contract_version,
+        now=now,
+    )
+    if valid_until is not None:
+        raise CodingCertificationLeaseNotAvailableError(
+            "coding certification for this artifact is still valid until "
+            f"{valid_until.isoformat()}"
         )
     recent_claims = int(
         await session.scalar(
