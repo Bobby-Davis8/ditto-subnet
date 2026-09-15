@@ -4,6 +4,7 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -162,6 +163,25 @@ func TestExecutorResourceEnforcementIsMeasuredThroughTheProductionLaunch(t *test
 	}
 	if collected == 0 {
 		t.Fatal("no executor resource observations were collected")
+	}
+	// The CI job hands the live observations to the offline verifier test.
+	if output := os.Getenv("DITTOBENCH_NATIVE_PROBE_OUTPUT"); output != "" {
+		live := map[string]any{
+			"schema":   "dittobench-coding-native-probe-live-observations-v1",
+			"language": "python",
+			"grading_resource_policy": map[string]any{
+				"MemoryLimitBytes": policy.MemoryLimitBytes, "ScratchLimitBytes": policy.ScratchLimitBytes,
+				"PidsLimit": policy.PidsLimit, "CPUQuotaMillis": policy.CPUQuotaMillis,
+			},
+			"phases": phases,
+		}
+		body, err := json.Marshal(live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(output, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Logf("measured %d executor_grading resource observations through the production launch code", collected)
 }
