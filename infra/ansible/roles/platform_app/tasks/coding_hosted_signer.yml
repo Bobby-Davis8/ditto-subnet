@@ -46,3 +46,12 @@
       - /
     platform_coding_hosted_signer_guard_directory: /etc/ditto-platform/coding-hosted-signer
     platform_coding_hosted_signer_guard_seed: /etc/ditto-platform/coding-hosted-signer/seed
+
+# The switches above are configuration; this checks the live host. Imported
+# after the stat guard so a missing placement is still reported first.
+- name: Refuse the signer while any deploy process can reach the Docker daemon
+  ansible.builtin.import_tasks: deploy_docker_access.yml
+  vars:
+    platform_deploy_docker_probe_group: docker
+    platform_deploy_docker_probe_proc: /proc
+    platform_deploy_docker_probe_socket: /run/docker.sock
