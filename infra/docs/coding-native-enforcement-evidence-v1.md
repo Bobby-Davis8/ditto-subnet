@@ -29,8 +29,8 @@ there is no approval or readiness key. One record covers one `kind`:
 | `host` | `machine_id_sha256`, `boot_id`, `kernel_release`, `daemon_identity_sha256`, `subordinate_ids` (uid/gid start and count), `router_namespace` (`host` or `rootless-netns`) |
 | `release` | `source_revision`, `release_manifest_sha256`, `runtime_archive_sha256`, `image_approval_sha256` for go, node, python and rust |
 | `pre_collection_preflight_sha256` | The preflight stdout taken before collection, retained in the store |
-| `inputs` | Per kind: the connectivity profile digest (network) or the execution/grading profile digests |
-| `endpoints` | Network only. Roles `router` (one), `refusing_proxy` (one), `trusted` (1 to 32), each as `endpoint_sha256` |
+| `inputs` | Per kind: the connectivity profile digest (network) or the execution/grading profile digests. Each must equal the document supplied to the verifier |
+| `endpoints` | Network only. Roles `router` and `refusing_proxy` (one each), `trusted` (1 to 32) and `trusted_dns` (0 to 2), each as `endpoint_sha256`. The set must equal the hashes derived from the connectivity profile |
 | `tools` | `catalog_sha256`, `collector_sha256`, `evidence_tool_sha256`, `fixtures_sha256` |
 | `preconditions`, `residue` | Worker and custody inactive, no custody socket, zero containers, job networks, volumes and processes |
 | `phases` | Catalog phases in order, each with timestamps and its probes |
@@ -43,8 +43,38 @@ A probe entry is `id`, `language` (or null), `endpoint_sha256` (or null),
 Records never hold a raw address, credential or private input. Observed values
 are only integers, booleans, catalog outcome names and short lowercase names
 such as `lo`. An endpoint is identified only by
-`sha256("dittobench-coding-native-endpoint-v1\0" + connectivity_profile_sha256 + "\0" + "address:port")`.
-The connectivity profile itself appears only as its digest.
+`sha256("dittobench-coding-native-endpoint-v1\0" + connectivity_profile_sha256 + "\0" + list + "\0" + "address:port")`,
+where `list` is `trusted_tcp`, `trusted_dns` or `candidate_tcp`. The connectivity
+profile digest is the native canonical sha256 already used for rollout
+connectivity profiles; the profile itself never leaves the verifier.
+
+## Approved profiles
+
+`verify`, `review` and `check-approval` read the exact profile documents with
+`--execution-profile`, `--grading-profile` and `--connectivity-profile`.
+
+- The execution and grading profiles must be their exact Go canonical bytes
+  (sorted, compact, newline), and their sha256 must equal the record's
+  `inputs`. Grading test groups are `hidden` then `visible`.
+- The connectivity profile's `candidate_tcp` must list exactly the router and
+  the refusing proxy. The record's router and proxy hashes must be those two,
+  and its trusted and DNS hashes must equal the profile's entries.
+
+Resource limits come only from these documents, never from the record:
+
+| Container | Profile | Scratch | nofile | Log bound |
+|---|---|---|---|---|
+| `harness` | execution | `ScratchLimitBytes` | 1024 | 8 MiB (sandbox `max-size=8m`) |
+| `executor_authoring` | execution | Rust: minus `min(scratch/2, 128 MiB)` | 1024 | 24 KiB model-visible output |
+| `executor_grading` | grading | Rust: minus `min(scratch/2, 128 MiB)` | 1024 | 24 KiB model-visible output |
+
+Memory, CPU quota (millis) and pids come from the container's profile
+`resource_policy`. A resource probe's `profile`, `limit` or `deadline_ms` must
+equal that value, so related probes (for example `memory_oom.limit` and
+`memory_max.profile`) agree by construction. Only `executor_grading` has a
+`supervisor_timeout` probe: its deadline is the approved timeout of the grading
+test group it names. Authoring command timeouts come from the private task
+runtime policy, which the verifier never reads.
 
 ## Catalog
 
@@ -56,9 +86,13 @@ reads the same file. It defines:
 - the probe IDs for each kind and phase;
 - each probe's scope: once per record, once per language image, or once per
   trusted endpoint;
-- the accepted outcomes and tolerances.
+- the accepted outcomes and tolerances;
+- where each resource limit comes from.
 
-The first network probe is `candidate.router.source`.
+The first network probe is `candidate.router.source`. Candidate identities follow
+the runtime: the harness sandbox runs as `65532:65532` and the executor candidate
+as `10001:10001` (required for the Rust driver). Rootless Docker maps container id
+`c` to subordinate start `+ c - 1`, so each host id is checked exactly.
 
 Expectation types:
 
@@ -68,9 +102,9 @@ Expectation types:
 | `exact` | The observed object equals the catalog value |
 | `profile_equal` | The cgroup value equals the profile value, and the profile value is at least 1 |
 | `bounded` | Enforcement was seen, `limit` and `measured` are at least 1, and `measured * 1000 <= limit * permille` |
-| `supervisor_timeout` | Exit 124, no live processes, and elapsed time between the deadline and the tolerance |
-| `tests` | At least one test ran; either all passed (`all_pass`) or at least one failed (`some_fail`) |
-| `subordinate_uid` | The host uid is nonzero and inside the record's subordinate range |
+| `supervisor_timeout` | Exit 124, no live processes, and elapsed time between the deadline and the tolerance, for a named `hidden` or `visible` test group |
+| `control` | `all_pass`: at least two tests, all passed. `some_fail`: at least two tests, at least one passed and one failed. `timeout`: the run timed out. Pass, wrong and hang controls per language must share one `suite_sha256`, and pass and wrong must have the same total |
+| `subordinate_ids` | Host uid and gid equal subordinate start `+ id - 1` for the catalog candidate ids |
 
 Tolerances are versioned integer constants
 (`dittobench-coding-native-enforcement-tolerances-v1`), repeated in the catalog,
@@ -106,17 +140,25 @@ in both the Go and Python tests.
   - The host preflight is kept verbatim: the exact stdout of
     `inspect-coding-native-host.py`.
 - `verify --store DIR --checkout DIR --host-preflight SHA --record SHA...`
-  verifies records against a post-collection preflight.
+  verifies records against a post-collection preflight. It needs the profile
+  documents that the records name.
 - `review --store DIR --checkout DIR` with all six evidence digests assembles
   `dittobench-coding-native-evidence-review-v1`.
   - The review has per-item verification, a consistency result and
     `approval_generated: false`.
-  - The six-digest map, host, release and time window appear only if every item
-    verified. A failed review prints no digests.
+  - The six-digest map, host, release, profile `inputs`, `endpoints`,
+    `endpoint_counts` and time window appear only if every item verified. A
+    failed review prints no digests.
 - `check-approval` checks Peyton's signed approval against a verified review.
 
+Every JSON comparison uses exact types, so `false` never equals `0`. Integers
+longer than int64 are refused before conversion. Objects are renamed into place
+with `renameat2(RENAME_NOREPLACE)` where available, otherwise linked and
+unlinked; a crash between those steps is recovered on the next read or write.
+
 `--checkout` must be a reviewed checkout of the release `source_revision`. Tool
-hashes always come from that checkout, never from the record.
+hashes always come from that checkout, never from the record. The checkout, its
+files and their directories must not be links or writable by group or others.
 
 ### Verification rules
 
@@ -133,16 +175,21 @@ A record is refused unless all of these hold:
 5. The tool, collector, catalog and fixture hashes equal the reviewed checkout.
    The preflight's own tool hashes must also match.
 6. Preconditions held and the residue is empty.
-7. The pre-collection preflight and the post-collection `host_preflight` are
+7. Profile inputs, resource limits, deadlines and endpoints match the supplied
+   profile documents, and controls come from one suite per language.
+8. The pre-collection preflight and the post-collection `host_preflight` are
    separate objects. Both match the record's machine, boot, kernel, daemon and
-   release.
-8. Timestamps are in order: the pre-collection preflight, then the record start,
-   the phases and the record end, then the post-collection preflight.
-9. All records share one host (including `router_namespace` and subordinate
-   IDs), release, tool set and shared input digests. No digest is reused.
-10. The custody binding names the same machine and boot.
-11. Records, preflight and custody binding all fall within six hours of each
-    other.
+   release, and they have the same nft snapshot and config digests.
+9. Timestamps are in order: the pre-collection preflight (at most 15 minutes
+   old), then the record start, the phases and the record end, then the
+   post-collection preflight.
+10. All records share one host (including `router_namespace` and subordinate
+    IDs), release, tool set and shared input digests. No digest is reused.
+11. Records run in the order network, resource, pre-exec, cleanup, and never
+    overlap: each ends before the next starts.
+12. The custody binding names the same machine and boot.
+13. Records, the post-collection preflight and the custody binding all fall
+    within six hours of each other, in `verify` as well as `review`.
 
 `check-approval` then requires all of these:
 
@@ -151,14 +198,25 @@ A record is refused unless all of these hold:
   `--curator-signing-key-sha256`.
 
 This is the algorithm and key identity that the profile approval and the
-curator key loader use. Verification runs through OpenSSL 3 (`--openssl`,
-default `/usr/bin/openssl`), because the infra Python environment has no
-`cryptography`. The tool never handles a private key. It then checks:
+curator key loader use. The infra Python environment has neither `cryptography`
+nor PyNaCl, so verification runs through OpenSSL 3 (`--openssl`, default
+`/usr/bin/openssl`). OpenSSL must be a root-owned file with root-owned,
+non-writable ancestors. The key, message and signature are written exclusively
+into a fresh owner-only directory, and re-read unchanged after OpenSSL runs. The
+tool never handles a private key. It then checks:
 
 - The review re-verifies from the store and re-encodes to the exact supplied
   bytes.
-- `native.policy` accepts the approval.
-- The approval's `binding_sha256` and `runner_sha256` match the checkout.
+- `native.policy` accepts the approval. `native.py` is read once, its bytes
+  must hash to the approval's `binding_sha256`, and exactly those bytes are
+  compiled and run. No import loader or `__pycache__` file is used.
+- The approval's `runner_sha256` matches the checkout's `run.py`.
+- The review's profile digests equal independently reviewed pins
+  (`--execution-profile-sha256`, `--grading-profile-sha256`,
+  `--connectivity-profile-sha256`), for example from the signed profile
+  approval. `native.policy`'s closed approval shape cannot carry profile
+  digests; the approval binds them through the record digests it names, and
+  these pins make that binding visible.
 - The approval's `evidence_sha256`, machine, boot, source revision, release
   manifest and image approvals equal the review.
 - `issued_at_unix` is no earlier than every record end, the post-collection
@@ -202,5 +260,10 @@ approval's `private_input_custody` digest is the digest of that object.
   consistency and binding only. A fabricated record made with the reviewed
   tools still needs Peyton's review.
 - It cannot confirm that `--checkout` is at `source_revision`.
+- The router and proxy roles are the record's own split of the two candidate
+  endpoints; only the pair itself is derived from the profile.
+- The harness sandbox passes `--memory` without `--memory-swap`, so Docker's
+  default likely gives the harness cgroup a swap allowance equal to its memory
+  limit. `harness.memory_swap_max` would then fail until the runtime sets it.
 - Endpoint hashes hide raw addresses from the record, but IPv4 addresses are
   few enough to guess a hash by brute force. They are labels, not secrets.
