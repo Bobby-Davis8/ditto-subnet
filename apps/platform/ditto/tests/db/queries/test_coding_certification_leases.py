@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import bittensor
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ditto.api_models.agent_status import AgentStatus
+from ditto.api_models.coding_certification_admin import (
+    CodingCertificationAllowlistEntry,
+)
 from ditto.api_models.coding_certification_leases import CodingCertificationLeaseStatus
 from ditto.api_models.core_qualification import CoreQualificationPolicy
 from ditto.api_server.coding_certification_canary import public_certification_canary
 from ditto.db.models import Agent, CoreQualificationObservation
+from ditto.db.queries.coding_certification_allowlist import (
+    active_coding_certification_allowlist,
+    allowlist_entries_from_row,
+    insert_coding_certification_allowlist_revision,
+    latest_coding_certification_allowlist,
+)
 from ditto.db.queries.coding_certification_leases import (
     CodingCertificationLeaseConflictError,
     CodingCertificationLeaseNotAvailableError,
@@ -46,6 +55,54 @@ def _policy() -> CoreQualificationPolicy:
         exit_memory_mean=0.7,
         enter_observations=2,
         exit_observations=2,
+    )
+
+
+async def admit_certification_tuples(
+    session: AsyncSession,
+    *tuples: tuple[UUID, str, str],
+) -> int:
+    """Append an allowlist revision admitting ``tuples`` plus every current entry.
+
+    The allowlist refuses everything by default, so every test that issues,
+    claims, launches, grants, or submits must admit its exact tuples first.
+    Returns the new revision.
+    """
+
+    async with session.begin():
+        current = await latest_coding_certification_allowlist(session)
+        entries = (
+            (allowlist_entries_from_row(current) or []) if current is not None else []
+        )
+        keys = {entry.key() for entry in entries}
+        for agent_id, artifact_sha256, validator_hotkey in tuples:
+            entry = CodingCertificationAllowlistEntry(
+                agent_id=agent_id,
+                artifact_sha256=artifact_sha256,
+                validator_hotkey=validator_hotkey,
+            )
+            if entry.key() not in keys:
+                entries.append(entry)
+                keys.add(entry.key())
+        row = await insert_coding_certification_allowlist_revision(
+            session,
+            expected_revision=current.revision if current is not None else 0,
+            enabled=True,
+            entries=entries,
+            reason="admit the exact test canary tuples",
+            actor="test-admin",
+        )
+        assert (await active_coding_certification_allowlist(session)).tuples
+        return row.revision
+
+
+async def _admit(session: AsyncSession, agent: Agent, *validators: str) -> None:
+    await admit_certification_tuples(
+        session,
+        *(
+            (agent.agent_id, agent.sha256, validator)
+            for validator in (validators or (_VALIDATOR, _OTHER_VALIDATOR))
+        ),
     )
 
 
@@ -132,6 +189,7 @@ async def test_issue_requires_current_complete_qualification(
     session: AsyncSession,
 ) -> None:
     agent = await _seed_agent(session)
+    await _admit(session, agent)
     async with session.begin():
         with pytest.raises(CodingCertificationLeaseNotAvailableError):
             await issue_coding_certification_lease(
@@ -156,6 +214,7 @@ async def test_issue_claim_abort_and_stale_artifact_are_fail_closed(
 ) -> None:
     agent = await _seed_agent(session)
     await _seed_observation(session, agent)
+    await _admit(session, agent)
     canary = public_certification_canary()
     async with session.begin():
         issued = await issue_coding_certification_lease(
@@ -211,6 +270,7 @@ async def test_issue_claim_abort_and_stale_artifact_are_fail_closed(
 
     fresh = await _seed_agent(session)
     await _seed_observation(session, fresh)
+    await _admit(session, fresh)
     async with session.begin():
         abortable = await issue_coding_certification_lease(
             session,
@@ -234,6 +294,8 @@ async def test_issue_claim_abort_and_stale_artifact_are_fail_closed(
 
     stale = await _seed_agent(session)
     await _seed_observation(session, stale)
+    # Admit the changed artifact so the refusal below is the stale qualification.
+    await admit_certification_tuples(session, (stale.agent_id, "99" * 32, _VALIDATOR))
     async with session.begin():
         agent_row = await session.get(Agent, stale.agent_id)
         assert agent_row is not None
@@ -252,6 +314,7 @@ async def test_issue_uses_latest_complete_observation(
 ) -> None:
     agent = await _seed_agent(session)
     complete = await _seed_observation(session, agent)
+    await _admit(session, agent)
     await _seed_observation(
         session,
         agent,
@@ -275,6 +338,7 @@ async def test_expired_claim_and_abort_persist_expired(
 ) -> None:
     claim_agent = await _seed_agent(session)
     await _seed_observation(session, claim_agent)
+    await _admit(session, claim_agent)
     async with session.begin():
         claimable = await issue_coding_certification_lease(
             session,
@@ -302,6 +366,7 @@ async def test_expired_claim_and_abort_persist_expired(
 
     abort_agent = await _seed_agent(session)
     await _seed_observation(session, abort_agent, evidence_sha256="33" * 32)
+    await _admit(session, abort_agent)
     async with session.begin():
         abortable = await issue_coding_certification_lease(
             session,

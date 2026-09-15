@@ -62,6 +62,17 @@ from ditto.db.queries.coding_certification_leases import (
 )
 from ditto.db.queries.validator_auth import ValidatorRequestReplayError
 from ditto.tests.api_server.conftest import override_get_storage_client
+from ditto.tests.db.queries.test_coding_certification_canary_safety import (
+    _backdate,
+    _grant,
+    _issue_and_claim,
+    _lease,
+    _live_grant,
+    _qualified_agent,
+)
+from ditto.tests.db.queries.test_coding_certification_leases import (
+    _BENCH_VERSION,
+)
 
 _KEYPAIR = bittensor.Keypair.create_from_uri("//Alice")
 _VALIDATOR = _KEYPAIR.ss58_address
@@ -672,3 +683,87 @@ async def test_allowlist_refusal_is_a_fixed_no_store_403_everywhere(
     assert exchanged.status_code == 403, exchanged.text
     assert "bearer" not in exchanged.text
     assert mocks.consume.await_count == 3
+
+    mocks.claim.side_effect = CodingCertificationAllowlistRefusedError()
+    claimed = await client.post(
+        f"/api/v1/validator/coding-certification-leases/{_LEASE}/claim",
+        json=_action_payload("claim"),
+    )
+    assert claimed.status_code == 403, claimed.text
+    assert claimed.headers["Cache-Control"] == "no-store"
+    assert mocks.consume.await_count == 4
+
+    mocks.authorize.side_effect = CodingCertificationAllowlistRefusedError()
+    harness = await client.post(
+        f"/api/v1/validator/coding-certification-leases/{_LEASE}/harness-launch",
+        json=_harness_payload(),
+    )
+    assert harness.status_code == 403, harness.text
+    assert harness.headers["Cache-Control"] == "no-store"
+    assert "image_url" not in harness.text
+    mocks.storage.presigned_get_url.assert_not_awaited()
+
+
+async def test_budget_refusal_commits_the_expiry_and_revocation_it_performed(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+    monkeypatch,
+) -> None:
+    async def _session() -> AsyncIterator[AsyncSession]:
+        async with session_maker() as scoped:
+            yield scoped
+
+    async def _chain():
+        return object()
+
+    app.dependency_overrides[get_session] = _session
+    app.dependency_overrides[get_chain_client] = _chain
+    monkeypatch.setattr(
+        endpoint_module, "_assert_validator_permitted", AsyncMock(return_value=None)
+    )
+    agent = await _qualified_agent(session)
+    agent_id = agent.agent_id
+    leases = []
+    for _ in range(3):
+        lease_id = await _issue_and_claim(session, agent)
+        leases.append(lease_id)
+        if len(leases) < 3:
+            await _backdate(session, lease_id)
+    # The third claimed attempt is overdue (past its receipt window) but no one
+    # has touched it yet, so it still reads claimed with a live grant.
+    grant_id = await _live_grant(session, leases[-1])
+    await _backdate(session, leases[-1])
+    assert (await _lease(session, leases[-1])).status == "claimed"
+    assert (await _grant(session, grant_id)).status == "active"
+
+    nonce = uuid4()
+    requested_at = datetime.now(UTC)
+    refused = await client.post(
+        "/api/v1/validator/coding-certification-leases",
+        json=CodingCertificationLeaseIssueRequest(
+            validator_hotkey=_VALIDATOR,
+            agent_id=agent_id,
+            bench_version=_BENCH_VERSION,
+            nonce=nonce,
+            requested_at=requested_at,
+            signature=_KEYPAIR.sign(
+                coding_certification_lease_issue_signing_message(
+                    validator_hotkey=_VALIDATOR,
+                    agent_id=agent_id,
+                    bench_version=_BENCH_VERSION,
+                    coding_contract_version=1,
+                    nonce=nonce,
+                    requested_at=requested_at,
+                )
+            ).hex(),
+        ).model_dump(mode="json"),
+    )
+    assert refused.status_code == 404, refused.text
+    # The attempt budget refused the issue, yet the overdue lease's expiry and
+    # its grant's revocation were committed rather than rolled back.
+    expired = await _lease(session, leases[-1])
+    assert expired.status == "expired" and expired.claimed_at is not None
+    revoked = await _grant(session, grant_id)
+    assert revoked.status == "revoked" and revoked.bearer_digest is None

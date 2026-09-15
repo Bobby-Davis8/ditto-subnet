@@ -9,6 +9,7 @@ from uuid import uuid4
 import bittensor
 import httpx
 from fastapi import FastAPI
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ditto.api_models.coding_certification_admin import (
@@ -16,6 +17,7 @@ from ditto.api_models.coding_certification_admin import (
     coding_certification_allowlist_checksum,
 )
 from ditto.api_server.dependencies import get_session
+from ditto.db.models import CodingCertificationAllowlistRevision
 from ditto.db.queries.coding_certification_leases import (
     claim_coding_certification_lease,
     issue_coding_certification_lease,
@@ -25,6 +27,7 @@ from ditto.tests.db.queries.test_coding_certification_leases import (
     _VALIDATOR,
     _seed_agent,
     _seed_observation,
+    admit_certification_tuples,
 )
 
 _ADMIN_TOKEN = "test-admin-token-at-least-32-characters"
@@ -69,12 +72,12 @@ def _payload(
         or (
             f"APPLY CODING CERTIFICATION ALLOWLIST ENABLED {len(entries)}"
             if enabled
-            else "APPLY CODING CERTIFICATION ALLOWLIST DISABLED"
+            else "APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL"
         ),
     }
 
 
-async def test_allowlist_defaults_disabled_and_writes_audited_revisions(
+async def test_allowlist_defaults_to_refuse_all_and_writes_audited_revisions(
     app: FastAPI,
     client: httpx.AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
@@ -93,8 +96,11 @@ async def test_allowlist_defaults_disabled_and_writes_audited_revisions(
     assert initial.headers["Cache-Control"] == "no-store"
     body = initial.json()
     assert body["enabled"] is False
+    assert body["effective"] == "refuse_all" and body["integrity"] == "valid"
     assert body["current"]["revision"] == 0
+    assert body["current"]["effective"] == "refuse_all"
     assert body["current"]["created_at"] is None
+    assert "refused for every tuple" in body["current"]["reason"]
     assert body["history"] == []
     assert body["weight_eligible"] is False
 
@@ -112,7 +118,21 @@ async def test_allowlist_defaults_disabled_and_writes_audited_revisions(
     )
     assert wrong_phrase.status_code == 422
     assert "APPLY CODING CERTIFICATION ALLOWLIST ENABLED 2" in wrong_phrase.text
+    legacy_phrase = await client.post(
+        _ALLOWLIST_URL,
+        headers=_HEADERS,
+        json=_payload(
+            expected_revision=0,
+            enabled=False,
+            entries=[],
+            confirmation="APPLY CODING CERTIFICATION ALLOWLIST DISABLED",
+        ),
+    )
+    assert legacy_phrase.status_code == 422
+    assert "APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL" in legacy_phrase.text
     for invalid in (
+        # There is no open or "enabled with nothing listed" revision to write.
+        _payload(expected_revision=0, enabled=True, entries=[]),
         _payload(expected_revision=0, enabled=False, entries=[_entry(first_agent)]),
         _payload(
             expected_revision=0,
@@ -125,7 +145,9 @@ async def test_allowlist_defaults_disabled_and_writes_audited_revisions(
             entries=[_entry(str(uuid4())) for _ in range(17)],
         ),
         {
-            **_payload(expected_revision=0, enabled=True, entries=[]),
+            **_payload(
+                expected_revision=0, enabled=True, entries=[_entry(first_agent)]
+            ),
             "enabled": "true",
         },
     ):
@@ -141,6 +163,8 @@ async def test_allowlist_defaults_disabled_and_writes_audited_revisions(
     assert enabled.headers["Cache-Control"] == "no-store"
     applied = enabled.json()
     assert applied["enabled"] is True
+    assert applied["effective"] == "exact_tuples"
+    assert applied["aborted_lease_count"] == 0
     assert applied["revoked_inference_grant_count"] == 0
     current = applied["current"]
     assert current["revision"] == 1 and current["parent_revision"] == 0
@@ -176,6 +200,7 @@ async def test_allowlist_defaults_disabled_and_writes_audited_revisions(
     assert disabled.status_code == 200, disabled.text
     read = await client.get(f"{_ALLOWLIST_URL}?history_limit=1", headers=_HEADERS)
     assert read.json()["enabled"] is False
+    assert read.json()["effective"] == "refuse_all"
     assert read.json()["current"]["revision"] == 2
     assert [item["revision"] for item in read.json()["history"]] == [2]
     full = await client.get(_ALLOWLIST_URL, headers=_HEADERS)
@@ -195,6 +220,9 @@ async def test_lease_audit_is_admin_only_paginated_newest_first_and_redacted(
         for index in range(3):
             agent = await _seed_agent(session)
             await _seed_observation(session, agent, evidence_sha256=f"{index}1" * 32)
+            await admit_certification_tuples(
+                session, (agent.agent_id, agent.sha256, _VALIDATOR)
+            )
             async with session.begin():
                 issued = await issue_coding_certification_lease(
                     session,
@@ -221,6 +249,9 @@ async def test_lease_audit_is_admin_only_paginated_newest_first_and_redacted(
     assert claimed["status"] == "claimed"
     assert claimed["claimed_at"] is not None
     assert claimed["deadline_passed"] is False
+    assert claimed["claim_allowlist_revision"] == 3
+    assert claimed["aborted_allowlist_revision"] is None
+    assert claimed["receipt_window_ends_at"] > claimed["deadline"]
     assert claimed["inference_grant_status"] is None
     assert claimed["receipt_status"] is None
     assert claimed["weight_eligible"] is False
@@ -245,3 +276,75 @@ async def test_lease_audit_is_admin_only_paginated_newest_first_and_redacted(
     assert (
         await client.get(f"{_LEASES_URL}?limit=201", headers=_HEADERS)
     ).status_code == 422
+
+    # Refusing everything aborts every in-flight lease and names the revision.
+    refuse_all = await client.post(
+        _ALLOWLIST_URL,
+        headers=_HEADERS,
+        json=_payload(expected_revision=3, enabled=False, entries=[]),
+    )
+    assert refuse_all.status_code == 200, refuse_all.text
+    assert refuse_all.json()["aborted_lease_count"] == 3
+    aborted = await client.get(f"{_LEASES_URL}?status=aborted", headers=_HEADERS)
+    assert aborted.json()["total"] == 3
+    assert {row["aborted_allowlist_revision"] for row in aborted.json()["leases"]} == {
+        4
+    }
+    claimed_then_aborted = next(
+        row for row in aborted.json()["leases"] if row["lease_id"] == str(lease_ids[1])
+    )
+    assert claimed_then_aborted["claimed_at"] is not None
+
+
+async def test_corrupt_allowlist_revision_reads_as_invalid_and_refuse_all(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    _install(app, session_maker)
+    agent_id = str(uuid4())
+    written = await client.post(
+        _ALLOWLIST_URL,
+        headers=_HEADERS,
+        json=_payload(expected_revision=0, enabled=True, entries=[_entry(agent_id)]),
+    )
+    assert written.status_code == 200, written.text
+    async with session_maker() as session, session.begin():
+        latest = await session.scalar(
+            select(func.max(CodingCertificationAllowlistRevision.revision))
+        )
+        session.add(
+            CodingCertificationAllowlistRevision(
+                parent_revision=int(latest or 0),
+                enabled=True,
+                entries=[_entry(agent_id), _entry(str(uuid4()))],
+                checksum=coding_certification_allowlist_checksum(
+                    enabled=True,
+                    entries=[
+                        CodingCertificationAllowlistEntry.model_validate(
+                            _entry(agent_id)
+                        )
+                    ],
+                ),
+                reason="tampered revision fixture",
+                actor="test",
+            )
+        )
+    read = await client.get(_ALLOWLIST_URL, headers=_HEADERS)
+    assert read.status_code == 200, read.text
+    body = read.json()
+    assert body["enabled"] is False
+    assert body["integrity"] == "invalid" and body["effective"] == "refuse_all"
+    assert body["current"]["revision"] == 2 and body["current"]["enabled"] is True
+    assert body["current"]["integrity"] == "invalid"
+    assert body["current"]["entries"] == []
+    assert [item["integrity"] for item in body["history"]] == ["invalid", "valid"]
+    # An operator repairs it by appending a new intact revision.
+    repaired = await client.post(
+        _ALLOWLIST_URL,
+        headers=_HEADERS,
+        json=_payload(expected_revision=2, enabled=True, entries=[_entry(agent_id)]),
+    )
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["integrity"] == "valid"
+    assert repaired.json()["enabled"] is True
