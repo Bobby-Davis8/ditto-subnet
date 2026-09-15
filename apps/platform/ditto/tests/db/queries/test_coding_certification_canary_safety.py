@@ -62,6 +62,7 @@ from ditto.db.queries.coding_certification_leases import (
     lease_is_due,
     list_coding_certification_leases,
     lock_coding_certification_lease,
+    restamp_admitted_coding_certification_leases,
 )
 from ditto.db.queries.coding_inference_grants import (
     CodingInferenceGrantNotAvailableError,
@@ -239,6 +240,7 @@ async def _set_allowlist(
         aborted = await abort_unlisted_coding_certification_leases(
             session, allowlist=allowlist
         )
+        await restamp_admitted_coding_certification_leases(session, allowlist=allowlist)
         revoked = await revoke_unlisted_coding_certification_inference_grants(
             session, allowlist=allowlist
         )
@@ -709,6 +711,8 @@ async def test_tightening_aborts_unlisted_leases_and_locks_only_refused_rows(
     session: AsyncSession,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
+    held = await _qualified_agent(session, evidence="44", admit=(_VALIDATOR,))
+    held_lease = await _issue(session, held)
     canary = await _qualified_agent(session, admit=(_VALIDATOR,))
     other = await _qualified_agent(session, evidence="22", admit=(_VALIDATOR,))
     canary_lease = await _issue_and_claim(session, canary)
@@ -717,13 +721,16 @@ async def test_tightening_aborts_unlisted_leases_and_locks_only_refused_rows(
     other_grant = await _live_grant(session, other_lease)
     pending_agent = await _qualified_agent(session, evidence="33", admit=(_VALIDATOR,))
     pending_lease = await _issue(session, pending_agent)
+    stamped_before = (await _lease(session, canary_lease)).claim_allowlist_revision
 
     async with session_maker() as holder, holder.begin():
-        # Hold the listed canary lease and grant. A tightening that locked every
-        # live row and filtered in Python would wait here and time out.
+        # Hold a listed in-flight lease and the listed canary grant. A
+        # tightening that locked every live row and filtered in Python would
+        # wait here and time out. (The listed claimed canary lease itself is
+        # re-stamped, so it is locked by design and not held here.)
         await holder.execute(
             select(CodingCertificationLease)
-            .where(CodingCertificationLease.lease_id == canary_lease)
+            .where(CodingCertificationLease.lease_id == held_lease)
             .with_for_update()
         )
         await holder.execute(
@@ -740,7 +747,7 @@ async def test_tightening_aborts_unlisted_leases_and_locks_only_refused_rows(
                 session,
                 expected_revision=int(current or 0),
                 enabled=True,
-                entries=[_entry(canary)],
+                entries=[_entry(canary), _entry(held)],
                 reason="restrict certification to the team canary",
                 actor="operator@example.com",
             )
@@ -748,13 +755,21 @@ async def test_tightening_aborts_unlisted_leases_and_locks_only_refused_rows(
             aborted = await abort_unlisted_coding_certification_leases(
                 session, allowlist=allowlist
             )
+            restamped = await restamp_admitted_coding_certification_leases(
+                session, allowlist=allowlist
+            )
             revoked = await revoke_unlisted_coding_certification_inference_grants(
                 session, allowlist=allowlist
             )
-    assert (aborted, revoked) == (2, 0)
+    assert (aborted, restamped, revoked) == (2, 1, 0)
 
     assert (await _grant(session, canary_grant)).status == "active"
-    assert (await _lease(session, canary_lease)).status == "claimed"
+    canary_row = await _lease(session, canary_lease)
+    assert canary_row.status == "claimed"
+    # The relay admits inference only while this stamp is the latest revision.
+    assert stamped_before is not None and stamped_before < row.revision
+    assert canary_row.claim_allowlist_revision == row.revision
+    assert (await _lease(session, held_lease)).status == "issued"
     other_row = await _lease(session, other_lease)
     assert other_row.status == "aborted"
     assert other_row.aborted_allowlist_revision == row.revision
@@ -781,7 +796,7 @@ async def test_tightening_aborts_unlisted_leases_and_locks_only_refused_rows(
             .where(CodingCertificationInferenceGrant.grant_id == other_grant)
             .values(status="pending", generation=0, revoked_at=None)
         )
-    assert await _set_allowlist(session, [_entry(canary)]) == (0, 1)
+    assert await _set_allowlist(session, [_entry(canary)]) == (1, 1)
 
     async with session.begin():
         replay = await ensure_coding_certification_inference_grant(
@@ -809,10 +824,10 @@ async def test_tightening_aborts_unlisted_leases_and_locks_only_refused_rows(
             limit=5,
             offset=0,
         )
-    assert page.total == 3 and len(page.rows) == 2
+    assert page.total == 4 and len(page.rows) == 2
     assert [row.lease.lease_id for row in page.rows] == [pending_lease, other_lease]
     assert [row.inference_grant_status for row in page.rows] == [None, "revoked"]
-    assert tail.total == 2
+    assert tail.total == 3
     assert page.now.tzinfo is not None
 
 
@@ -963,3 +978,27 @@ async def test_gate_reads_the_database_clock_after_waiting_for_the_lease_lock(
         await holder.rollback()
         observed = await waiting
     assert observed - before >= timedelta(seconds=1)
+
+
+async def test_refused_issue_is_decided_before_locking_the_agent_row(
+    session: AsyncSession,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    agent = await _qualified_agent(session, admit=())
+    agent_id = agent.agent_id
+    async with session_maker() as holder, holder.begin():
+        await holder.execute(
+            select(Agent).where(Agent.agent_id == agent_id).with_for_update()
+        )
+        async with session.begin():
+            # Taking the agent row lock first would wait on the holder and
+            # time out instead of refusing.
+            await session.execute(text("SET LOCAL lock_timeout = '1s'"))
+            with pytest.raises(CodingCertificationAllowlistRefusedError):
+                await issue_coding_certification_lease(
+                    session,
+                    validator_hotkey=_VALIDATOR,
+                    agent_id=agent_id,
+                    bench_version=_BENCH_VERSION,
+                )
+    assert await _lease_count(session) == 0

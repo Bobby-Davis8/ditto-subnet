@@ -14086,6 +14086,85 @@ async def test_shadow_coding_certification_corrupt_allowlist_refuses_claimed_rec
     )
 
 
+async def test_shadow_coding_certification_replay_stays_idempotent_under_refuse_all(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
+    receipt = _unused_inference_receipt(issued_at=datetime.now(UTC))
+    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
+    _install_db(app, session_maker)
+    _install_chain(app)
+    endpoint = f"/api/v1/validator/agent/{agent_id}/coding-certification"
+    payload = _coding_certification_payload(agent_id, lease_id, receipt=receipt)
+    assert (await client.post(endpoint, json=payload)).status_code == 200
+    async with session_maker() as session, session.begin():
+        latest = await session.scalar(
+            select(func.max(CodingCertificationAllowlistRevision.revision))
+        )
+        session.add(
+            CodingCertificationAllowlistRevision(
+                parent_revision=int(latest or 0),
+                enabled=False,
+                entries=[],
+                checksum=coding_certification_allowlist_checksum(
+                    enabled=False, entries=[]
+                ),
+                reason="refuse every certification tuple",
+                actor="test",
+            )
+        )
+
+    # An exact replay of an accepted receipt writes nothing, so it is answered
+    # from the stored row even though the allowlist now refuses everything.
+    replay = await client.post(endpoint, json=payload)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["idempotent"] is True
+    # Any new receipt for the tuple is refused before the agent row is locked.
+    other = _unused_inference_receipt(
+        issued_at=datetime.now(UTC), certification_id="cert-endpoint-002"
+    )
+    refused = await client.post(
+        endpoint, json=_coding_certification_payload(agent_id, lease_id, receipt=other)
+    )
+    assert refused.status_code == 403, refused.text
+    assert await _certification_state(session_maker, lease_id) == ("completed", 1)
+
+
+async def test_shadow_coding_certification_refusal_does_not_wait_on_the_agent_lock(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
+    receipt = _unused_inference_receipt(issued_at=datetime.now(UTC))
+    lease_id = await _seed_claimed_certification_lease(
+        session_maker, agent_id, receipt, admit=False
+    )
+    _install_db(app, session_maker)
+    _install_chain(app)
+    async with session_maker() as holder:
+        await holder.begin()
+        await holder.execute(
+            select(Agent).where(Agent.agent_id == agent_id).with_for_update()
+        )
+        try:
+            refused = await asyncio.wait_for(
+                client.post(
+                    f"/api/v1/validator/agent/{agent_id}/coding-certification",
+                    json=_coding_certification_payload(
+                        agent_id, lease_id, receipt=receipt
+                    ),
+                ),
+                timeout=5,
+            )
+        finally:
+            await holder.rollback()
+    assert refused.status_code == 403, refused.text
+    assert await _certification_state(session_maker, lease_id) == ("claimed", 0)
+
+
 class _SkewedDatetime(datetime):
     skew = timedelta(0)
 

@@ -426,6 +426,38 @@ async def test_claimed_lease_harness_launch_is_signed_and_no_store(
     mocks.audit.assert_awaited_once()
 
 
+class _FastAppClock(datetime):
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[no-untyped-def, override]
+        return datetime.now(tz) + timedelta(minutes=30)
+
+
+async def test_harness_url_lifetime_uses_the_database_clock(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch,
+) -> None:
+    mocks = _install(app, session_maker, monkeypatch)
+    # The API host clock runs 30 minutes fast; the signed request matches it.
+    monkeypatch.setattr(endpoint_module, "datetime", _FastAppClock)
+    response = await client.post(
+        f"/api/v1/validator/coding-certification-leases/{_LEASE}/harness-launch",
+        json=_harness_payload(requested_at=_FastAppClock.now(UTC)),
+    )
+    # The lease deadline is 20 minutes out on the database clock, so the URL
+    # is still minted and expires before the deadline on that clock.
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert datetime.fromisoformat(body["expires_at"]) <= datetime.fromisoformat(
+        body["lease_deadline"]
+    )
+    assert datetime.fromisoformat(body["expires_at"]) < datetime.now(UTC) + timedelta(
+        minutes=20
+    )
+    mocks.storage.presigned_get_url.assert_awaited_once()
+
+
 async def test_claimed_lease_harness_launch_rejects_forgery(
     app: FastAPI,
     client: httpx.AsyncClient,
