@@ -166,19 +166,34 @@ The role behaves as follows:
 - It gathers no facts. Host identity and the worker and custodian accounts come
   from registered `setup` and `getent` probes, because an `ansible_facts` extra
   var replaces gathered facts but not a registered result. It also requires
+  `ansible_play_hosts_all == ['ditto-coding-hosted-v2']` and
   `ansible_play_batch == ['ditto-coding-hosted-v2']`, so the play targets
   exactly the reviewed inventory host: the hostname, architecture and
   distribution come from the target's own `setup`, which a labelled rogue VM
-  controls, but the inventory name and batch do not, so a run without `--limit`
-  cannot route the password to such a host.
+  controls, but the inventory names in the play and batch do not, and extra
+  vars cannot override either, so a run without `--limit` cannot route the
+  password to such a host. Both are pinned because with `serial: 1` the batch
+  alone is the reviewed host while a rogue host is still in the play.
 - It refuses check mode up front with a constant message, since it only writes
   files and cannot verify a write in `--check`. The dormant fixture stays the
   check path: `main.yml` never includes the write file when the gate is closed.
-- Before the password is read it requires pipelining to be effectively on and
+- Before the password is read it requires pipelining to be genuinely on and
   `keep_remote_files` off. Without pipelining ansible-core writes the module,
   including its arguments, to a temp file under the ssh user's `~/.ansible/tmp`
   on the target, and with `keep_remote_files` on it is left there, so the
-  password could persist even on a dropped connection.
+  password could persist even on a dropped connection. The playbook sets
+  `ansible_pipelining: true` in its play vars: that is the ssh connection
+  plugin's own input variable, so it genuinely enables pipelining, whereas the
+  repo `ansible.cfg`'s `[ssh_connection] pipelining = True` sets the plugin
+  option without populating the variable. On ansible-core 2.21.2 the plugin
+  reads `ansible_pipelining` and then `ansible_ssh_pipelining`, the later one
+  wins, and both outrank the `ANSIBLE_PIPELINING` environment and ini settings,
+  so an extra var `ansible_ssh_pipelining=false` disables pipelining while
+  `ansible_pipelining` still reads true. The role therefore requires both to be
+  a real boolean true (`is sameas true`, never the `bool` filter, which prints a
+  coerced value) and `keep_remote_files`, which has no variable form and
+  disables pipelining on its own, to be false. Run the playbook as written,
+  without exporting `ANSIBLE_PIPELINING` or overriding either variable.
 - Every variable it reads is a documented input, a prefixed name the preset
   check refuses, the refused loop `item`, or a magic variable extra vars cannot
   override. `inventory_hostname` and `group_names` are host variables that an
@@ -261,8 +276,10 @@ nothing; that a preset loop `item`, a raising password variable, and an
 refused; that `-vvv` with `ansible_inject_invocation` prints nothing sensitive; that a lazily templated `host` writes the safe captured address rather
 than the loop-time one; that a `private` or copy swapped for a symlink is never
 followed (the write module refuses or replaces it with a real file); that a
-rogue inventory host, check mode, pipelining off and kept remote files are
-refused; that `--start-at-task` at any `main.yml` task with the captured gate
+rogue inventory host (also under `serial: 1`), check mode, kept remote files,
+and `ansible_pipelining` or `ansible_ssh_pipelining` overridden to false or to a
+string are refused, with pipelining coming only from the playbook's play vars
+and the repo `ansible.cfg`, nothing exported; that `--start-at-task` at any `main.yml` task with the captured gate
 and registers preset still writes nothing; that preset results and document variables, forged
 `ansible_facts`, `refreshing`, `maintenance` and unknown unit states, and
 trailing-newline inputs are refused before anything is written; and that no

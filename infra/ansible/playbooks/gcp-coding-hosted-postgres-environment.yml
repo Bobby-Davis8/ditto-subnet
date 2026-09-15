@@ -16,5 +16,12 @@
   # Identity comes from the role's registered probes, which extra vars cannot
   # preset; gathered facts would be replaced by a -e ansible_facts value.
   gather_facts: false
+  # ansible_pipelining is the ssh connection plugin's own input variable, so
+  # this genuinely enables pipelining: the write module and its password
+  # argument go over stdin and are never written to ~/.ansible/tmp on the target.
+  # The repo ansible.cfg's [ssh_connection] pipelining sets the plugin option but
+  # not this variable, which the role checks before reading the password.
+  vars:
+    ansible_pipelining: true
   roles:
     - coding_hosted_postgres_environment

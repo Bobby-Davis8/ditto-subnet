@@ -57,8 +57,20 @@ NON_OVERRIDABLE_MAGIC = {
     "ansible_play_hosts_all",
     "ansible_play_batch",
     "ansible_check_mode",
-    "ansible_pipelining",
 }
+# Connection variables extra vars can override, but the role only ever compares
+# them with sameas true. On 2.21.2 the ssh plugin reads ansible_pipelining then
+# ansible_ssh_pipelining (the later wins) and both outrank the environment and
+# ini, so an override can only make the guard refuse or genuinely enable
+# pipelining.
+SAMEAS_TRUE_CONNECTION_VARS = {"ansible_pipelining", "ansible_ssh_pipelining"}
+PIPELINING_CHECKS = [
+    "ansible_pipelining is sameas true",
+    "ansible_ssh_pipelining | default(true) is sameas true",
+    "lookup('ansible.builtin.config', 'DEFAULT_KEEP_REMOTE_FILES') is sameas false",
+]
+HOSTS_ALL_PIN = "ansible_play_hosts_all == ['ditto-coding-hosted-v2']"
+BATCH_PIN = "ansible_play_batch == ['ditto-coding-hosted-v2']"
 
 CUSTODY = "/var/lib/ditto-coding-custody/private/postgres-environment.json"
 HOSTED = "/var/lib/ditto-coding-hosted/private/postgres-environment.json"
@@ -192,21 +204,13 @@ def test_default_off_gate_is_decided_once_behind_a_dynamic_include() -> None:
     assert play["gather_facts"] is False
 
 
-def test_no_bool_filter_touches_an_operator_input() -> None:
+def test_no_bool_filter_can_print_a_coerced_value() -> None:
     # ansible-core 2.21 prints any non-boolean string the bool filter coerces in
-    # a deprecation warning, even under no_log, so the gate never uses it. The
-    # only bool filters are in the pipelining guard, on ansible_pipelining and a
-    # config value, never on a coding_hosted_* input or an env lookup.
-    assert not re.search(r"\|\s*bool\b", yaml.safe_dump(_main()))
-    bool_tasks = [
-        task["name"]
-        for task in _walk(_materialize())
-        if re.search(r"\|\s*bool\b", json.dumps(task))
-    ]
-    assert bool_tasks == [PIPELINING]
-    that = _task(PIPELINING)["ansible.builtin.assert"]["that"]
-    for line in that:
-        assert PFX not in line and "lookup('env'" not in line
+    # a deprecation warning, even under no_log. Every boolean check, including
+    # the gate and the pipelining guard on -e overridable connection variables,
+    # uses sameas instead, so neither task file uses the bool filter.
+    for text in (yaml.safe_dump(_main()), PARSED):
+        assert not re.search(r"\|\s*bool\b", text)
 
 
 def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() -> None:
@@ -315,6 +319,7 @@ def test_every_variable_read_is_an_input_a_refused_name_or_unforgeable() -> None
                 or root in created
                 or root in {"item", "lookup"}
                 or root in NON_OVERRIDABLE_MAGIC
+                or (root in SAMEAS_TRUE_CONNECTION_VARS and task["name"] == PIPELINING)
             ), (task["name"], root)
     assert "inventory_hostname" not in PARSED and "group_names" not in PARSED
     # Every message is fixed text: nothing a variable could replace is rendered.
@@ -368,9 +373,10 @@ def test_identity_and_accounts_come_from_registered_probes_no_facts_gathered() -
     assert accounts["register"] == f"{PFX}accounts"
 
     that = _task(HOST)["ansible.builtin.assert"]["that"]
-    assert that[:6] == [
+    assert that[:7] == [
         GROUP_CHECK,
-        "ansible_play_batch == ['ditto-coding-hosted-v2']",
+        HOSTS_ALL_PIN,
+        BATCH_PIN,
         *(
             f"{PFX}identity.ansible_facts.ansible_{key} == '{value}'"
             for key, value in PROBED_IDENTITY.items()
@@ -438,7 +444,7 @@ def _set_fact(name: str) -> dict:
 def test_revision_and_database_host_refuse_a_trailing_newline() -> None:
     that = _task(HOST)["ansible.builtin.assert"]["that"]
     host_pattern = "^10[.]30[.]0[.]([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-3])$"
-    assert that[6:] == [
+    assert that[7:] == [
         f"{PFX}captured_revision is string",
         f"{PFX}captured_revision is match('^[0-9a-f]{{40}}$')",
         f"{PFX}captured_revision | length == 40",
@@ -630,18 +636,21 @@ def test_check_mode_and_raw_gate_and_pipelining_are_refused_first() -> None:
     ]
     # The pipelining guard runs before the password is read.
     assert names.index(PIPELINING) < names.index(PASSWORD)
-    assert _task(PIPELINING)["ansible.builtin.assert"]["that"] == [
-        "ansible_pipelining | default(false) | bool",
-        "not (lookup('ansible.builtin.config', 'DEFAULT_KEEP_REMOTE_FILES') | bool)",
-    ]
+    assert _task(PIPELINING)["ansible.builtin.assert"]["that"] == PIPELINING_CHECKS
+    # The playbook enables pipelining through the ssh plugin's own variable; the
+    # repo ansible.cfg's [ssh_connection] setting does not populate it.
+    (play,) = yaml.safe_load(PLAYBOOK.read_text())
+    assert play["vars"] == {"ansible_pipelining": True}
 
 
 def test_identity_check_pins_the_reviewed_host_by_inventory_name() -> None:
     that = _task(HOST)["ansible.builtin.assert"]["that"]
-    # ansible_play_batch carries real inventory names, so the reviewed host must
-    # be the only target; a labelled rogue VM without --limit cannot receive it.
+    # ansible_play_hosts_all and ansible_play_batch carry real inventory names, so
+    # the reviewed host must be the only target; a labelled rogue VM without
+    # --limit cannot receive it. Both are pinned: with serial: 1 the batch alone
+    # is the reviewed host while the rogue host is still in the play.
     assert GROUP_CHECK in that
-    assert "ansible_play_batch == ['ditto-coding-hosted-v2']" in that
+    assert HOSTS_ALL_PIN in that and BATCH_PIN in that
 
 
 def test_playbook_group_connection_and_ci_registration() -> None:
@@ -649,6 +658,7 @@ def test_playbook_group_connection_and_ci_registration() -> None:
     assert play["hosts"] == "role_coding_hosted"
     assert play["become"] is True and play["gather_facts"] is False
     assert play["roles"] == ["coding_hosted_postgres_environment"]
+    assert set(play) == {"name", "hosts", "become", "gather_facts", "vars", "roles"}
     (fixture,) = yaml.safe_load(FIXTURE.read_text())
     assert fixture["hosts"] == "localhost" and fixture["connection"] == "local"
     assert fixture["become"] is False and fixture["gather_facts"] is False
@@ -740,6 +750,9 @@ def test_docs_describe_every_forgery_guard() -> None:
         "O_NOFOLLOW",
         "renameat",
         "keep_remote_files",
+        "`ansible_ssh_pipelining`",
+        "`ansible_play_hosts_all == ['ditto-coding-hosted-v2']`",
+        "`serial: 1`",
         "SHA-1, MD5 and SHA-256",
         f"`{REHEARSAL_GATE}=1`",
     ):
@@ -963,14 +976,20 @@ def _record(content: str) -> dict:
     }
 
 
-def _play() -> dict:
-    return {
+def _play(serial: int | None = None) -> dict:
+    # The play vars are the real playbook's, so the rehearsal runs with exactly
+    # the pipelining setting the playbook provides and nothing exported.
+    (playbook,) = yaml.safe_load(PLAYBOOK.read_text())
+    play: dict[str, Any] = {
         "name": "Rehearse materialization",
         "hosts": "all",
         "strategy": "free",
         "gather_facts": False,
         "become": False,
-        "vars": {"ansible_python_interpreter": "{{ ansible_playbook_python }}"},
+        "vars": {
+            **playbook.get("vars", {}),
+            "ansible_python_interpreter": "{{ ansible_playbook_python }}",
+        },
         "tasks": [
             {
                 "name": "Probe this machine for the local-identity comparison",
@@ -1007,6 +1026,9 @@ def _play() -> dict:
             },
         ],
     }
+    if serial is not None:
+        play["serial"] = serial
+    return play
 
 
 def _hostvars(root: Path, **overrides: object) -> dict:
@@ -1040,10 +1062,10 @@ def _run(
     break_digest: bool = False,
     residual: str | None = None,
     outside: dict[str, dict] | None = None,
-    pipelining: str = "True",
     keep_remote_files: str | None = None,
     host_name: str | None = None,
     seed_homes: bool = False,
+    serial: int | None = None,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
@@ -1070,7 +1092,7 @@ def _run(
         # Hosts outside role_coding_hosted that the rehearsal play still targets.
         inventory["all"]["hosts"] = outside
     (work / "inventory.yml").write_text(yaml.safe_dump(inventory))
-    (work / "play.yml").write_text(yaml.safe_dump([_play()], sort_keys=False))
+    (work / "play.yml").write_text(yaml.safe_dump([_play(serial)], sort_keys=False))
     # The repo's own ansible.cfg, verbatim: its default callback with yaml results,
     # and roles_path=roles resolved beside it, reach the temporary role.
     shutil.copy(REPO_ANSIBLE_CFG, work / "ansible.cfg")
@@ -1090,9 +1112,8 @@ def _run(
         "ANSIBLE_LOG_PATH": str(work / "ansible.log"),
         "ANSIBLE_NOCOLOR": "1",
         "ANSIBLE_RETRY_FILES_ENABLED": "0",
-        # Pipelining on and remote files not kept: the role refuses otherwise, and
-        # this is the normal operating mode. Cases that flip these override here.
-        "ANSIBLE_PIPELINING": pipelining,
+        # No ANSIBLE_PIPELINING is exported: pipelining comes only from the
+        # playbook's play vars and the repo ansible.cfg, as in the documented run.
         "DITTO_CODING_PG_PASSWORD": REHEARSAL_PASSWORD,
     }
     if keep_remote_files is not None:
@@ -1473,9 +1494,20 @@ def test_rehearsal_check_mode_pipelining_and_kept_files_are_refused(tmp_path) ->
     check = tmp_path / "hosts/check"
     _run(tmp_path, "check", {"check": _hostvars(check)}, "--check")
     _refused_at(check, CHECK_MODE)
-    pipe_off = tmp_path / "hosts/pipe_off"
-    _run(tmp_path, "pipe_off", {"pipe_off": _hostvars(pipe_off)}, pipelining="False")
-    _refused_at(pipe_off, PIPELINING)
+    # The playbook's ansible_pipelining: true, with nothing exported, passes; any
+    # override that disables pipelining, or a string where a boolean is expected,
+    # is refused before the password is read. On 2.21.2 ansible_ssh_pipelining
+    # wins over ansible_pipelining, so disabling it alone must refuse too.
+    overrides = {
+        "pipe_false": json.dumps({"ansible_pipelining": False}),
+        "pipe_string_true": "ansible_pipelining=true",
+        "pipe_string_false": "ansible_pipelining=false",
+        "ssh_pipe_false": json.dumps({"ansible_ssh_pipelining": False}),
+    }
+    for name, extra in overrides.items():
+        root = tmp_path / "hosts" / name
+        _run(tmp_path, name, {name: _hostvars(root)}, "-e", extra)
+        _refused_at(root, PIPELINING)
     keep = tmp_path / "hosts/keep_files"
     _run(tmp_path, "keep_files", {"keep_files": _hostvars(keep)}, keep_remote_files="1")
     _refused_at(keep, PIPELINING)
@@ -1488,6 +1520,21 @@ def test_rehearsal_a_rogue_inventory_host_is_refused_without_limit(tmp_path) -> 
     root = tmp_path / "hosts/rogue"
     _run(tmp_path, "rogue", {"rogue-vm": _hostvars(root)}, host_name="rogue-vm")
     _refused_at(root, HOST)
+    # With serial: 1 each batch holds one host, so the batch pin alone passes on
+    # the reviewed host while a rogue host is still in the play; the
+    # ansible_play_hosts_all pin refuses both.
+    roots = {name: tmp_path / "hosts" / f"serial_{name}" for name in ("named", "rogue")}
+    _run(
+        tmp_path,
+        "serial",
+        {
+            REVIEWED_HOST: _hostvars(roots["named"]),
+            "rogue-vm": _hostvars(roots["rogue"]),
+        },
+        serial=1,
+    )
+    for root in roots.values():
+        _refused_at(root, HOST)
 
 
 @rehearsal

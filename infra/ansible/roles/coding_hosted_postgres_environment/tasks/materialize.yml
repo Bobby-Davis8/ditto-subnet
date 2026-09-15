@@ -98,9 +98,11 @@
 # inventory_hostname and group_names are host variables that extra vars
 # override, so group membership is proved from magic variables they cannot:
 # every host in this play must belong to role_coding_hosted, and the play must
-# target exactly the reviewed host. ansible_play_batch carries real inventory
-# names, so hostname/arch/distribution reported by the target's own setup can
-# no longer route the password to a labelled rogue VM run without --limit.
+# target exactly the reviewed host. ansible_play_hosts_all and
+# ansible_play_batch carry real inventory names, so hostname/arch/distribution
+# reported by the target's own setup can no longer route the password to a
+# labelled rogue VM run without --limit. Both are pinned: with serial: 1 the
+# batch alone would be the reviewed host while a rogue host is still in the play.
 # A single trailing newline satisfies a '$' anchor, so the revision also needs
 # its exact length and the host must survive trimming unchanged. The captured
 # values are inert strings by now, so this assert cannot render an operator
@@ -109,6 +111,7 @@
   ansible.builtin.assert:
     that:
       - ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) | length == 0
+      - ansible_play_hosts_all == ['ditto-coding-hosted-v2']
       - ansible_play_batch == ['ditto-coding-hosted-v2']
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_architecture == 'x86_64'
@@ -128,18 +131,26 @@
 # a temp file under the ssh user's ~/.ansible/tmp on the target, and with
 # keep_remote_files on it leaves it there; the password would persist even on a
 # dropped connection. Refuse before the password is read unless pipelining is
-# effectively on and remote files are not kept. ansible_pipelining reflects the
-# connection's real setting; if an operator forces it true they genuinely enable
-# pipelining, so this cannot be spoofed to true while files are still written.
+# genuinely on. The playbook sets ansible_pipelining: true in its play vars. On
+# ansible-core 2.21.2 the ssh plugin reads ansible_pipelining and then
+# ansible_ssh_pipelining, and the later one wins, so -e ansible_ssh_pipelining=false
+# disables pipelining while ansible_pipelining still reads true: both must be a
+# real boolean true. Variables outrank the ANSIBLE_PIPELINING environment and
+# ini settings, so when both are true pipelining is on. keep_remote_files has no
+# variable form and disables pipelining on its own, so it must be false.
+# sameas is used instead of the bool filter, which would print a coerced
+# non-boolean value in a deprecation warning.
 - name: Require pipelining on and remote files not kept before reading the password
   ansible.builtin.assert:
     that:
-      - ansible_pipelining | default(false) | bool
-      - not (lookup('ansible.builtin.config', 'DEFAULT_KEEP_REMOTE_FILES') | bool)
+      - ansible_pipelining is sameas true
+      - ansible_ssh_pipelining | default(true) is sameas true
+      - lookup('ansible.builtin.config', 'DEFAULT_KEEP_REMOTE_FILES') is sameas false
     fail_msg: >-
-      Enable pipelining (ANSIBLE_PIPELINING=1 or pipelining=true) and leave
-      keep_remote_files off before materializing, so the password is never
-      written to a temp file on the target. Nothing was written.
+      Run the materialization playbook as written, which enables pipelining, without
+      overriding ansible_pipelining or ansible_ssh_pipelining and with
+      keep_remote_files off, so the password is never written to a temp file on the
+      target. Nothing was written.
     quiet: true
 
 - name: Require one bounded single-line password from the controller environment
