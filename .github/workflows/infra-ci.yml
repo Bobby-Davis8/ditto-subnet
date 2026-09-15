@@ -8,6 +8,8 @@ on:
       - .github/workflows/infra-ci.yml
       - .github/workflows/infra-plan-apply.yml
       - ditto/tests/test_coding_hosted_worker_credentials.py
+      - pyproject.toml
+      - uv.lock
   push:
     branches: [main]
     paths:
@@ -16,6 +18,8 @@ on:
       - .github/workflows/infra-ci.yml
       - .github/workflows/infra-plan-apply.yml
       - ditto/tests/test_coding_hosted_worker_credentials.py
+      - pyproject.toml
+      - uv.lock
 
 permissions:
   contents: read
