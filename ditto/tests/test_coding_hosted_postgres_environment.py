@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import socket
 import subprocess
 from collections.abc import Iterator
@@ -556,9 +557,11 @@ def test_unit_listing_and_allow_list_match_the_cleanup_role() -> None:
 # --diff, and prove no forged input writes a copy or leaks the password.       #
 # --------------------------------------------------------------------------- #
 
-# A stand-in, never a real credential, chosen to contain the characters JSON and
-# YAML escape so the leak search must look for the escaped forms too.
-REHEARSAL_PASSWORD = 'rehearsal-only "stand-in"=pass\\word/42'
+# A stand-in, never a real credential. It holds characters JSON, YAML and repr
+# escape, plus a canary no escaping changes, so every printed form is found.
+CANARY = "Kq7vCanaryZ3w9"
+REHEARSAL_PASSWORD = f'rehearsal-only "stand-in"=pass\\word/42 {CANARY}'
+REPO_ANSIBLE_CFG = ROOT / "infra/ansible/ansible.cfg"
 STOPPED_UNITS = (
     "ditto-coding-hosted-worker.service loaded failed failed Worker\n"
     "ditto-coding-custody@0.service loaded inactive dead Custody\n"
@@ -678,6 +681,20 @@ def _build_role(
     (tasks / "materialize.yml").write_text(yaml.safe_dump(materialize, sort_keys=False))
 
 
+def _record(content: str) -> dict:
+    # The harness never prints what it records, so the output searched for leaks
+    # holds only what the role itself printed.
+    return {
+        "ansible.builtin.copy": {
+            "dest": "{{ rehearsal_root }}/outcome.json",
+            "content": content,
+        },
+        "check_mode": False,
+        "no_log": True,
+        "diff": False,
+    }
+
+
 def _play() -> dict:
     return {
         "name": "Rehearse materialization",
@@ -705,22 +722,16 @@ def _play() -> dict:
                     },
                     {
                         "name": "Record completion",
-                        "ansible.builtin.copy": {
-                            "dest": "{{ rehearsal_root }}/outcome.json",
-                            "content": "{{ {'ok': true} | to_json }}",
-                        },
+                        **_record("{{ {'ok': true} | to_json }}"),
                     },
                 ],
                 "rescue": [
                     {
                         "name": "Record refusal",
-                        "ansible.builtin.copy": {
-                            "dest": "{{ rehearsal_root }}/outcome.json",
-                            "content": (
-                                "{{ {'task': ansible_failed_task.name, 'msg': "
-                                "ansible_failed_result.msg | default('')} | to_json }}"
-                            ),
-                        },
+                        **_record(
+                            "{{ {'task': ansible_failed_task.name, 'msg': "
+                            "ansible_failed_result.msg | default('')} | to_json }}"
+                        ),
                     }
                 ],
             },
@@ -754,6 +765,7 @@ def _run(
     local_identity: bool = True,
     mock_accounts: bool = True,
     wrong_mode: bool = False,
+    residual: str | None = None,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
@@ -766,9 +778,13 @@ def _run(
     inventory = {"all": {"children": {"role_coding_hosted": {"hosts": hosts}}}}
     (work / "inventory.yml").write_text(yaml.safe_dump(inventory))
     (work / "play.yml").write_text(yaml.safe_dump([_play()], sort_keys=False))
-    (work / "ansible.cfg").write_text(
-        "[defaults]\nstdout_callback = default\ncallback_result_format = yaml\n"
-    )
+    # The repo's own ansible.cfg, verbatim: its default callback with yaml results,
+    # and roles_path=roles resolved beside it, reach the temporary role.
+    shutil.copy(REPO_ANSIBLE_CFG, work / "ansible.cfg")
+    config = REPO_ANSIBLE_CFG.read_text()
+    assert re.search(r"^stdout_callback\s*=\s*default$", config, re.M)
+    assert re.search(r"^callback_result_format\s*=\s*yaml$", config, re.M)
+    assert re.search(r"^roles_path\s*=\s*roles$", config, re.M)
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -778,7 +794,7 @@ def _run(
         "ANSIBLE_CONFIG": str(work / "ansible.cfg"),
         "ANSIBLE_HOME": str(work / "ansible-home"),
         "ANSIBLE_LOCAL_TEMP": str(work / "ansible-tmp"),
-        "ANSIBLE_ROLES_PATH": str(work / "roles"),
+        "ANSIBLE_LOG_PATH": str(work / "ansible.log"),
         "ANSIBLE_NOCOLOR": "1",
         "ANSIBLE_RETRY_FILES_ENABLED": "0",
         "DITTO_CODING_PG_PASSWORD": REHEARSAL_PASSWORD,
@@ -790,7 +806,7 @@ def _run(
             "ansible-core==2.21.2",
             "ansible-playbook",
             "-f",
-            "20",
+            "10",
             "-v",
             "--diff",
             "-i",
@@ -805,13 +821,24 @@ def _run(
         timeout=900,
         check=False,
     )
-    output = completed.stdout + completed.stderr
+    log = work / "ansible.log"
+    output = "\n".join(
+        [completed.stdout, completed.stderr, log.read_text() if log.exists() else ""]
+    )
     assert completed.returncode == 0, output[-6000:]
-    # Multi-form leak search: the raw stand-in, its JSON- and YAML-escaped forms,
-    # and the SHA-256 of the rendered document (which would enable offline
-    # guessing) must never reach the wire, even under -v --diff.
-    for form in _leak_forms():
-        assert form not in output, (name, form[:24])
+    # Multi-form leak search over the console and the log: the raw stand-in, its
+    # JSON-, YAML- and repr-escaped forms, the canary, and the SHA-1, MD5 and
+    # SHA-256 of the password and of the rendered document (a digest would enable
+    # offline guessing) must never appear, even under -v --diff.
+    forms = _leak_forms()
+    leaked = [line for line in output.splitlines() if any(f in line for f in forms)]
+    if residual is None:
+        assert leaked == [], (name, [line[:160] for line in leaked])
+    else:
+        # The documented residual: ansible-core prints a raised templating error
+        # through the task result's preserved exception field, even under no_log.
+        assert leaked, name
+        assert all(residual in line for line in leaked), (name, leaked)
     return output
 
 
@@ -832,14 +859,18 @@ def _document(host: str = DATABASE_HOST, password: str = REHEARSAL_PASSWORD) -> 
 
 
 def _leak_forms() -> set[str]:
-    document = _document()
-    digest = hashlib.sha256(document.encode()).hexdigest()
-    return {
+    forms = {
         REHEARSAL_PASSWORD,
+        CANARY,
         json.dumps(REHEARSAL_PASSWORD)[1:-1],
-        yaml.safe_dump(REHEARSAL_PASSWORD).strip(),
-        digest,
+        repr(REHEARSAL_PASSWORD)[1:-1],
+        yaml.safe_dump(REHEARSAL_PASSWORD).splitlines()[0].strip("'"),
+        yaml.safe_dump(REHEARSAL_PASSWORD, default_style='"').strip()[1:-1],
     }
+    for payload in (REHEARSAL_PASSWORD, _document()):
+        for algorithm in ("sha1", "md5", "sha256"):
+            forms.add(hashlib.new(algorithm, payload.encode()).hexdigest())
+    return forms
 
 
 def _outcome(root: Path) -> dict | None:
@@ -1037,3 +1068,31 @@ def test_rehearsal_a_sealed_failure_never_prints_the_checksum(tmp_path) -> None:
     _run(tmp_path, "sealed", {"sealed": _hostvars(root)}, wrong_mode=True)
     outcome = _outcome(root)
     assert outcome is not None and outcome.get("task") == SEALED, outcome
+
+
+@rehearsal
+def test_rehearsal_raising_templates_fail_closed_and_leak_only_through_core(
+    tmp_path,
+) -> None:
+    # The documented residual. A template that raises, rather than rendering
+    # undefined, is not neutralised by default(..., true), and ansible-core 2.21.2
+    # prints the raised message through the result's preserved exception field
+    # even under no_log. The role still fails closed at the capture, writes
+    # nothing, and never prints the value itself.
+    raising = '{{ lookup("file", lookup("env", "DITTO_CODING_PG_PASSWORD")) }}'
+    roots = {name: tmp_path / "hosts" / name for name in ("enabled", "host")}
+    hosts = {
+        "enabled": _hostvars(roots["enabled"], **{f"{PFX}enabled": raising}),
+        "host": _hostvars(roots["host"], **{f"{PFX}host": raising}),
+    }
+    _run(
+        tmp_path,
+        "residual",
+        hosts,
+        residual="The lookup plugin 'file' failed: Unable to access the file",
+    )
+    for name, task in (("enabled", CAPTURE_GATE), ("host", CAPTURE)):
+        outcome = _outcome(roots[name])
+        assert outcome is not None and outcome.get("task") == task, (name, outcome)
+        assert _written(roots[name], CUSTODY) is None, name
+        assert not (roots[name] / "var").exists(), name
