@@ -1,27 +1,8 @@
 ---
-# Reached only when the enabled gate in main.yml froze true once. Every message
-# below is constant: no input is interpolated into a fail_msg, and the only
-# interpolation is the frozen, validated source revision in the final report.
-
-# The varnames equality is the single source of truth: at this first task only
-# the three inputs and the gate fact frozen in main.yml carry the prefix, so any
-# other prefixed variable, including a preset registered result, makes the set
-# differ and is refused. This prefix already excludes the materialization role's
-# variables and its refusal excludes this prefix, so neither matches the other.
-- name: Refuse preset registered results and undocumented role inputs
-  ansible.builtin.assert:
-    that:
-      - >-
-        lookup('ansible.builtin.varnames', '^coding_hosted_worker_credentials_cleanup_', wantlist=True)
-        | sort == ['coding_hosted_worker_credentials_cleanup_confirmation',
-        'coding_hosted_worker_credentials_cleanup_enabled',
-        'coding_hosted_worker_credentials_cleanup_gate',
-        'coding_hosted_worker_credentials_cleanup_source_revision']
-    fail_msg: >-
-      Only the enabled, confirmation and source_revision inputs are accepted; a registered result
-      name or another coding_hosted_worker_credentials_cleanup_ variable is preset. Nothing was
-      removed.
-    quiet: true
+# Reached only when the enabled gate in main.yml froze true once, and after
+# main.yml refused any preset internal name. Every message here is constant: no
+# input is interpolated into a fail_msg, and the only interpolation is the
+# validated, non-secret source revision in the final report.
 
 - name: Refuse check mode for an enabled removal
   ansible.builtin.assert:
@@ -30,9 +11,8 @@
     fail_msg: Enabled removal must run its host checks for real; the disabled fixture covers check mode.
     quiet: true
 
-# Freeze confirmation and source_revision once. A set_fact result is a plain
-# value that never re-templates, and default('', true) turns an undefined-class
-# template error into '' rather than leaking it later.
+# Freeze confirmation and source_revision once; default('', true) turns an
+# undefined-class template error into '' rather than leaking it later.
 - name: Freeze the confirmation and source revision once
   ansible.builtin.set_fact:
     coding_hosted_worker_credentials_cleanup_gate_confirmation: >-
@@ -54,8 +34,6 @@
     fail_msg: Require the exact removal confirmation and a 40-character lowercase-hex source revision. Nothing was removed.
     quiet: true
 
-# A -e ansible_facts value replaces gathered facts, so identity comes only from
-# this registered probe, whose name the guard above keeps unforgeable.
 - name: Probe this machine's identity into a result extra vars cannot preset
   ansible.builtin.setup:
     gather_subset: ['!all', '!min', platform, distribution]
@@ -77,6 +55,7 @@
     database: passwd
   register: coding_hosted_worker_credentials_cleanup_accounts
 
+# getent_passwd rows are [password, uid, gid, gecos, home, shell].
 - name: Require the worker account
   ansible.builtin.assert:
     that:
@@ -93,16 +72,17 @@
   check_mode: false
 
 - name: Refuse to remove credentials unless every listed unit is inactive or failed
-  ansible.builtin.include_tasks: assert_units_idle.yml
-  vars:
-    idle_units_listing: "{{ coding_hosted_worker_credentials_cleanup_units.stdout_lines }}"
-    idle_units_fail_msg: >-
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_worker_credentials_cleanup_units.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
       Stop the hosted worker and every custody instance before removing credentials; each listed
       unit must be inactive or failed and this role stops nothing. Nothing was removed.
+    quiet: true
 
-# A process running as the worker UID could swap the private directory for a
-# symlink between inspection and unlink; require none, not only that the listed
-# units are idle.
 - name: Require no process is running as the worker UID
   ansible.builtin.command:
     argv:
@@ -115,7 +95,7 @@
       - -regex
       - '/proc/[0-9]+'
       - -uid
-      - "{{ coding_hosted_worker_credentials_cleanup_accounts.ansible_facts.getent_passwd['ditto-coding-hosted'][2] }}"
+      - "{{ coding_hosted_worker_credentials_cleanup_accounts.ansible_facts.getent_passwd['ditto-coding-hosted'][1] }}"
       - -printf
       - "x"
   register: coding_hosted_worker_credentials_cleanup_worker_procs
@@ -132,39 +112,26 @@
       removed.
     quiet: true
 
-# The root-run helper opens every path component with O_NOFOLLOW, verifies the
-# private directory on its descriptor, and unlinks only the three fixed names
-# with unlinkat, refusing a symlink, directory, hard link or another account's
-# file. It takes no secret, so this task stays visible; it prints only which
-# fixed names were removed or already absent, never a value.
-- name: Remove the three files with the symlink-safe helper
-  ansible.builtin.command:
-    argv:
-      - /usr/bin/python3
-      - "{{ role_path }}/files/remove_worker_credentials.py"
-      - --private-dir
-      - /var/lib/ditto-coding-hosted/private
-      - --owner
-      - ditto-coding-hosted
-      - --source-revision
-      - "{{ coding_hosted_worker_credentials_cleanup_gate_source_revision }}"
+# The role-local module opens every path component with O_NOFOLLOW, unlinks the
+# three fixed names and any leftover .<name>.*.tmp with unlinkat, and reports
+# only filenames and states. It takes no secret.
+- name: Remove the three files through the symlink-safe module
+  coding_hosted_worker_credentials_unlink:
+    private_dir: /var/lib/ditto-coding-hosted/private
+    owner: ditto-coding-hosted
   register: coding_hosted_worker_credentials_cleanup_helper
-  changed_when: (coding_hosted_worker_credentials_cleanup_helper.stdout | from_json).removed | default([]) | length > 0
   failed_when: false
 
-- name: Require the helper to have removed or confirmed absent all three files
+- name: Require the module to have removed or confirmed absent all three files
   ansible.builtin.assert:
     that:
-      - coding_hosted_worker_credentials_cleanup_helper.rc == 0
-      - (coding_hosted_worker_credentials_cleanup_helper.stdout | from_json).ok
+      - coding_hosted_worker_credentials_cleanup_helper.removed is defined
     fail_msg: >-
-      The worker credential removal helper refused or partially removed; it names only filenames
-      and states, never a value:
-      {{ (coding_hosted_worker_credentials_cleanup_helper.stdout | from_json).error
-      | default('helper produced no receipt; reconcile the host by hand') }}
+      The worker credential removal module refused; it names only filenames and states, never a
+      value: {{ coding_hosted_worker_credentials_cleanup_helper.msg
+      | default('no receipt; reconcile the host by hand') }}
     quiet: true
 
-# Re-list units after the unlink, as materialize does after the write.
 - name: Re-list live worker and custody units after removing
   ansible.builtin.command:
     argv: [/usr/bin/systemctl, list-units, --all, --plain, --no-legend, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
@@ -173,18 +140,23 @@
   check_mode: false
 
 - name: Refuse if any worker or custody unit went live during removal
-  ansible.builtin.include_tasks: assert_units_idle.yml
-  vars:
-    idle_units_listing: "{{ coding_hosted_worker_credentials_cleanup_units_after.stdout_lines }}"
-    idle_units_fail_msg: >-
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_worker_credentials_cleanup_units_after.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
       A worker or custody unit became active during removal. Reconcile the running unit before
       starting anything.
+    quiet: true
 
 - name: Report only the source revision and which fixed files were removed or already absent
   ansible.builtin.debug:
     msg: >-
       Native Coding worker credential cleanup;
       source_revision={{ coding_hosted_worker_credentials_cleanup_gate_source_revision }};
-      removed={{ (coding_hosted_worker_credentials_cleanup_helper.stdout | from_json).removed | to_json }};
-      already_absent={{ (coding_hosted_worker_credentials_cleanup_helper.stdout | from_json).already_absent | to_json }};
+      removed={{ coding_hosted_worker_credentials_cleanup_helper.removed | to_json }};
+      already_absent={{ coding_hosted_worker_credentials_cleanup_helper.already_absent | to_json }};
+      leftover_temps_removed={{ coding_hosted_worker_credentials_cleanup_helper.leftover_temps | to_json }};
       directories_kept=true; services_stopped=false; credentials_read=false; credentials_revoked=false.

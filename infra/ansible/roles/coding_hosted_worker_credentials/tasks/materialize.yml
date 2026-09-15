@@ -1,51 +1,12 @@
 ---
 # Reached only when the enabled gate in main.yml froze true once, with no loop
-# variable in scope. Every guard below runs before the write, and the write and
-# verification build and compare only frozen captures, never a live re-template
-# of an input.
-
-# Extra vars outrank role defaults, block vars, registered results, set_fact
-# captures and gathered facts. The varnames equality is the single source of
-# truth: at this first task only the three inputs and the gate fact frozen in
-# main.yml carry the prefix, so a preset registered result, a preset capture
-# (e.g. coding_hosted_worker_credentials_documents) or any other prefixed
-# variable makes the set differ and is refused. The lookahead excludes the
-# cleanup role's prefix so neither refusal matches the other's variables.
-- name: Refuse preset registered results, captures and undocumented role inputs
-  ansible.builtin.assert:
-    that:
-      - >-
-        lookup('ansible.builtin.varnames', '^coding_hosted_worker_credentials_(?!cleanup_)', wantlist=True)
-        | sort == ['coding_hosted_worker_credentials_confirmation',
-        'coding_hosted_worker_credentials_enabled',
-        'coding_hosted_worker_credentials_gate',
-        'coding_hosted_worker_credentials_source_revision']
-    fail_msg: >-
-      Only the enabled, confirmation and source_revision inputs are accepted; a registered
-      result name, a capture or another coding_hosted_worker_credentials_ variable is preset.
-      Nothing was written.
-    quiet: true
-
-# A credential passed as an Ansible variable is exposed in argv and history and
-# is silently ignored by this role, which reads only the environment. Refuse any
-# variable whose name matches a controller input environment name so the mistake
-# is caught, not ignored. Names only are inspected, never values.
-- name: Refuse a credential supplied as an Ansible variable
-  ansible.builtin.assert:
-    that:
-      - >-
-        lookup('ansible.builtin.varnames',
-        '(?i)^(DITTO_CODING_WORKER_|DITTO_CODING_HIPPIUS_)', wantlist=True)
-        | length == 0
-    fail_msg: >-
-      Never pass a worker credential as an Ansible variable; export each DITTO_CODING_WORKER_*
-      input in the controller's local environment instead, and treat any value passed with -e,
-      inventory or a vars file as exposed. Nothing was written.
-    quiet: true
+# variable in scope, and after main.yml refused any preset internal name. Every
+# guard below reads only values this run produced, and the write goes through a
+# role-local module that carries the secrets as a no_log parameter.
 
 # Enabled materialization must inspect the real host; the disabled localhost
-# fixture covers check mode. Refusing it also keeps the write and verification
-# below unconditional, with no check-mode branch a forged fact could steer.
+# fixture covers check mode. Refusing it keeps the write and verification below
+# unconditional, with no check-mode branch a forged fact could steer.
 - name: Refuse check mode for an enabled materialization
   ansible.builtin.assert:
     that:
@@ -54,14 +15,9 @@
     quiet: true
 
 # Freeze confirmation and source_revision once. A set_fact result is a plain
-# value, not a trusted template, so it never re-templates in a later scope and a
-# per-loop flip cannot reach the guards below. default('', true) turns an
-# undefined-class template error (for example an Undefined subscript) into '',
-# so such an input freezes to a value that fails the exact match rather than
-# leaking; no_log censors the fatal result. See docs for the one residual: a
-# lookup/filter plugin error that embeds a value in ansible's own finalization
-# banner cannot be suppressed on ansible-core 2.21.2, and the run still writes
-# nothing.
+# value that never re-templates; default('', true) turns an undefined-class
+# template error into '' rather than leaking it later, and no_log censors the
+# fatal result. Every later task reads only these frozen values.
 - name: Freeze the confirmation and source revision once
   ansible.builtin.set_fact:
     coding_hosted_worker_credentials_gate_confirmation: >-
@@ -88,7 +44,7 @@
     quiet: true
 
 # A -e ansible_facts value replaces gathered facts, so identity comes only from
-# this registered probe, whose name the guard above keeps unforgeable.
+# this registered probe, whose name main.yml's guard keeps unforgeable.
 - name: Probe this machine's identity into a result extra vars cannot preset
   ansible.builtin.setup:
     gather_subset: ['!all', '!min', platform, distribution]
@@ -121,8 +77,7 @@
   no_log: true
 
 # Freeze the eight controller-environment credentials once, keyed by env name.
-# Every file's content is built only from this capture, so the bytes written and
-# the bytes verified are identical.
+# Every file's content is built only from this capture.
 - name: Freeze the controller-environment credentials once
   ansible.builtin.set_fact:
     coding_hosted_worker_credentials_secrets:
@@ -136,10 +91,9 @@
       DITTO_CODING_WORKER_PROVIDER_KEY: "{{ lookup('env', 'DITTO_CODING_WORKER_PROVIDER_KEY') | default('', true) }}"
   no_log: true
 
-# Printable ASCII without whitespace is within every runtime rule: Hippius safe
-# scalars, the image storage model and the provider key's 33..126 bytes. A
-# character class, not an anchor, refuses a trailing newline. The failure names
-# the input; no_log hides every value.
+# Printable ASCII without whitespace is within every runtime rule. A character
+# class, not an anchor, refuses a trailing newline. The failure names the input;
+# no_log hides every value.
 - name: Require each controller credential by name without printing its value
   ansible.builtin.assert:
     that:
@@ -165,8 +119,6 @@
     label: "{{ item.env }}"
   no_log: true
 
-# The runtime refuses a shared reader, curator or evidence identity; a repeated
-# value anywhere else is a transcription mistake between secrets.
 - name: Require eight distinct credential values without printing them
   ansible.builtin.assert:
     that:
@@ -177,9 +129,7 @@
 
 # Build the three documents once, from the frozen credentials and fixed
 # non-secret settings only. The endpoint, region and buckets are byte-identical
-# to .github/workflows/coding-hippius-probe.yml, so the storage authorities the
-# runtime derives from this file can equal the probe receipt's; the timeout
-# matches the Platform's evidence timeout. sort_keys makes the bytes stable.
+# to .github/workflows/coding-hippius-probe.yml; sort_keys makes the bytes stable.
 - name: Render the three credential documents once without printing them
   ansible.builtin.set_fact:
     coding_hosted_worker_credentials_documents:
@@ -214,7 +164,8 @@
     database: passwd
   register: coding_hosted_worker_credentials_accounts
 
-# A custodian sharing the worker's UID could read these files.
+# A custodian sharing the worker's UID could read these files. getent_passwd
+# rows are [password, uid, gid, gecos, home, shell].
 - name: Require the distinct worker and custodian identities
   ansible.builtin.assert:
     that:
@@ -233,18 +184,25 @@
   changed_when: false
   check_mode: false
 
+# Allow-list, not deny-list, read directly from the registered result (no
+# overridable include var). Only inactive or failed pass; active, activating,
+# deactivating, reloading, refreshing (systemd 256+), maintenance, a future
+# state or an unparseable line all refuse. An empty listing is allowed.
 - name: Refuse to replace credentials unless every listed unit is inactive or failed
-  ansible.builtin.include_tasks: assert_units_idle.yml
-  vars:
-    idle_units_listing: "{{ coding_hosted_worker_credentials_units.stdout_lines }}"
-    idle_units_fail_msg: >-
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_worker_credentials_units.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
       Stop the hosted worker and every custody instance before materializing credentials; each
       listed unit must be inactive or failed and this role stops nothing. Nothing was written.
+    quiet: true
 
-# Every process running as the worker UID must be absent, not only the listed
-# units: the rootless dockerd user manager (user@<uid>.service) and an escaped
-# candidate share that UID and could read the files or swap a directory. Reading
-# /proc for the worker UID catches processes no unit lists. The role stops none.
+# Every process running as the worker UID (index 1 of the getent row) must be
+# absent, not only the listed units: the rootless user manager and an escaped
+# candidate share that UID and could read the files or swap a directory.
 - name: Require no process is running as the worker UID
   ansible.builtin.command:
     argv:
@@ -257,7 +215,7 @@
       - -regex
       - '/proc/[0-9]+'
       - -uid
-      - "{{ coding_hosted_worker_credentials_accounts.ansible_facts.getent_passwd['ditto-coding-hosted'][2] }}"
+      - "{{ coding_hosted_worker_credentials_accounts.ansible_facts.getent_passwd['ditto-coding-hosted'][1] }}"
       - -printf
       - "x"
   register: coding_hosted_worker_credentials_worker_procs
@@ -274,6 +232,9 @@
       no worker-owned process can read the files or swap a directory. Nothing was written.
     quiet: true
 
+# An early, clear refusal. The module below re-opens every path component with
+# O_NOFOLLOW and re-verifies owner and mode on the descriptor, so a directory
+# swapped after this stat is still caught at write time.
 - name: Inspect the worker home and private directory without following links
   ansible.builtin.stat:
     path: "{{ item.path }}"
@@ -288,9 +249,6 @@
     label: "{{ item.path }}"
   register: coding_hosted_worker_credentials_directories
 
-# An early, clear refusal. The symlink-safe helper below re-opens every path
-# component with O_NOFOLLOW and re-verifies owner and mode on the descriptor, so
-# a directory swapped after this stat is still caught at write time.
 - name: Require an existing owner-only private directory below a real worker home
   ansible.builtin.assert:
     that:
@@ -310,42 +268,36 @@
   loop_control:
     label: "{{ item.item.path }}"
 
-# The root-run helper receives the three documents on stdin (never in argv), and
-# ansible does not echo command stdin even at -vvv, so this task stays visible:
-# the helper never prints a value or a digest, only non-secret metadata. It
-# opens every path component with O_NOFOLLOW, writes all temps, renames only
-# after all succeed, and re-verifies each result on its descriptor.
-- name: Write and verify the three files with the symlink-safe helper
-  ansible.builtin.command:
-    argv:
-      - /usr/bin/python3
-      - "{{ role_path }}/files/materialize_worker_credentials.py"
-      - --private-dir
-      - /var/lib/ditto-coding-hosted/private
-      - --owner
-      - ditto-coding-hosted
-      - --source-revision
-      - "{{ coding_hosted_worker_credentials_gate_source_revision }}"
-    stdin: "{{ {'files': coding_hosted_worker_credentials_documents} | to_json }}"
+# The role-local module carries the three documents as a no_log parameter, so
+# ansible redacts them from the target's module-invocation journal line and from
+# -vvv, and passes nothing in argv or on stdin. The module opens the path with
+# O_NOFOLLOW, writes all temps then renames after all succeed, unlinks every temp
+# on failure, and re-verifies each result on its descriptor. The task is no_log
+# too; a follow-up check surfaces only the module's non-secret refusal message.
+- name: Write and verify the three files through the symlink-safe module
+  coding_hosted_worker_credentials_write:
+    private_dir: /var/lib/ditto-coding-hosted/private
+    owner: ditto-coding-hosted
+    source_revision: "{{ coding_hosted_worker_credentials_gate_source_revision }}"
+    documents: "{{ coding_hosted_worker_credentials_documents }}"
   register: coding_hosted_worker_credentials_helper
-  changed_when: coding_hosted_worker_credentials_helper.rc == 0
+  no_log: true
   failed_when: false
 
-- name: Require the helper to have written and verified all three files
+- name: Require the module to have written and verified all three files
   ansible.builtin.assert:
     that:
-      - coding_hosted_worker_credentials_helper.rc == 0
-      - (coding_hosted_worker_credentials_helper.stdout | from_json).ok
+      - coding_hosted_worker_credentials_helper.files is defined
     fail_msg: >-
-      The worker credential helper refused; it names only filenames and states, never a value:
-      {{ (coding_hosted_worker_credentials_helper.stdout | from_json).error
-      | default('helper produced no receipt; reconcile the host by hand') }}
+      The worker credential write module refused; it names only filenames and states, never a
+      value: {{ coding_hosted_worker_credentials_helper.msg
+      | default('no receipt; reconcile the host by hand') }}
     quiet: true
 
 # Check-then-act: a unit could have started between the pre-write listing and
-# now. Re-list and re-assert idle so a race is loud, not silent. Residual race:
-# a unit that starts after this final check and before any later service start
-# is outside this role, which starts nothing.
+# now. Re-list and re-assert idle so a race is loud. Residual race: a unit that
+# starts after this final check and before any later service start is outside
+# this role, which starts nothing.
 - name: Re-list live worker and custody units after writing
   ansible.builtin.command:
     argv: [/usr/bin/systemctl, list-units, --all, --plain, --no-legend, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
@@ -354,19 +306,23 @@
   check_mode: false
 
 - name: Refuse if any worker or custody unit went live during materialization
-  ansible.builtin.include_tasks: assert_units_idle.yml
-  vars:
-    idle_units_listing: "{{ coding_hosted_worker_credentials_units_after.stdout_lines }}"
-    idle_units_fail_msg: >-
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_worker_credentials_units_after.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
       A worker or custody unit became active during materialization. The files were written and
       verified; reconcile the running unit and re-run before starting anything.
+    quiet: true
 
 - name: Report only that the files exist and the revision that wrote them
   ansible.builtin.debug:
     msg: >-
       Native Coding worker credentials materialized for the worker;
       source_revision={{ coding_hosted_worker_credentials_gate_source_revision }};
-      files={{ (coding_hosted_worker_credentials_helper.stdout | from_json).files
+      files={{ coding_hosted_worker_credentials_helper.files
       | map(attribute='name') | list | to_json }};
       owner, mode, single link and digest verified; values and digests not shown;
       units re-checked idle; shadow_only=true; weight_eligible=false; services_started=false.
