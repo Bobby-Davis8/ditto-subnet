@@ -139,7 +139,10 @@ def test_loader_pins_bind_every_committed_capsule_file() -> None:
     manifest_body = (pack / "manifest.json").read_bytes()
     manifest = json.loads(manifest_body)
     assert hashlib.sha256(manifest_body).hexdigest() == MANIFEST_SHA256
-    assert manifest["inference_policy"] == {"path": POLICY, "sha256": POLICY_FILE_SHA256}
+    assert manifest["inference_policy"] == {
+        "path": POLICY,
+        "sha256": POLICY_FILE_SHA256,
+    }
     assert _sha256(ROOT / POLICY) == POLICY_FILE_SHA256
 
     task = manifest["grader_plan"]["task_id"]
@@ -153,9 +156,7 @@ def test_loader_pins_bind_every_committed_capsule_file() -> None:
 
     visible = _tree(capsule / "visible" / "workspace")
     digest = _listing_sha256(visible)
-    assert (
-        f'publicCanaryVisibleWorkspaceSHA256 = "{digest}"' in PACK_LOADER.read_text()
-    )
+    assert f'publicCanaryVisibleWorkspaceSHA256 = "{digest}"' in PACK_LOADER.read_text()
     # Nothing else under certification/v1 carries execution bytes.
     everything = _tree(pack)
     assert set(everything) == {"manifest.json"} | {
