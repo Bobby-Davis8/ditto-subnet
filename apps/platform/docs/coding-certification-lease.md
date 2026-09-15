@@ -180,8 +180,9 @@ Admin API (`DITTO_ADMIN_API_TOKEN`):
   read never transitions a row, so an overdue lease shows its stored status
   with `deadline_passed=true`.
 
-Backroom exposes these as `get_coding_certification_allowlist`,
-`set_coding_certification_allowlist`, and `list_coding_certification_leases`.
+Backroom exposes the write as `set_coding_certification_allowlist`, the
+allowlist and newest leases inside `get_coding_control_plane`, and one agent's
+leases inside `get_agent_coding_certifications`.
 
 For the one-agent canary, write the enabled revision naming only the canary
 tuple before enabling Platform coding transport or the validator canary
