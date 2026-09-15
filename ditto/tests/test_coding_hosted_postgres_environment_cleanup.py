@@ -18,11 +18,14 @@ ROLE = ROOT / "infra/ansible/roles/coding_hosted_postgres_environment_cleanup"
 TASKS = (ROLE / "tasks/main.yml").read_text()
 # Parsed tasks without YAML comments, for forbidden-token scans.
 PARSED = yaml.safe_dump(yaml.safe_load(TASKS), width=10_000)
+# The materialization role's guarded tasks live in its dynamically included file.
 MATERIALIZE = yaml.safe_load(
     (
-        ROOT / "infra/ansible/roles/coding_hosted_postgres_environment/tasks/main.yml"
+        ROOT
+        / "infra/ansible/roles/coding_hosted_postgres_environment/tasks/materialize.yml"
     ).read_text()
-)[1]["block"]
+)
+MATERIALIZE_HOST = "Require the exact host, source, database address and confirmation"
 
 CUSTODY = "/var/lib/ditto-coding-custody/private/postgres-environment.json"
 HOSTED = "/var/lib/ditto-coding-hosted/private/postgres-environment.json"
@@ -123,13 +126,18 @@ def test_default_off_with_exact_confirmation_source_and_probed_host() -> None:
     }
     assert identity["register"] == f"{PREFIX}identity"
 
-    # Same literals as the materialization host check, but read from the
+    # Same literals as the materialization host check, both read from a
     # registered probe: a -e ansible_facts value replaces gathered facts.
-    inventory, *facts = MATERIALIZE[0]["ansible.builtin.assert"]["that"][:5]
+    materialize_host = _task(MATERIALIZE_HOST, MATERIALIZE)
+    inventory, *facts = materialize_host["ansible.builtin.assert"]["that"][:5]
     assert inventory == "inventory_hostname in groups.get('role_coding_hosted', [])"
     probed = []
     for line in facts:
-        match = re.fullmatch(r"ansible_facts\['(\w+)'\] == '([^']+)'", line)
+        match = re.fullmatch(
+            r"coding_hosted_postgres_environment_identity\.ansible_facts\."
+            r"ansible_(\w+) == '([^']+)'",
+            line,
+        )
         assert match, line
         probed.append(
             f"{PREFIX}identity.ansible_facts.ansible_{match[1]} == '{match[2]}'"
@@ -484,24 +492,24 @@ def test_rehearsal_runs_only_in_the_infra_ansible_job() -> None:
     this_file = str(Path(__file__).relative_to(ROOT))
     for trigger in ("pull_request", "push"):
         assert this_file in infra[True][trigger]["paths"]
+    # The materialization rehearsal shares the gate, so select this file's step.
     (step,) = [
         step
         for job in infra["jobs"].values()
         for step in job["steps"]
-        if REHEARSAL_GATE in step.get("env", {})
+        if REHEARSAL_GATE in step.get("env", {}) and this_file in step["run"]
     ]
     assert step in infra["jobs"]["ansible"]["steps"]
     assert step["env"] == {REHEARSAL_GATE: "1"}
     assert step["working-directory"] == "${{ github.workspace }}"
-    # Lock-pinned pytest plugins plus the locked PyYAML version; no project install.
+    # Lock-pinned pytest plugins; the locked dev group already brings PyYAML
+    # 6.0.3, so no --with and no project install.
     assert step["run"].split() == [
         "uv",
         "run",
         "--locked",
         "--only-group",
         "dev",
-        "--with",
-        "pyyaml==6.0.3",
         "pytest",
         "-p",
         "no:cacheprovider",
