@@ -159,30 +159,46 @@ source revision with no trailing newline, and the exact target host.
 - The private directory must be the worker's own `0700` directory, not a
   symlink, below a real worker home that is not group- or world-writable. This
   Ansible stat is an early, clear refusal; the authoritative symlink-safe check
-  is on the helper's own file descriptors (below).
+  is on the module's own file descriptors (below).
 
 ## How it writes and verifies
 
-The write is done by a small root-run helper shipped with the role
-(`files/materialize_worker_credentials.py`). Ansible passes the three documents
-to it on stdin, never in argv, and does not echo command stdin even at `-vvv`;
-the helper prints only non-secret metadata, never a value or a digest, so the
-task stays visible. The helper opens every component of the private directory
-path with `O_NOFOLLOW|O_DIRECTORY` — so a directory the worker account could swap
-for a symlink between the Ansible stat and the write cannot redirect it —
-verifies the directory's owner and mode on the open descriptor, writes each file
-to a temporary name with `O_CREAT|O_EXCL|O_NOFOLLOW`, `fchown`s and `fchmod`s it,
-`fsync`s, renames every temporary into place only after all three are written
-(so a mid-write failure leaves no half-updated set and it reports which fixed
-names were replaced or left), and re-verifies each result (regular, single link,
-owner, mode `0600`, size, and SHA-256 of the bytes, compared in process) on its
-own descriptor. It refuses a destination that is a symlink, directory, hard link
-or another account's file, and never follows or re-permissions such a path.
-After the helper, the role re-lists the units and refuses loudly if any unit
-went live during materialization. Cleanup unlinks the three names the same way,
-with `unlinkat` on an `O_NOFOLLOW` directory descriptor.
+The write is done by a role-local Ansible module,
+`library/coding_hosted_worker_credentials_write.py`, that ansible transfers to
+the target and runs as root. The three documents are one module parameter
+declared `no_log: true` in its `argument_spec`, so ansible replaces it with
+`VALUE_SPECIFIED_IN_NO_LOG_PARAMETER` in the target's module-invocation journal
+line and in `-vvv` controller output; nothing is passed in argv or on stdin, and
+the module task is `no_log` too. The module never resolves the destination as a
+string: it opens every component of the private directory path from `/` with
+`O_NOFOLLOW|O_DIRECTORY` — so a directory the worker account could swap for a
+symlink between the Ansible stat and the write cannot redirect it — verifies the
+home and private directory's owner and mode on the open descriptors, writes each
+file to a tracked temporary with `O_CREAT|O_EXCL|O_NOFOLLOW`, `fchown`s and
+`fchmod`s it, `fsync`s, renames every temporary into place only after all three
+are written, and re-verifies each result (regular, single link, owner, mode
+`0600`, size, and SHA-256 of the bytes, compared in process) on its own
+descriptor. Every temporary it creates is unlinked on any failure path, so a
+failed write leaves no partial secret temporary behind. It refuses a destination
+that is a symlink, directory, hard link, another account's file or not mode
+`0600`, and never follows or re-permissions such a path. The module prints only
+non-secret metadata — filenames, mode, link count, size, owner — never a value
+or a digest. After it, the role re-lists the units and refuses loudly if any
+unit went live during materialization.
 
-Residual race: a unit that starts after this final recheck and before any later
+Cleanup uses the sibling module `coding_hosted_worker_credentials_unlink.py`,
+which opens the path the same way and removes the three fixed names, and any
+leftover `.<name>.*.tmp` a partial write may have left, with `unlinkat` on the
+pinned directory descriptor, reporting which it removed.
+
+Partial write: the module writes all three temporaries before renaming any, so a
+rename failing part-way is rare, but if it happens the module fails and reports
+exactly which fixed names were `replaced` and which were left `unchanged_or_unknown`;
+it does not silently leave a mixed set unreported. Reconcile by hand from that
+report before re-running. A re-run overwrites any already-replaced file with the
+same content, so re-running after reconciling is safe.
+
+Residual race: a unit that starts after the final recheck and before any later
 service start is outside this role, which starts nothing. Start services only
 after re-confirming the files and the stopped state through the reviewed
 procedure.
@@ -190,11 +206,13 @@ procedure.
 ## Nothing is logged, and one residual
 
 No task prints an input value or a digest. The set_fact captures that hold
-credentials are `no_log`; asserts are `quiet` with static failure messages that
-never interpolate an input; the helper and report show only filenames, states
-and the non-secret source revision. The rehearsal (below) proves that stand-in
-secrets and their MD5, SHA-1, SHA-256 and SHA-512 digests never reach ansible
-output, including under `-v` and `--diff` with the repo's yaml callback.
+credentials are `no_log`; the write module carries them as a `no_log`
+`argument_spec` parameter and its task is `no_log`; asserts are `quiet` with
+static failure messages that never interpolate an input; the modules and report
+show only filenames, states and the non-secret source revision. The rehearsal
+(below) proves that stand-in secrets and their MD5, SHA-1, SHA-256 and SHA-512
+digests, in raw, JSON-, YAML- and repr-escaped forms, never reach ansible
+output, including under `-vvv` and `--diff` with the repo's yaml callback.
 
 Inputs are captured once with `set_fact ... | default('', true)` and validated
 as frozen literals, and the enabled gate is frozen the same way. On ansible-core
