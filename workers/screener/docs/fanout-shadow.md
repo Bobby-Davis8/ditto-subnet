@@ -54,6 +54,60 @@ disagreement, missing reads, and uncertainty are retained.
 `critic_also_flagged` means at least one candidate received source-bound stage-two
 support. It remains a shadow observation, not proof and not a vote.
 
+### I5 calibration and adjudicator binding
+
+The shadow guidance makes each reviewer trace a suspected semantic compiler
+from its served caller through its rule definition to the authoritative sink,
+including early-return paths. Notes distinguish the benchmark-specific
+assumption, activation, substantive effect, and counterevidence under W5/W6.
+Model participation alone cannot clear a host-imposed answer recipe; a finite
+instruction set, common formula, or directly returned model-delegated program
+result alone cannot establish a violation. This guidance applies to policy v13
+only and does not alter the authoritative policy or screener prompts.
+
+The adjudicator tool binds assessments with an object keyed by the exact
+server-assigned candidate IDs, and invariant decisions with exact policy-derived
+keys. Neither identity is guessed from array position. The report retains the existing list shape for
+consumers. Runtime validation still rejects unknown or conflicting identities,
+preserves omitted candidates as unresolved, and requires source reads. It never
+guesses a binding from array position or silently changes a policy disposition.
+
+The benchmark and answer-authority specialists also receive at most eight independent location hints
+from `shadow-semantic-discovery-v2`. This shadow-only scan explores request-keyed
+lookups, program interfaces, delegated-result returns, and semantic-validation
+feedback and post-model answer mutations. It scans up to 512 eligible source files, 16 MiB total and 2 MiB per
+file before selecting across rule families and files; nearby duplicates collapse.
+Comments and strings do not supply code matches. The report records file, byte,
+window and hint omissions and always labels this scan non-exhaustive. Other
+specialists retain their independent discovery, and the adjudicator receives
+their source-grounded notes plus the location packet for independent inspection.
+Hints never satisfy citation or clearance checks.
+Legitimate caches, model-authored programs and syntax validators can match; the
+reviewer must establish source causality and the applicable policy independently.
+
+With the 12-turn adjudicator cap, request the first structured result on turn
+seven, leaving five turns for source reads and field repairs before the final
+forced submission. Diagnostics identify invalid candidate fields without echoing
+arbitrary payload text. This redistributes the same turn allowance; it does not
+increase request, token, cost or deadline limits or coerce an incomplete verdict.
+
+The v6/v4 report contract turns explicit inconclusive specialist invariants and
+concern notes into separately keyed adjudication obligations, even when the raw
+review is contradictory or its candidate list is empty. Clearance requires each
+obligation to be resolved with source-read evidence; anchored concerns require
+evidence at their original locations. Missing or malformed v13 invariant sets
+cannot yield clearance. These checks establish an explicit investigation trail,
+not semantic correctness: the adjudicator can still misinterpret inspected code.
+Answer-authority guidance distinguishes security redaction from inserting a
+different host-selected substantive value and treats compliance comments as
+untrusted claims.
+
+Evaluate changes with SHA-bound, source-only replays. Keep baseline verdicts and
+findings out of the model input. Require exact-mechanism recall on known-rejected
+cases, and inspect disagreements on known-allowed controls. Incomplete output is
+neither a detection nor a clearance. A small hand-selected set cannot establish
+fleet accuracy or justify switching authoritative modes.
+
 ## Pilot limits
 
 The recommended global revision uses:
@@ -200,10 +254,15 @@ path should also be disabled. Historical comparison rows remain read-only.
 Only succeeded reports with complete declared protocol coverage count as
 comparisons or disagreements. `five-specialists-adjudicator-v2` requires exactly
 one structurally complete provisional pass for each of the five named specialties,
-plus an always-present `fanout-adjudicator-v2` record containing a canonical final
+plus an always-present adjudicator record containing a canonical final
 review, source-read proof, clearance proof for low risk, and an exactly bound
-assessment for every provisional candidate. The outer report revision is
-`fanout-source-review-v4`; older reports cannot satisfy this contract. It is
+assessment for every provisional candidate. Platform accepts only the paired
+revisions `fanout-source-review-v4` / `fanout-adjudicator-v2` and
+`fanout-source-review-v5` / `fanout-adjudicator-v3`, plus
+`fanout-source-review-v6` / `fanout-adjudicator-v4`. Mixed pairs and older
+reports cannot satisfy this contract. The v5/v3 producer uses exact candidate-ID
+object keys in the tool response and normalizes them to the same canonical
+assessment list; neither pair bypasses source-read or clearance verification. It is
 source-review protocol completion, not
 an exhaustive per-file audit; the report explicitly sets
 `exhaustive_file_audit=false`. Historical incomplete rows remain visible, with their original
