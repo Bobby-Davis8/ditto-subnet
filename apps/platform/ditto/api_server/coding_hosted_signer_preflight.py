@@ -7,7 +7,7 @@ size checks through ``lstat``. It never opens, reads or hashes the seed, so it
 cannot prove the seed derives the configured hotkey: API startup still does that
 and fails closed. It runs as the dedicated ``ditto-api`` user, the only owner
 the checks accept: from a newly sealed release before ``scripts/update.sh``
-activates it, and as ditto-platform-api.service's ``ExecStartPre``
+activates it, and in ditto-platform-api.service's launcher before every start
 (infra/docs/coding-hosted-control-signer-v2.md).
 """
 
