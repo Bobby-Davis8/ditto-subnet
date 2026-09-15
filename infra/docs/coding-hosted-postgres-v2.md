@@ -323,9 +323,10 @@ The gate and the inputs are frozen once:
   `default(..., true)`, which turns an undefined result, including one produced
   while reading a secret (for example `{{ {}[lookup('env', …)] }}`), into an
   empty value that fails validation. Every later task reads only the frozen
-  values. The role never renders an input into a message: refusals before the
-  host check are fixed text, and later messages name only the frozen revision
-  after it has been proved to be exactly 40 lowercase hex characters.
+  values. The role never renders an input into a message: every refusal is
+  fixed text, and only the partial-removal failure and the final report render
+  the frozen revision, after the host check has proved it is exactly 40
+  lowercase hex characters, and paths from registered results.
 
 Before removing anything it refuses when:
 - any variable named `coding_hosted_postgres_environment_cleanup_*` other than
@@ -337,11 +338,16 @@ Before removing anything it refuses when:
   otherwise replace the unit listing and disable its guard. Presetting the
   frozen gate only enables removal, which every guard still decides. The
   materialization role's `coding_hosted_postgres_environment_*` names never
-  match this prefix, and that role excludes these names in turn;
+  match this prefix, and that role excludes these names in turn. A preset loop
+  `item` is refused too. Every other variable the role reads is a magic variable
+  extra vars cannot override;
 - the machine is not the dedicated Debian 13 x86_64 host
-  `ditto-coding-hosted-v2` in `role_coding_hosted`. The playbook gathers no
-  facts: identity comes from a registered `setup` probe, because an
-  `ansible_facts` extra var replaces gathered facts;
+  `ditto-coding-hosted-v2`, or any host in the play is outside
+  `role_coding_hosted`. The playbook gathers no facts: identity comes from a
+  registered `setup` probe, because an `ansible_facts` extra var replaces
+  gathered facts. Membership is read from `groups` and `ansible_play_hosts_all`,
+  because `inventory_hostname` and `group_names` are host variables an extra
+  var replaces;
 - the source revision is not exactly 40 lowercase hex characters (a trailing
   newline is refused) or the confirmation differs;
 - any worker or custody unit in the materialization listing has an ACTIVE state
@@ -377,6 +383,10 @@ first listing and the unlink and read a copy mid-removal; if any unit is then no
 longer `inactive` or `failed`, the role fails loudly and does not restore the
 copy.
 
+No task handles the password, and the module's only arguments are a literal
+path and owner, so no module invocation written to the target's journal, and
+nothing `ansible_inject_invocation` returns, can carry it.
+
 It inspects metadata only: no checksum, slurp or fetch. It attempts both
 unlinks; if either fails, it fails with the source revision and the exact paths
 removed and not removed, so a partial removal is never silent. It then verifies
@@ -404,9 +414,11 @@ directory or symlink between inspection and removal. With
 ansible-core 2.21.2 against temporary trees, under the repo's `ansible.cfg` and
 `-v --diff`, with a stand-in password exported and planted in the copies. The
 rehearsal covers lazily templated and lookup-based gates and inputs, extra vars
-that preset a result, forge identity or the gate, `--start-at-task` at the
-unlink, a guard and the include, a unit that starts during removal, and every
-refusal above. It searches the console and log for the stand-in in raw, JSON-,
+that preset a result, forge identity, the gate or a loop `item`, an
+`inventory_hostname` and `group_names` forged for a host outside the group,
+`--start-at-task` at the unlink, the copy inspection, a guard and the include,
+`-vvv` with `ansible_inject_invocation`, a unit that starts during removal, and
+every refusal above. It searches the console and log for the stand-in in raw, JSON-,
 YAML- and repr-escaped forms and for the SHA-1, MD5 and SHA-256 digests of the
 password and of the copy document. The infra CI Ansible job runs it.
 
