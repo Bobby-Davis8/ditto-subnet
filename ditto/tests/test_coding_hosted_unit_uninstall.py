@@ -80,14 +80,23 @@ GATE = "Require the exact confirmation and source revision as frozen literals"
 IDENTITY = "Probe this machine's identity into a result extra vars cannot preset"
 HOST = "Require the dedicated host"
 LISTING = "List live worker and custody units"
-LIVE = "Refuse to uninstall unless every listed unit is inactive or failed"
-UNLINK = "Remove the two unit files through the symlink-safe module"
-RELOAD = "Reload unit definitions without starting or stopping anything"
-UNLINK_CHECK = "Require the module to have removed or confirmed absent both unit files"
+JOBS = "List queued jobs for the worker and custody units"
+LIVE = (
+    "Refuse to uninstall unless every listed unit is inactive or failed with no "
+    "queued job"
+)
+UNLINK = "Remove the two unit files and reload through the symlink-safe module"
+UNLINK_CHECK = (
+    "Require the module to have removed or confirmed absent both unit files and "
+    "reloaded"
+)
 RELIST = "Re-list live worker and custody units after removal"
-LIVE_AFTER = "Refuse if any worker or custody unit went live during removal"
-UNIT_FILES = "List unit files systemd still knows for either unit after the reload"
-UNIT_FILES_CHECK = "Require systemd to know neither unit file after the reload"
+JOBS_AFTER = "Re-list queued jobs for the worker and custody units after removal"
+LIVE_AFTER = (
+    "Refuse if any worker or custody unit went live or queued a job during removal"
+)
+LOAD_STATES = "Show the load state systemd reports for both units after the reload"
+LOAD_STATES_CHECK = "Require systemd to report both units not-found after the reload"
 REPORT = "Report only the source revision and which fixed unit paths were removed or already absent"  # noqa: E501
 
 UNIT_PATTERN = (
@@ -104,6 +113,26 @@ LISTING_ARGV = [
     "ditto-coding-hosted-worker.service",
     "ditto-coding-custody@*.service",
 ]
+JOBS_ARGV = [
+    "/usr/bin/systemctl",
+    "list-jobs",
+    "--no-legend",
+    "--plain",
+    "--full",
+    "ditto-coding-hosted-worker.service",
+    "ditto-coding-custody@*.service",
+]
+ZERO_INSTANCE = "ditto-coding-custody@00000000-0000-0000-0000-000000000000.service"
+RELOAD_ARGV = ["/usr/bin/systemctl", "daemon-reload"]
+# Manual cleanup an orphaned live unit needs once its file is gone.
+MANUAL_CLEANUP = (
+    "`sudo systemctl stop ditto-coding-hosted-worker.service`",
+    "`sudo /usr/bin/python3 -I /usr/local/lib/ditto-coding-hosted/"
+    "connectivity-policy.py revoke`",
+    "`sudo systemctl stop ditto-coding-custody@<worker-uuid>.service`",
+    "`sudo /usr/bin/python3 -I /usr/local/lib/ditto-coding-custody/custody-run.py "
+    "release <worker-uuid>`",
+)
 
 
 def _docs(text: str) -> list[dict]:
@@ -203,14 +232,15 @@ def test_remove_task_order() -> None:
         IDENTITY,
         HOST,
         LISTING,
+        JOBS,
         LIVE,
         UNLINK,
-        RELOAD,
-        UNLINK_CHECK,
         RELIST,
+        JOBS_AFTER,
         LIVE_AFTER,
-        UNIT_FILES,
-        UNIT_FILES_CHECK,
+        UNLINK_CHECK,
+        LOAD_STATES,
+        LOAD_STATES_CHECK,
         REPORT,
     ]
 
@@ -289,42 +319,69 @@ def test_identity_comes_from_a_registered_probe() -> None:
     assert "ansible_facts[" not in REMOVE
 
 
-def test_live_units_are_refused_before_and_rechecked_after_removal() -> None:
-    for listing, check in ((LISTING, LIVE), (RELIST, LIVE_AFTER)):
-        task = _task(listing)
-        assert task["ansible.builtin.command"]["argv"] == LISTING_ARGV
-        assert task["check_mode"] is False and task["changed_when"] is False
-        (that,) = _task(check)["ansible.builtin.assert"]["that"]
-        assert _flat(that) == _flat(
-            f"{task['register']}.stdout_lines | reject('match', '{UNIT_PATTERN}') "
+def test_live_units_and_jobs_are_refused_before_and_rechecked_after_removal() -> None:
+    for listing, jobs, check in (
+        (LISTING, JOBS, LIVE),
+        (RELIST, JOBS_AFTER, LIVE_AFTER),
+    ):
+        units = _task(listing)
+        queued = _task(jobs)
+        assert units["ansible.builtin.command"]["argv"] == LISTING_ARGV
+        assert queued["ansible.builtin.command"]["argv"] == JOBS_ARGV
+        for task in (units, queued):
+            assert task["check_mode"] is False and task["changed_when"] is False
+            assert "failed_when" not in task
+        live, idle_jobs = _task(check)["ansible.builtin.assert"]["that"]
+        assert _flat(live) == _flat(
+            f"{units['register']}.stdout_lines | reject('match', '{UNIT_PATTERN}') "
             "| list | length == 0"
         )
+        assert idle_jobs == f"{queued['register']}.stdout | trim | length == 0"
     names = [t["name"] for t in _docs(REMOVE)]
     assert names.index(LIVE) < names.index(UNLINK) < names.index(RELIST)
-    files = _task(UNIT_FILES)
-    assert files["ansible.builtin.command"]["argv"] == [
+    # An orphaned live unit is reported before the module receipt is enforced.
+    assert names.index(LIVE_AFTER) < names.index(UNLINK_CHECK)
+    message = _flat(_task(LIVE_AFTER)["ansible.builtin.assert"]["fail_msg"])
+    for command in MANUAL_CLEANUP:
+        assert command in message, command
+
+
+def test_absence_is_confirmed_positively_after_the_reload() -> None:
+    show = _task(LOAD_STATES)
+    assert show["ansible.builtin.command"]["argv"] == [
         "/usr/bin/systemctl",
-        "list-unit-files",
-        "--no-legend",
-        "--plain",
-        "--full",
-        *[Path(p).name for p in UNIT_PATHS],
+        "show",
+        "--property=LoadState",
+        "--value",
+        Path(WORKER).name,
+        ZERO_INSTANCE,
     ]
-    assert _task(UNIT_FILES_CHECK)["ansible.builtin.assert"]["that"] == [
-        f"{files['register']}.stdout | trim | length == 0"
+    assert "failed_when" not in show and show["check_mode"] is False
+    assert _task(LOAD_STATES_CHECK)["ansible.builtin.assert"]["that"] == [
+        f"{show['register']}.rc == 0",
+        f"{show['register']}.stdout_lines | reject('equalto', '') | list"
+        " == ['not-found', 'not-found']",
     ]
+    # The zero instance can never be a real run: custody-run.py refuses it.
+    helper = (
+        ANSIBLE / "roles/coding_hosted_custody_service/files/custody-run.py"
+    ).read_text()
+    assert 'ZERO = "00000000-0000-0000-0000-000000000000"' in helper
+    assert "list-unit-files" not in REMOVE
 
 
 def test_role_stops_and_starts_nothing_and_touches_only_unit_files() -> None:
-    parsed = yaml.safe_dump(_docs(REMOVE), width=10_000) + yaml.safe_dump(
-        _docs(MAIN), width=10_000
-    )
     systemctl = [
         task["ansible.builtin.command"]["argv"][1]
         for task in _walk(_docs(REMOVE))
         if "ansible.builtin.command" in task
     ]
-    assert systemctl == ["list-units", "daemon-reload", "list-units", "list-unit-files"]
+    assert systemctl == ["list-units", "list-jobs", "list-units", "list-jobs", "show"]
+    assert all(
+        task["ansible.builtin.command"]["argv"][0] == "/usr/bin/systemctl"
+        for task in _walk(_docs(REMOVE))
+        if "ansible.builtin.command" in task
+    )
     modules = {
         key
         for task in _walk(_docs(REMOVE))
@@ -367,60 +424,141 @@ def test_role_stops_and_starts_nothing_and_touches_only_unit_files() -> None:
         ".service.d",
     ):
         assert not any(forbidden in value.lower() for value in values), forbidden
-    assert "unit_dir: /etc/systemd/system" in parsed
     unlink = _task(UNLINK)
-    assert unlink[MODULE_NAME] == {"unit_dir": UNIT_DIR, "owner": "root"}
+    assert unlink[MODULE_NAME] == {
+        "unit_dir": UNIT_DIR,
+        "owner": "root",
+        "daemon_reload": RELOAD_ARGV,
+    }
     assert unlink["failed_when"] is False
+    assert _flat(unlink["changed_when"]) == (
+        f"{PREFIX}removal.removed | default([]) | length > 0"
+    )
 
 
 def test_constant_fail_messages_except_the_module_receipt() -> None:
+    receipt = rf" {PREFIX}removal\.\w+ \| default\((\[\]|false)\) \| to_json "
     for task in _walk(_docs(MAIN) + _docs(REMOVE)):
         assertion = task.get("ansible.builtin.assert")
         if not assertion:
             continue
         message = assertion["fail_msg"]
-        if task["name"] == UNLINK_CHECK:
-            # Only the module's own fixed-path lists, each defaulted.
+        if task["name"] in (UNLINK_CHECK, LIVE_AFTER):
+            # Only the module's own fixed-path lists and flags, each defaulted.
             refs = re.findall(r"\{\{(.*?)\}\}", message)
-            assert refs and all(
-                re.fullmatch(
-                    rf" {PREFIX}removal\.\w+ \| default\(\[\]\) \| to_json ", ref
-                )
-                for ref in refs
-            ), refs
+            assert refs and all(re.fullmatch(receipt, ref) for ref in refs), refs
         else:
             assert "{{" not in message, task["name"]
         assert assertion["quiet"] is True
+    that = _task(UNLINK_CHECK)["ansible.builtin.assert"]["that"]
+    assert f"{PREFIX}removal.daemon_reloaded | default(false) is sameas true" in that
 
 
-def test_report_interpolates_only_the_frozen_revision_and_module_lists() -> None:
+def test_report_interpolates_only_the_frozen_revision_and_module_state() -> None:
     message = _task(REPORT)["ansible.builtin.debug"]["msg"]
     assert re.findall(r"\{\{(.*?)\}\}", message) == [
         f" {PREFIX}gate_source_revision ",
         f" {PREFIX}removal.removed | to_json ",
         f" {PREFIX}removal.already_absent | to_json ",
+        f" {PREFIX}removal.daemon_reloaded | to_json ",
     ]
 
 
-def test_reload_follows_removal_even_after_a_partial_refusal() -> None:
-    names = [t["name"] for t in _docs(REMOVE)]
-    assert names.index(UNLINK) + 1 == names.index(RELOAD)
-    assert names.index(RELOAD) + 1 == names.index(UNLINK_CHECK)
-    reload = _task(RELOAD)
-    assert reload["ansible.builtin.command"]["argv"] == [
-        "/usr/bin/systemctl",
-        "daemon-reload",
-    ]
-    assert "when" not in reload
+def test_reload_runs_inside_the_unlink_module_not_a_separate_task() -> None:
+    assert "daemon-reload" not in json.dumps(
+        [t for t in _walk(_docs(REMOVE)) if MODULE_NAME not in t]
+    )
+    src = MODULE_PATH.read_text()
+    assert (
+        '"daemon_reload": {"type": "list", "elements": "str", "required": True}' in src
+    )
+    assert "module.run_command(argv, check_rc=False)" in src
 
 
 # ─── Parity with the install roles ────────────────────────────────────────────
 
+UNIT_REFERENCE = re.compile(r"ditto-coding-hosted-worker|ditto-coding-custody@")
+SYSTEMD_PATH = re.compile(r"/etc/systemd/(?:\{\{.*?\}\}|[^\s\"'])*")
+ENABLING_WORDS = re.compile(
+    r"\b(enable|reenable|link|ln|mask|preset|preset-all|add-wants|add-requires|"
+    r"set-property|edit|revert)\b"
+)
 
-def _role_texts(role: Path) -> Iterator[tuple[Path, str]]:
-    for path in sorted(role.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.parts:
-            yield path, path.read_text(errors="replace")
+
+def _module_key(task: dict) -> str | None:
+    control = {
+        "name", "when", "loop", "loop_control", "register", "changed_when",
+        "failed_when", "check_mode", "no_log", "become", "become_user", "vars",
+        "tags", "notify", "delegate_to", "run_once", "environment", "args",
+        "ignore_errors", "with_items", "with_dict", "until", "retries", "delay",
+        "diff", "listen", "block", "rescue", "always",
+    }  # fmt: skip
+    keys = [key for key in task if key not in control]
+    return keys[0].rsplit(".", 1)[-1] if len(keys) == 1 else None
+
+
+def _variables() -> dict[str, str]:
+    """Scalar defaults, vars, group_vars and host_vars across the tree."""
+    found: dict[str, str] = {}
+    sources = [
+        *ANSIBLE.glob("roles/*/defaults/*.yml"),
+        *ANSIBLE.glob("roles/*/vars/*.yml"),
+        *ANSIBLE.glob("group_vars/*.yml"),
+        *ANSIBLE.glob("host_vars/*.yml"),
+    ]
+    for source in sources:
+        data = yaml.safe_load(source.read_text()) or {}
+        if isinstance(data, dict):
+            found.update(
+                {k: str(v) for k, v in data.items() if isinstance(v, str | int)}
+            )
+    return found
+
+
+def _expand(value: str, task: dict, variables: dict[str, str]) -> list[str]:
+    """Resolve simple {{ var }} and literal-loop {{ item }} references."""
+    items = task.get("loop", task.get("with_items"))
+    candidates = [value]
+    if isinstance(items, list) and "item" in value:
+        candidates = []
+        for item in items:
+            text = value
+            if isinstance(item, dict):
+                for key, sub in item.items():
+                    text = re.sub(rf"\{{\{{\s*item\.{key}\s*\}}\}}", str(sub), text)
+            else:
+                text = re.sub(r"\{\{\s*item\s*\}\}", str(item), text)
+            candidates.append(text)
+    resolved = []
+    for text in candidates:
+        for _ in range(4):
+            text = re.sub(
+                r"\{\{\s*([A-Za-z_]\w*)\s*\}\}",
+                lambda m: variables.get(m[1], m[0]),
+                text,
+            )
+        resolved.append(text)
+    return resolved
+
+
+def _task_files() -> Iterator[tuple[str, list[dict]]]:
+    for path in sorted(ANSIBLE.glob("roles/*/tasks/*.yml")) + sorted(
+        ANSIBLE.glob("roles/*/handlers/*.yml")
+    ):
+        yield str(path.relative_to(ANSIBLE)), _docs(path.read_text()) or []
+    for path in sorted(ANSIBLE.glob("playbooks/*.yml")):
+        for play in _docs(path.read_text()) or []:
+            for section in ("pre_tasks", "tasks", "post_tasks", "handlers"):
+                yield f"{path.relative_to(ANSIBLE)}:{section}", play.get(section, [])
+
+
+def _operative(task: dict) -> dict:
+    """Task arguments that act on the host (not names, messages or asserts)."""
+    key = _module_key(task)
+    if key in (None, "assert", "debug", "fail", "set_fact", "include_tasks",
+               "import_tasks", "include_role", "import_role"):  # fmt: skip
+        return {}
+    return {k: v for k, v in task.items() if k not in ("name",)}
 
 
 def test_removal_targets_equal_the_install_role_unit_destinations() -> None:
@@ -428,41 +566,154 @@ def test_removal_targets_equal_the_install_role_unit_destinations() -> None:
     assert [f"{UNIT_DIR}/{name}" for name in module.UNIT_NAMES] == UNIT_PATHS
     assert tuple(UNIT_DIR.strip("/").split("/")) == module.UNIT_DIR_SUFFIX
     for role, path in INSTALLERS.items():
-        tasks = _docs((ANSIBLE / f"roles/{role}/tasks/main.yml").read_text())
-        systemd = [
+        tasks = [
             task
-            for task in _walk(tasks)
+            for _, doc in _task_files()
+            if _.startswith(f"roles/{role}/")
+            for task in _walk(doc)
             if "block" not in task
-            and any("/etc/systemd" in value for value in _strings(task))
         ]
-        (install,) = systemd
+        # Structural: the only task writing under /etc/systemd is the template.
+        writers = [
+            task
+            for task in tasks
+            if any("/etc/systemd" in value for value in _strings(_operative(task)))
+        ]
+        (install,) = writers
         template = install["ansible.builtin.template"]
         assert template["dest"] == path
         assert template["owner"] == "root" and template["mode"] == "0644"
-        # The uninstall owner is the install owner.
         assert _task(UNLINK)[MODULE_NAME]["owner"] == template["owner"]
         body = (ANSIBLE / f"roles/{role}/templates/{template['src']}").read_text()
-        # No [Install] section: the install role never creates an enablement link.
+        # No [Install] section: nothing can create an enablement link from it.
         assert not re.search(r"^\s*\[Install\]", body, re.M), role
-        # The install role never enables, drops in or links either unit.
-        dumped = json.dumps(tasks)
-        assert '"enabled"' not in dumped and "systemctl enable" not in dumped
-        assert ".service.d" not in dumped and "state: link" not in dumped
+        for task in tasks:
+            key = _module_key(task)
+            args = task.get(next((k for k in task if k.endswith(str(key))), ""), {})
+            if key == "file":
+                assert args.get("state") not in ("link", "hard"), task["name"]
+            if key in ("systemd", "systemd_service", "service"):
+                assert set(args) <= {"daemon_reload"}, task["name"]
+            if key in ("command", "shell", "raw", "script"):
+                words = " ".join(
+                    _strings({k: v for k, v in task.items() if k != "name"})
+                )
+                assert not ENABLING_WORDS.search(words), task["name"]
+            references = [
+                value
+                for value in _strings(_operative(task))
+                if UNIT_REFERENCE.search(value)
+            ]
+            if not references:
+                continue
+            if task is install:
+                continue
+            # Otherwise only read-only systemctl queries may name either unit.
+            argv = task.get("ansible.builtin.command", {}).get("argv", [])
+            assert argv[:2] in (
+                ["systemctl", "is-active"],
+                ["/usr/bin/systemctl", "list-units"],
+            ), task["name"]
 
 
-def test_no_other_role_installs_a_path_for_either_unit() -> None:
-    pattern = re.compile(
-        r"/etc/systemd/[^\s\"'`]*(?:ditto-coding-hosted-worker|ditto-coding-custody@)"
-        r"[^\s\"'`]*"
-    )
+def test_no_other_role_or_playbook_touches_either_unit() -> None:
+    variables = _variables()
     found: dict[str, set[str]] = {}
-    for role in sorted((ANSIBLE / "roles").iterdir()):
-        if role.name == ROLE.name:
+    unresolved: set[tuple[str, str]] = set()
+    for source, doc in _task_files():
+        if source.startswith(f"roles/{ROLE.name}/") or "unit-uninstall" in source:
             continue
-        for _, text in _role_texts(role):
-            for match in pattern.findall(text):
-                found.setdefault(role.name, set()).add(match)
-    assert found == {role: {path} for role, path in INSTALLERS.items()}
+        for task in _walk(doc):
+            if "block" in task:
+                continue
+            for value in _strings(_operative(task)):
+                for text in _expand(value, task, variables):
+                    if UNIT_REFERENCE.search(text):
+                        found.setdefault(source.split("/tasks/")[0], set()).add(
+                            _task_label(task)
+                        )
+                    # A variable-built unit path under /etc/systemd must resolve,
+                    # or its literal name prefix must rule out both units.
+                    for match in SYSTEMD_PATH.finditer(text):
+                        parts = re.split(r"/(?![^{]*\}\})", match[0])
+                        if any("{{" in p and _could_name_a_unit(p) for p in parts):
+                            unresolved.add((source, match[0]))
+    assert found == {
+        "roles/coding_hosted_connectivity": {
+            "Refuse an active worker without interrupting it",
+            "Install the manual one-attempt worker unit without starting it",
+        },
+        "roles/coding_hosted_custody_service": {
+            "List custody instances that are still live",
+            "Install the locked custody unit template without enabling or starting it",
+        },
+    }
+    # The only paths a literal scan cannot resolve are screener_partition's
+    # drop-ins over a loop expression. Its loop lists literal screener units
+    # plus screener_partition_worker_units, and nothing that defines either
+    # names a native Coding unit.
+    assert unresolved == {
+        ("roles/screener_partition/tasks/main.yml", "/etc/systemd/system/{{ item }}.d"),
+        (
+            "roles/screener_partition/tasks/main.yml",
+            "/etc/systemd/system/{{ item }}.d/drain-safety.conf",
+        ),
+        (
+            "roles/screener_partition/tasks/main.yml",
+            "/etc/systemd/system/{{ item }}.d/partition.conf",
+        ),
+    }, sorted(unresolved)
+    partition = [
+        path
+        for path in ANSIBLE.rglob("*")
+        if path.is_file()
+        and (
+            "screener_partition" in path.parts
+            or "screener_partition_worker_units" in path.read_text(errors="replace")
+        )
+    ]
+    assert partition
+    for path in partition:
+        assert not UNIT_REFERENCE.search(path.read_text(errors="replace")), path
+
+
+def _task_label(task: dict) -> str:
+    return task.get("name", json.dumps(task, sort_keys=True)[:80])
+
+
+def _could_name_a_unit(tail: str) -> bool:
+    literal = tail.split("{{", 1)[0]
+    return any(
+        unit.startswith(literal) or literal.startswith(unit)
+        for unit in ("ditto-coding-hosted-worker.service", "ditto-coding-custody@")
+    )
+
+
+def test_parity_scan_detects_variable_built_and_enabling_forms() -> None:
+    # Positive controls for the scanners above.
+    variables = {"unit": "ditto-coding-custody@"}
+    task = {"ansible.builtin.file": {"path": "/etc/systemd/system/{{ unit }}x"}}
+    assert any(
+        UNIT_REFERENCE.search(text)
+        for value in _strings(_operative(task))
+        for text in _expand(value, task, variables)
+    )
+    looped = {
+        "ansible.builtin.copy": {"dest": "/etc/systemd/system/{{ item.dest }}"},
+        "loop": [{"dest": "ditto-coding-hosted-worker.service.d/x.conf"}],
+    }
+    assert any(
+        UNIT_REFERENCE.search(text)
+        for value in _strings(_operative(looped))
+        for text in _expand(value, looped, {})
+    )
+    assert _could_name_a_unit("{{ item }}.d") and not _could_name_a_unit(
+        "user@{{ uid }}"
+    )
+    assert ENABLING_WORDS.search("systemctl enable x") and ENABLING_WORDS.search(
+        " ".join(["/usr/bin/systemctl", "link", "/x"])
+    )
+    assert _module_key({"name": "n", "ansible.builtin.file": {}, "when": "x"}) == "file"
 
 
 # ─── Module ──────────────────────────────────────────────────────────────────
@@ -496,6 +747,26 @@ def _unit_tree(root: Path, *, worker: bool = True, custody: bool = True) -> Path
 
 def _uid() -> int:
     return os.getuid()
+
+
+def _paths(unit_dir: Path) -> list[str]:
+    return [f"{unit_dir}/{Path(p).name}" for p in UNIT_PATHS]
+
+
+class _Reload:
+    """Records the unit directory listing at the moment daemon-reload runs."""
+
+    def __init__(self, unit_dir: Path, *, fail: bool = False) -> None:
+        self.unit_dir, self.fail, self.listings = unit_dir, fail, []
+
+    def __call__(self) -> None:
+        self.listings.append(
+            sorted(p.name for p in self.unit_dir.iterdir())
+            if self.unit_dir.is_dir()
+            else None
+        )
+        if self.fail:
+            raise OSError(5, "reload")
 
 
 def test_module_removes_only_the_two_unit_files(tmp_path) -> None:
@@ -578,8 +849,10 @@ def test_module_refuses_a_tree_not_owned_by_the_unit_owner(tmp_path) -> None:
     unit_dir = _unit_tree(tmp_path.resolve())
     # Without root the files cannot be chowned; an owner the tree does not have
     # is refused at the first foreign directory, before any file.
-    with pytest.raises(module.Unsafe, match="owned by"):
-        module.remove_units(str(unit_dir), _uid() + 1)
+    result = module.remove_units(str(unit_dir), _uid() + 1)
+    (refusal,) = result["refused"]
+    assert "owned by" in refusal
+    assert result["removed"] == [] and result["not_attempted"] == _paths(unit_dir)
     assert (unit_dir / Path(WORKER).name).exists()
 
 
@@ -623,8 +896,11 @@ def test_module_refuses_a_symlinked_dependency_directory(tmp_path) -> None:
         unit_dir / Path(WORKER).name
     )
     (unit_dir / "multi-user.target.wants").symlink_to(hidden)
-    with pytest.raises(module.Unsafe, match="is a symlink"):
-        module.remove_units(str(unit_dir), _uid())
+    result = module.remove_units(str(unit_dir), _uid())
+    assert result["refused"] == [
+        "dependency directory multi-user.target.wants is a symlink"
+    ]
+    assert result["removed"] == [] and result["not_attempted"] == _paths(unit_dir)
     assert all((unit_dir / Path(p).name).exists() for p in UNIT_PATHS)
 
 
@@ -635,18 +911,22 @@ def test_module_refuses_a_symlinked_or_writable_unit_directory(tmp_path) -> None
     linked = root / "linked/etc/systemd"
     linked.mkdir(parents=True)
     (linked / "system").symlink_to(real)
-    with pytest.raises(module.Unsafe, match="symlink"):
-        module.remove_units(str(linked / "system"), _uid())
+    result = module.remove_units(str(linked / "system"), _uid())
+    assert result["refused"] == [
+        "a unit directory component is a symlink or not a directory"
+    ]
+    assert result["removed"] == []
     assert (real / Path(WORKER).name).exists()
 
     writable = _unit_tree(root / "writable")
     writable.chmod(0o775)
-    with pytest.raises(module.Unsafe, match="writable by group or others"):
-        module.remove_units(str(writable), _uid())
+    result = module.remove_units(str(writable), _uid())
+    assert "writable by group or others" in result["refused"][0]
     writable.chmod(0o755)
     writable.parent.chmod(0o777)
-    with pytest.raises(module.Unsafe, match="writable by group or others"):
-        module.remove_units(str(writable), _uid())
+    result = module.remove_units(str(writable), _uid())
+    assert "writable by group or others" in result["refused"][0]
+    assert result["removed"] == []
     writable.parent.chmod(0o755)
     assert (writable / Path(WORKER).name).exists()
 
@@ -667,6 +947,155 @@ def test_module_refuses_any_unit_dir_but_an_etc_systemd_system(path) -> None:
     module = _unlink_module()
     with pytest.raises(module.Unsafe):
         module.split_unit_dir(path)
+
+
+def test_module_reloads_in_the_same_call_after_the_unlinks(tmp_path) -> None:
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    reload = _Reload(unit_dir)
+    result = module.remove_units(str(unit_dir), _uid(), reload=reload)
+    # Exactly one reload, and it saw both files already gone.
+    assert reload.listings == [["unrelated.service"]]
+    assert result["daemon_reloaded"] is True and result["removed"] == _paths(unit_dir)
+
+
+def test_module_reloads_after_a_refusal_but_never_in_check_mode(tmp_path) -> None:
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    (unit_dir / "ditto-coding-custody@.service.d").mkdir()
+    reload = _Reload(unit_dir)
+    result = module.remove_units(str(unit_dir), _uid(), reload=reload)
+    assert result["refused"] and result["daemon_reloaded"] is True
+    assert len(reload.listings) == 1
+    dry = _Reload(unit_dir)
+    result = module.remove_units(str(unit_dir), _uid(), check_mode=True, reload=dry)
+    assert dry.listings == [] and result["daemon_reloaded"] is False
+
+
+def test_module_reports_a_failed_reload(tmp_path) -> None:
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    result = module.remove_units(
+        str(unit_dir), _uid(), reload=_Reload(unit_dir, fail=True)
+    )
+    assert result["removed"] == _paths(unit_dir)
+    assert result["refused"] == ["daemon-reload failed"]
+    assert result["daemon_reloaded"] is False and result["changed"] is True
+
+
+def test_module_reports_the_true_state_when_the_second_unlink_fails(
+    tmp_path, monkeypatch
+) -> None:
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    real_unlink = os.unlink
+    calls = []
+
+    def unlink(name, *, dir_fd=None):
+        calls.append(name)
+        if len(calls) == 2:
+            raise PermissionError(1, "Operation not permitted")
+        real_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(module.os, "unlink", unlink)
+    reload = _Reload(unit_dir)
+    result = module.remove_units(str(unit_dir), _uid(), reload=reload)
+    worker, custody = _paths(unit_dir)
+    assert result["removed"] == [worker]
+    assert result["refused"] == [f"{custody}: unlink failed: Operation not permitted"]
+    assert result["not_attempted"] == [] and result["already_absent"] == []
+    assert result["changed"] is True and result["daemon_reloaded"] is True
+    assert not os.path.lexists(worker) and os.path.exists(custody)
+    assert reload.listings == [sorted([Path(custody).name, "unrelated.service"])]
+
+
+def test_module_reports_the_true_state_when_fsync_fails(tmp_path, monkeypatch) -> None:
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+
+    def fsync(_fd):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(module.os, "fsync", fsync)
+    reload = _Reload(unit_dir)
+    result = module.remove_units(str(unit_dir), _uid(), reload=reload)
+    assert result["removed"] == _paths(unit_dir)
+    assert result["refused"] == ["unexpected error: Input/output error"]
+    assert result["not_attempted"] == [] and result["changed"] is True
+    assert result["daemon_reloaded"] is True and len(reload.listings) == 1
+
+
+def test_module_counts_a_name_replaced_after_its_unlink_as_removed(
+    tmp_path, monkeypatch
+) -> None:
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    real_unlink = os.unlink
+
+    def unlink(name, *, dir_fd=None):
+        real_unlink(name, dir_fd=dir_fd)
+        (unit_dir / name).write_text("racer")
+
+    monkeypatch.setattr(module.os, "unlink", unlink)
+    result = module.remove_units(str(unit_dir), _uid(), reload=_Reload(unit_dir))
+    worker, custody = _paths(unit_dir)
+    assert result["removed"] == [worker]
+    assert result["refused"] == [
+        f"{worker}: was replaced by a new entry during removal"
+    ]
+    assert result["not_attempted"] == [custody]
+    assert result["changed"] is True and result["daemon_reloaded"] is True
+
+
+def test_module_mutation_building_the_receipt_after_the_fact_hides_a_removal(
+    tmp_path, monkeypatch
+) -> None:
+    # Mutation check: if outcomes were not recorded into the receipt as each
+    # unlink happens (the pre-fix shape), an OSError on the second name would
+    # report removed=[] while the worker file is already gone.
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    real_unlink = os.unlink
+    calls = []
+
+    def unlink(name, *, dir_fd=None):
+        calls.append(name)
+        if len(calls) == 2:
+            raise PermissionError(1, "Operation not permitted")
+        real_unlink(name, dir_fd=dir_fd)
+
+    def detached(unit_dir, owner_uid, check_mode, result, _handled):
+        scratch = copy.deepcopy(result)
+        original(unit_dir, owner_uid, check_mode, scratch, set())
+        if scratch["refused"]:
+            raise OSError(1, "Operation not permitted")
+
+    original = module._unlink_all
+    monkeypatch.setattr(module.os, "unlink", unlink)
+    monkeypatch.setattr(module, "_unlink_all", detached)
+    result = module.remove_units(str(unit_dir), _uid())
+    worker, _custody = _paths(unit_dir)
+    assert not os.path.lexists(worker)
+    assert result["removed"] == [] and worker in result["not_attempted"]
+
+
+def test_module_mutation_reloading_before_the_unlinks_sees_the_files(
+    tmp_path, monkeypatch
+) -> None:
+    # Mutation check: a reload outside (before) the unlink phase observes both
+    # unit files still present, which the in-call ordering test would reject.
+    module = _unlink_module()
+    unit_dir = _unit_tree(tmp_path.resolve())
+    reload = _Reload(unit_dir)
+    original = module._unlink_all
+
+    def reload_first(*args):
+        reload()
+        original(*args)
+
+    monkeypatch.setattr(module, "_unlink_all", reload_first)
+    module.remove_units(str(unit_dir), _uid())
+    assert reload.listings[0] != ["unrelated.service"]
 
 
 def test_module_pins_directories_and_never_follows_links() -> None:
@@ -786,6 +1215,11 @@ def test_docs_describe_every_guard_and_residual() -> None:
         "custody-run.py",
         "connectivity-policy.py",
         "Residual",
+        "list-jobs",
+        "LoadState",
+        "ExecStopPost",
+        "daemon_reloaded",
+        *(command.strip("`") for command in MANUAL_CLEANUP),
     ):
         assert phrase in doc, phrase
 
@@ -821,10 +1255,16 @@ INTERNAL_PRESETS = {
     f"{PREFIX}gate_source_revision": REVISION,
     f"{PREFIX}identity": {"ansible_facts": {"ansible_hostname": REVIEWED_HOST}},
     f"{PREFIX}units": {"stdout_lines": []},
-    f"{PREFIX}removal": {"refused": [], "removed": [], "already_absent": []},
-    f"{PREFIX}reload": {"rc": 0},
+    f"{PREFIX}jobs": {"stdout": ""},
+    f"{PREFIX}removal": {
+        "refused": [],
+        "removed": [],
+        "already_absent": [],
+        "daemon_reloaded": True,
+    },
     f"{PREFIX}units_after": {"stdout_lines": []},
-    f"{PREFIX}unit_files_after": {"stdout": ""},
+    f"{PREFIX}jobs_after": {"stdout": ""},
+    f"{PREFIX}load_states": {"rc": 0, "stdout_lines": ["not-found", "not-found"]},
     f"{PREFIX}undocumented": "x",
 }
 
@@ -840,28 +1280,25 @@ def _rewrite(node: Any, *, local_identity: bool) -> Any:
         }
         command = out.get("ansible.builtin.command")
         if command and command["argv"][0] == "/usr/bin/systemctl":
-            register = out.get("register")
-            if register == f"{PREFIX}reload":
-                argv = ["/usr/bin/touch", "{{ rehearsal_root }}/daemon-reloaded"]
-            elif register == f"{PREFIX}units_after":
-                argv = [
-                    "/usr/bin/printf",
-                    "%s",
-                    "{{ rehearsal_units_after | default(rehearsal_units) }}",
-                ]
-            elif register == f"{PREFIX}unit_files_after":
-                argv = [
-                    "/usr/bin/printf",
-                    "%s",
-                    "{{ rehearsal_unit_files | default('') }}",
-                ]
-            else:
-                argv = ["/usr/bin/printf", "%s", "{{ rehearsal_units }}"]
-            out["ansible.builtin.command"] = {"argv": argv}
+            stand_in = {
+                f"{PREFIX}units": "{{ rehearsal_units }}",
+                f"{PREFIX}jobs": "{{ rehearsal_jobs }}",
+                f"{PREFIX}units_after": (
+                    "{{ rehearsal_units_after | default(rehearsal_units) }}"
+                ),
+                f"{PREFIX}jobs_after": (
+                    "{{ rehearsal_jobs_after | default(rehearsal_jobs) }}"
+                ),
+                f"{PREFIX}load_states": "{{ rehearsal_load_states }}",
+            }[out["register"]]
+            out["ansible.builtin.command"] = {
+                "argv": ["/usr/bin/printf", "%s", stand_in]
+            }
         if MODULE_NAME in out:
             out[MODULE_NAME] = {
                 "unit_dir": "{{ rehearsal_root }}" + out[MODULE_NAME]["unit_dir"],
                 "owner": "{{ rehearsal_owner }}",
+                "daemon_reload": "{{ rehearsal_reload_argv }}",
             }
         if out.get("name") == REPORT:
             out["register"] = "rehearsal_report"
@@ -944,9 +1381,15 @@ def _build_role(
         _task(BATCH, tasks)["ansible.builtin.assert"]["that"] = [
             "ansible_play_batch == ansible_play_batch"
         ]
-    rendered = json.dumps(tasks)
-    assert "systemctl" not in rendered
-    assert '"/etc/systemd' not in rendered
+    # No host-acting argument still reaches the real systemd.
+    operative = json.dumps(
+        [
+            {k: v for k, v in t.items() if k not in ("name", "ansible.builtin.assert")}
+            for t in _walk(tasks)
+        ]
+    )
+    assert "systemctl" not in operative
+    assert '"/etc/systemd' not in operative
     assert _task(PRESET_INCLUDE, tasks) == _task(PRESET_INCLUDE)
     assert _task(GATE, tasks) == _task(GATE)
     assert _task(LIVE, tasks) == _task(LIVE)
@@ -1094,6 +1537,18 @@ def _host(root: Path, **overrides: Any) -> dict:
         f"{PREFIX}source_revision": REVISION,
         "rehearsal_root": str(root),
         "rehearsal_units": STOPPED_UNITS,
+        "rehearsal_jobs": "",
+        "rehearsal_load_states": "not-found\n\nnot-found\n",
+        # Stands in for systemctl daemon-reload: records the unit directory as
+        # the module's in-call reload sees it.
+        "rehearsal_reload_argv": [
+            "/usr/bin/sh",
+            "-c",
+            'ls -A "$1" > "$2" 2>/dev/null || : > "$2"',
+            "sh",
+            f"{root}/etc/systemd/system",
+            f"{root}/daemon-reloaded",
+        ],
         "rehearsal_owner": pwd.getpwuid(os.getuid()).pw_name,
         **overrides,
     }
@@ -1137,7 +1592,7 @@ def _message(task: str) -> str:
 def _assert_refused(root: Path, task: str, rehearsal_pass: str = "first") -> None:
     outcome = _outcome(root, rehearsal_pass)
     assert outcome is not None and outcome.get("task") == task, (root.name, outcome)
-    if task != UNLINK_CHECK:
+    if "{{" not in _message(task):
         assert _message(task) in [_flat(m) for m in outcome["messages"]], outcome
 
 
@@ -1181,10 +1636,22 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
     for preset, value in INTERNAL_PRESETS.items():
         add(f"preset_{preset.removeprefix(PREFIX)}", **{preset: value})
     add("went_live_after", rehearsal_units_after=LIVE_UNITS["live_custody"] + "\n")
+    # A queued start shows up in list-units only as an extra JOB column word.
     add(
-        "shadow_unit_file",
-        rehearsal_unit_files="ditto-coding-custody@.service static -\n",
+        "queued_job",
+        rehearsal_units=(
+            "ditto-coding-hosted-worker.service loaded inactive dead start Worker\n"
+        ),
+        rehearsal_jobs="42 ditto-coding-hosted-worker.service start waiting\n",
     )
+    add(
+        "queued_job_after",
+        rehearsal_jobs_after="43 ditto-coding-custody@0.service start waiting\n",
+    )
+    add("shadow_load_state", rehearsal_load_states="loaded\n\nnot-found\n")
+    add("shadow_template", rehearsal_load_states="not-found\n\nloaded\n")
+    add("load_state_empty", rehearsal_load_states="")
+    add("reload_fails", rehearsal_reload_argv=["/usr/bin/false"])
     for swap in ("symlink", "hardlink", "directory"):
         root = add(f"swap_{swap}", tree=False)
         unit_dir = _unit_tree(root, worker=False)
@@ -1222,7 +1689,9 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
     assert _outcome(roots["removed"]) == {
         "report": _report(roots["removed"], UNIT_PATHS, [])
     }
-    assert _gone(roots["removed"]) and (roots["removed"] / "daemon-reloaded").exists()
+    assert _gone(roots["removed"])
+    # The module's in-call reload ran after both unlinks.
+    assert (roots["removed"] / "daemon-reloaded").read_text() == "unrelated.service\n"
     assert (roots["removed"] / "etc/systemd/system/unrelated.service").exists()
     assert _outcome(roots["already_absent"]) == {
         "report": _report(roots["already_absent"], [], UNIT_PATHS)
@@ -1260,11 +1729,26 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
         _assert_refused_untouched(
             roots[f"preset_{preset.removeprefix(PREFIX)}"], PRESET
         )
-    # Removed, then refused on the post-removal checks.
-    _assert_refused(roots["went_live_after"], LIVE_AFTER)
-    assert _gone(roots["went_live_after"])
-    _assert_refused(roots["shadow_unit_file"], UNIT_FILES_CHECK)
-    assert _gone(roots["shadow_unit_file"])
+    _assert_refused_untouched(roots["queued_job"], LIVE)
+    # Removed, then refused on the post-removal checks, naming the manual cleanup
+    # and the true receipt.
+    for name in ("went_live_after", "queued_job_after"):
+        _assert_refused(roots[name], LIVE_AFTER)
+        assert _gone(roots[name])
+        (message,) = _outcome(roots[name])["messages"]
+        for command in MANUAL_CLEANUP:
+            assert command in _flat(message), (name, command)
+        assert f"removed={_rooted(roots[name], UNIT_PATHS)}; refused=[]" in _flat(
+            message
+        )
+    for name in ("shadow_load_state", "shadow_template", "load_state_empty"):
+        _assert_refused(roots[name], LOAD_STATES_CHECK)
+        assert _gone(roots[name])
+    _assert_refused(roots["reload_fails"], UNLINK_CHECK)
+    (message,) = _outcome(roots["reload_fails"])["messages"]
+    assert f"removed={_rooted(roots['reload_fails'], UNIT_PATHS)}" in _flat(message)
+    assert 'refused=["daemon-reload failed"]' in _flat(message)
+    assert "daemon_reloaded=false" in _flat(message)
     # Swapped entries: nothing after the refusal is attempted, the link target
     # survives, systemd is still reloaded and the receipt names every state.
     for swap in ("symlink", "hardlink", "directory"):
@@ -1627,12 +2111,46 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
         "Native Coding worker and custody unit uninstall"
     )
 
-    # Reload removed: removal completes with no daemon-reload.
-    reload = _mutant(
-        tmp_path, "reload", _tree_host(tmp_path, "reload"), mutate_remove=_drop(RELOAD)
+    # Receipt refusal and reload-flag lines removed: a failed in-call reload is
+    # reported as a completed uninstall with daemon_reloaded=false.
+    def no_reload_check(tasks: list[dict]) -> None:
+        _drop_that(UNLINK_CHECK, 3)(tasks)
+        _drop_that(UNLINK_CHECK, 0)(tasks)
+
+    skipped = _mutant(
+        tmp_path,
+        "reload_check",
+        _tree_host(tmp_path, "reload_check", rehearsal_reload_argv=["/usr/bin/false"]),
+        mutate_remove=no_reload_check,
     )
-    assert _gone(reload) and not (reload / "daemon-reloaded").exists()
-    assert _outcome(reload)["report"].startswith("Native Coding worker and custody")
+    assert _gone(skipped)
+    assert "daemon_reloaded=false" in _outcome(skipped)["report"]
+
+    # Queued-job check removed before removal: a queued start loses its unit.
+    queued = _mutant(
+        tmp_path,
+        "jobs",
+        _tree_host(
+            tmp_path,
+            "jobs",
+            rehearsal_jobs="42 ditto-coding-hosted-worker.service start waiting\n",
+        ),
+        mutate_remove=_drop_that(LIVE, 1),
+    )
+    assert _gone(queued)
+
+    # Queued-job re-check removed: a job queued during removal is reported clean.
+    queued_after = _mutant(
+        tmp_path,
+        "jobs_after",
+        _tree_host(
+            tmp_path,
+            "jobs_after",
+            rehearsal_jobs_after="43 ditto-coding-custody@0.service start waiting\n",
+        ),
+        mutate_remove=_drop_that(LIVE_AFTER, 1),
+    )
+    assert "report" in _outcome(queued_after)
 
     # Post-removal live check removed: a unit that went live is reported clean.
     after = _mutant(
@@ -1643,15 +2161,26 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
     )
     assert "report" in _outcome(after)
 
-    # Post-reload unit-file check removed: a shadow definition is reported clean.
+    # Positive load-state check weakened to the old empty-output test: an empty
+    # answer (what a systemctl or D-Bus error can print) is reported clean.
+    def empty_output_check(tasks: list[dict]) -> None:
+        _task(LOAD_STATES_CHECK, tasks)["ansible.builtin.assert"]["that"] = [
+            f"{PREFIX}load_states.stdout | trim | length == 0"
+        ]
+
+    empty = _mutant(
+        tmp_path,
+        "load_state_empty",
+        _tree_host(tmp_path, "load_state_empty", rehearsal_load_states=""),
+        mutate_remove=empty_output_check,
+    )
+    assert "report" in _outcome(empty)
+
+    # Load-state check removed: a shadow definition is reported clean.
     shadow = _mutant(
         tmp_path,
         "shadow",
-        _tree_host(
-            tmp_path,
-            "shadow",
-            rehearsal_unit_files="ditto-coding-custody@.service static -\n",
-        ),
-        mutate_remove=_drop(UNIT_FILES_CHECK),
+        _tree_host(tmp_path, "shadow", rehearsal_load_states="loaded\n\nnot-found\n"),
+        mutate_remove=_drop(LOAD_STATES_CHECK),
     )
     assert "report" in _outcome(shadow)
