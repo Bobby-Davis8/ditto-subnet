@@ -79,7 +79,6 @@ import {
   getCoreQualificationPolicyInputSchema,
   refreshAgentCoreQualificationInputSchema,
   setCoreQualificationPolicyMcpInputSchema,
-  listCodingCertificationLeasesMcpInputSchema,
   setCodingCertificationAllowlistMcpInputSchema,
   agentScoresLookupInputSchema,
   scoreLeaderboardInputSchema,
@@ -175,9 +174,7 @@ import {
   fetchCoreQualificationPolicy,
   refreshAgentCoreQualification,
   setCoreQualificationPolicy,
-  fetchCodingCertificationAllowlist,
   setCodingCertificationAllowlist,
-  fetchCodingCertificationLeases,
   fetchBenchmarkContractRefresh,
   fetchBenchmarkContractMigration,
   migrateBenchmarkContract,
@@ -546,7 +543,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_coding_private_v2_releases:
     'Read native v2 registrations; never launches.',
   get_coding_control_plane:
-    'Read unified Coding authority state.',
+    'Read unified Coding authority state, including the certification allowlist and leases.',
   register_coding_private_v2_release:
     'Register signed, non-selectable native v2.',
   quarantine_coding_private_v2_release:
@@ -575,12 +572,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read one artifact-bound shadow qualification history.',
   refresh_agent_core_qualification:
     'Idempotently observe one current score snapshot. No scoring effect.',
-  get_coding_certification_allowlist:
-    'Read the append-only coding certification allowlist (disabled by default) and optional history.',
   set_coding_certification_allowlist:
-    'Append one allowlist revision restricting certification leases and grants to exact agent/artifact/validator tuples.',
-  list_coding_certification_leases:
-    'Page certification lease rows newest first; no grant ids or bearer data.',
+    'Append a strict certification allowlist revision; read its tool help first.',
   get_screener_review_settings:
     'Read L1/L2/L3 review settings and worker adoption; bypass is in queue policy.',
   get_screener_fanout_shadow:
@@ -1457,7 +1450,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Inspect agent coding certifications',
       description:
-        'Shadow coding-capability receipts for one agent UUID. weight_eligible is always false; never feeds ranking or Tool+Memory scores. Requires backroom:read.',
+        'Shadow coding-capability receipts for one agent UUID, plus certification_leases: that agent\'s newest certification lease rows (status issued | claimed | completed | aborted | expired, where completed means the receipt was accepted and is terminal; deadline, receipt_window_ends_at, deadline_passed on the Platform clock, claim_allowlist_revision, aborted_allowlist_revision, grant and receipt status; never grant ids, bearer digests, broker keys, or image locators). An overdue lease keeps its stored status until Platform next touches it. weight_eligible is always false; never feeds ranking or Tool+Memory scores. Requires backroom:read.',
       inputSchema: agentCodingCertificationInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1493,7 +1486,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get unified Coding control-plane state',
       description:
-        'Read the contract-v1 catalog and distinct native private-v2 registry in one bounded snapshot. Reports permanent shadow and weight-zero flags. It does not establish fresh provider access, key custody, host qualification, canary completion or rollout approval and performs no mutation.',
+        'Read the contract-v1 catalog and distinct native private-v2 registry in one bounded snapshot, plus the strict contract-v1 certification allowlist (certification_allowlist: enabled, effective refuse_all | exact_tuples, integrity valid | invalid, current revision where 0 is the built-in refuse-all default, and newest-first history up to limit) and the newest certification lease rows across agents (certification_leases). Reports permanent shadow and weight-zero flags. It does not establish fresh provider access, key custody, host qualification, canary completion or rollout approval and performs no mutation.',
       inputSchema: getCodingCatalogInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1665,55 +1658,16 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
-    'get_coding_certification_allowlist',
-    {
-      title: 'Get coding certification allowlist',
-      description:
-        'Read the Platform-owned, append-only restriction on who may start the contract-v1 coding certification path. revision 0 is the built-in default and means disabled: lease issue and certification inference grants follow their ordinary eligibility rules. When enabled, only the exact (agent_id, artifact_sha256, validator_hotkey) tuples in current.entries may be issued a lease, offered a grant, or exchange a grant bearer; an enabled revision with no entries refuses all of them. checksum binds enabled plus the sorted entries. Revision history is newest-first and opt-in with historyLimit (default 0). Read-only; never certifies anything and is always weight_eligible=false.',
-      inputSchema: MCP_SETTINGS_HISTORY_INPUT,
-      annotations: toolAnnotations('read'),
-    },
-    async ({ historyLimit, historyOffset }) =>
-      result(
-        compacted(
-          pageRevisionHistory(
-            await fetchCodingCertificationAllowlist(),
-            historyLimit,
-            historyOffset,
-          ),
-          REVISION_LISTS,
-        ),
-      ),
-  )
-
-  registerTool(
     'set_coding_certification_allowlist',
     {
       title: 'Set coding certification allowlist',
       description:
-        'Append one complete allowlist revision after reading get_coding_certification_allowlist. Supply expectedRevision exactly as current.revision reports it, enabled, entries as up to 16 exact {agent_id, artifact_sha256, validator_hotkey} tuples (copy them from list_coding_certification_leases or the agent record; a disabled revision must carry none), an operator reason, and the exact confirmation "APPLY CODING CERTIFICATION ALLOWLIST ENABLED <entry count>" or "APPLY CODING CERTIFICATION ALLOWLIST DISABLED". Enabling refuses every unlisted lease issue, grant offer, and grant exchange with a fixed 403 and immediately revokes live certification inference grants for unlisted tuples (revoked_inference_grant_count). It can only narrow access: there is no wildcard, no admin certification bypass, and no row is ever deleted. Requires backroom:write.',
+        'Append one complete, strict coding-certification allowlist revision. Read get_coding_control_plane first: certification_allowlist.current.revision is expectedRevision, and certification_leases shows in-flight leases. Arguments: expectedRevision (integer), enabled (boolean), entries (1-16 exact {agent_id, artifact_sha256, validator_hotkey} tuples when enabled, none when enabled=false), reason (at least 8 characters), and confirmation, exactly "APPLY CODING CERTIFICATION ALLOWLIST ENABLED <entry count>" or "APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL". Platform refuses every certification lease issue, claim, harness launch, grant, and receipt unless the latest intact revision lists that exact tuple; with no revision, a refuse-all revision, or a corrupt revision (integrity=invalid) it refuses everything. There is no wildcard, no open revision, and no admin certification bypass. In the same transaction the write aborts every issued or claimed lease it does not admit (aborted_lease_count) and revokes every live certification inference grant it does not admit (revoked_inference_grant_count); completed (receipted) leases are never touched. Invalid shapes, duplicate tuples, and a wrong confirmation are refused before any Platform call. The signed-in operator email is the audit actor. Requires backroom:write.',
       inputSchema: setCodingCertificationAllowlistMcpInputSchema,
       annotations: toolAnnotations('write', true),
     },
     async (input) =>
       write(() => setCodingCertificationAllowlist(input, props.session.email)),
-  )
-
-  registerTool(
-    'list_coding_certification_leases',
-    {
-      title: 'List coding certification leases',
-      description:
-        'Page shadow contract-v1 certification lease rows newest first (issued_at DESC, lease_id DESC), optionally filtered by agentId, validatorHotkey, or status (issued | claimed | aborted | expired); limit 1-200 (default 50) with offset, and total counts every matching row. Each row carries the lease id, agent, artifact and screened-image digests, bench and contract version, validator, status, issued/claimed/aborted/deadline timestamps, deadline_passed, and the bound inference grant and receipt status. A claimed lease past its deadline expires on the next Platform touch, so an overdue row can still read claimed with deadline_passed=true; an expired row that kept claimed_at was a claimed attempt. Grant ids, bearer digests, broker keys, and image locators are never returned. Read-only; requires backroom:read.',
-      inputSchema: listCodingCertificationLeasesMcpInputSchema,
-      annotations: toolAnnotations('read'),
-    },
-    async (input) =>
-      result(
-        compacted(await fetchCodingCertificationLeases(input), {
-          leases: { pin: ['lease_id'] },
-        }),
-      ),
   )
 
   registerTool(

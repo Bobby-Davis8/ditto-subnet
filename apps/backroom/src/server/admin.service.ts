@@ -130,7 +130,6 @@ import {
   codingCertificationAllowlistApplySchema,
   codingCertificationAllowlistControlSchema,
   codingCertificationLeaseListSchema,
-  listCodingCertificationLeasesInputSchema,
   setCodingCertificationAllowlistInputSchema,
   coreQualificationPolicyControlSchema,
   getCoreQualificationPolicyInputSchema,
@@ -2186,10 +2185,16 @@ export async function fetchAgentScoringReadiness(rawInput: unknown) {
 
 export async function fetchAgentCodingCertifications(rawInput: unknown) {
   const input = agentCodingCertificationInputSchema.parse(rawInput)
-  const payload = await platformAdminRequest(
-    `/api/v1/admin/agents/${encodeURIComponent(input.agentId)}/coding-certifications?limit=${input.limit}`,
-  )
-  return agentCodingCertificationStatusSchema.parse(payload)
+  const [payload, certificationLeases] = await Promise.all([
+    platformAdminRequest(
+      `/api/v1/admin/agents/${encodeURIComponent(input.agentId)}/coding-certifications?limit=${input.limit}`,
+    ),
+    fetchCodingCertificationLeases({ agentId: input.agentId, limit: input.limit }),
+  ])
+  return {
+    ...agentCodingCertificationStatusSchema.parse(payload),
+    certification_leases: certificationLeases,
+  }
 }
 
 export async function fetchCodingCatalogReleases(rawInput: unknown) {
@@ -2212,16 +2217,21 @@ export async function fetchCodingPrivateV2Releases(rawInput: unknown) {
 export async function fetchCodingControlPlane(rawInput: unknown) {
   const input = getCodingCatalogInputSchema.parse(rawInput)
   type NativeControl = PlatformOperations['get_coding_control_plane_api_v1_admin_coding_control_plane_get']['responses'][200]['content']['application/json']
-  const [catalog, privateV2, native] = await Promise.all([
-    fetchCodingCatalogReleases(input),
-    fetchCodingPrivateV2Releases(input),
-    platformAdminRequest(`/api/v1/admin/coding-control-plane?limit=${input.limit}`)
-      .then((payload) => codingNativeControlStatusSchema.parse(payload) satisfies NativeControl),
-  ])
+  const [catalog, privateV2, native, certificationAllowlist, certificationLeases] =
+    await Promise.all([
+      fetchCodingCatalogReleases(input),
+      fetchCodingPrivateV2Releases(input),
+      platformAdminRequest(`/api/v1/admin/coding-control-plane?limit=${input.limit}`)
+        .then((payload) => codingNativeControlStatusSchema.parse(payload) satisfies NativeControl),
+      fetchCodingCertificationAllowlist(input.limit),
+      fetchCodingCertificationLeases({ limit: input.limit }),
+    ])
   return {
     catalog,
     private_v2: privateV2,
     native,
+    certification_allowlist: certificationAllowlist,
+    certification_leases: certificationLeases,
     shadow_only: true as const,
     weight_eligible: false as const,
   }
@@ -2392,10 +2402,9 @@ export async function setCoreQualificationPolicy(rawInput: unknown, actor: strin
 
 const CODING_CERTIFICATION_ALLOWLIST_PATH = '/api/v1/admin/coding-certification-allowlist'
 
-export async function fetchCodingCertificationAllowlist() {
-  // The platform caps history at 200; the MCP tool pages that window locally.
+async function fetchCodingCertificationAllowlist(historyLimit: number) {
   const payload = await platformAdminRequest(
-    `${CODING_CERTIFICATION_ALLOWLIST_PATH}?history_limit=200`,
+    `${CODING_CERTIFICATION_ALLOWLIST_PATH}?history_limit=${historyLimit}`,
   )
   return codingCertificationAllowlistControlSchema.parse(payload)
 }
@@ -2417,14 +2426,12 @@ export async function setCodingCertificationAllowlist(rawInput: unknown, actor: 
   return codingCertificationAllowlistApplySchema.parse(payload)
 }
 
-export async function fetchCodingCertificationLeases(rawInput: unknown) {
-  const input = listCodingCertificationLeasesInputSchema.parse(rawInput)
+// Newest-first certification lease audit rows, read inside the existing Coding
+// reads rather than through their own catalog tools.
+async function fetchCodingCertificationLeases(input: { agentId?: string; limit: number }) {
   const query = new URLSearchParams()
   if (input.agentId) query.set('agent_id', input.agentId)
-  if (input.validatorHotkey) query.set('validator_hotkey', input.validatorHotkey)
-  if (input.status) query.set('status', input.status)
   query.set('limit', String(input.limit))
-  query.set('offset', String(input.offset))
   const payload = await platformAdminRequest(
     `/api/v1/admin/coding-certification-leases?${query}`,
   )

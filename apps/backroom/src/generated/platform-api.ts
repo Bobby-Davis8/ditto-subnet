@@ -503,13 +503,17 @@ export interface paths {
         };
         /**
          * Get Coding Certification Allowlist
-         * @description Current restriction (revision 0 = built-in disabled) and newest-first history.
+         * @description Current restriction (revision 0 = built-in refuse-all) and history.
          */
         get: operations["get_coding_certification_allowlist_api_v1_admin_coding_certification_allowlist_get"];
         put?: never;
         /**
          * Set Coding Certification Allowlist
-         * @description Append one complete revision; enabling also revokes unlisted live grants.
+         * @description Append one complete revision, then abort and revoke what it refuses.
+         *
+         *     In the same transaction as the new revision, every issued or claimed lease
+         *     the revision does not admit is aborted (recording the revision) and every
+         *     live certification inference grant it does not admit is revoked.
          */
         post: operations["set_coding_certification_allowlist_api_v1_admin_coding_certification_allowlist_post"];
         delete?: never;
@@ -7181,11 +7185,23 @@ export interface components {
         };
         /** AdminCodingCertificationAllowlistApplyResponse */
         AdminCodingCertificationAllowlistApplyResponse: {
+            /** Aborted Lease Count */
+            aborted_lease_count: number;
             current: components["schemas"]["CodingCertificationAllowlistRevision"];
+            /**
+             * Effective
+             * @enum {string}
+             */
+            effective: "refuse_all" | "exact_tuples";
             /** Enabled */
             enabled: boolean;
             /** History */
             history: components["schemas"]["CodingCertificationAllowlistRevision"][];
+            /**
+             * Integrity
+             * @enum {string}
+             */
+            integrity: "valid" | "invalid";
             /**
              * Max Entries
              * @default 16
@@ -7218,13 +7234,26 @@ export interface components {
             /** Reason */
             reason: string;
         };
-        /** AdminCodingCertificationAllowlistResponse */
+        /**
+         * AdminCodingCertificationAllowlistResponse
+         * @description Current enforcement. ``enabled`` is true only for valid exact tuples.
+         */
         AdminCodingCertificationAllowlistResponse: {
             current: components["schemas"]["CodingCertificationAllowlistRevision"];
+            /**
+             * Effective
+             * @enum {string}
+             */
+            effective: "refuse_all" | "exact_tuples";
             /** Enabled */
             enabled: boolean;
             /** History */
             history: components["schemas"]["CodingCertificationAllowlistRevision"][];
+            /**
+             * Integrity
+             * @enum {string}
+             */
+            integrity: "valid" | "invalid";
             /**
              * Max Entries
              * @default 16
@@ -7257,8 +7286,15 @@ export interface components {
         /**
          * AdminCodingCertificationLeaseRecord
          * @description One lease row. Grant ids, bearer digests, and image locators are omitted.
+         *
+         *     ``completed`` means Platform accepted the lease's receipt; it is terminal
+         *     and never expires. ``claim_allowlist_revision`` is the allowlist revision
+         *     that admitted the claim, and ``aborted_allowlist_revision`` the revision
+         *     whose write aborted the lease.
          */
         AdminCodingCertificationLeaseRecord: {
+            /** Aborted Allowlist Revision */
+            aborted_allowlist_revision: number | null;
             /** Aborted At */
             aborted_at: string | null;
             /**
@@ -7270,6 +7306,8 @@ export interface components {
             artifact_sha256: string;
             /** Bench Version */
             bench_version: number;
+            /** Claim Allowlist Revision */
+            claim_allowlist_revision: number | null;
             /** Claimed At */
             claimed_at: string | null;
             /** Coding Contract Version */
@@ -7294,6 +7332,11 @@ export interface components {
              */
             lease_id: string;
             receipt_status: components["schemas"]["CodingCertificationStatus"] | null;
+            /**
+             * Receipt Window Ends At
+             * Format: date-time
+             */
+            receipt_window_ends_at: string;
             /** Screened Image Sha256 */
             screened_image_sha256: string;
             status: components["schemas"]["CodingCertificationLeaseStatus"];
@@ -12705,7 +12748,14 @@ export interface components {
             /** Validator Hotkey */
             validator_hotkey: string;
         };
-        /** CodingCertificationAllowlistRevision */
+        /**
+         * CodingCertificationAllowlistRevision
+         * @description One stored revision as enforcement sees it.
+         *
+         *     ``enabled`` is the stored flag. ``integrity="invalid"`` means the stored
+         *     entries failed to parse or their checksum does not bind them; such a
+         *     revision reports no entries and ``effective="refuse_all"``.
+         */
         CodingCertificationAllowlistRevision: {
             /** Actor */
             actor: string;
@@ -12713,10 +12763,20 @@ export interface components {
             checksum: string;
             /** Created At */
             created_at: string | null;
+            /**
+             * Effective
+             * @enum {string}
+             */
+            effective: "refuse_all" | "exact_tuples";
             /** Enabled */
             enabled: boolean;
             /** Entries */
             entries: components["schemas"]["CodingCertificationAllowlistEntry"][];
+            /**
+             * Integrity
+             * @enum {string}
+             */
+            integrity: "valid" | "invalid";
             /** Parent Revision */
             parent_revision: number;
             /** Reason */
@@ -13223,9 +13283,10 @@ export interface components {
         };
         /**
          * CodingCertificationLeaseStatus
+         * @description Lease lifecycle. ``completed`` means an accepted receipt; it is terminal.
          * @enum {string}
          */
-        CodingCertificationLeaseStatus: "issued" | "claimed" | "aborted" | "expired";
+        CodingCertificationLeaseStatus: "issued" | "claimed" | "completed" | "aborted" | "expired";
         /** CodingCertificationModelEvidence */
         CodingCertificationModelEvidence: {
             /** Completion Tokens */
@@ -37986,7 +38047,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Agent not found. */
+            /** @description The certification allowlist refuses the lease. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent or live lease not found. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -38411,6 +38479,13 @@ export interface operations {
                     "application/json": components["schemas"]["CodingCertificationLeaseResponse"];
                 };
             };
+            /** @description The certification allowlist refuses the lease. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -38448,6 +38523,13 @@ export interface operations {
             };
             /** @description Signature invalid or validator not permitted. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The certification allowlist refuses the lease. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
