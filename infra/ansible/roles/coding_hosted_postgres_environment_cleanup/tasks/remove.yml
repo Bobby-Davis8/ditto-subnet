@@ -1,0 +1,267 @@
+---
+# Reached only through the single frozen gate in main.yml, so every guard below
+# runs exactly once, before anything is removed, and reads only values this run
+# produced.
+
+# Extra vars outrank role defaults, registered results and set_facts alike, so
+# the only defence against a preset internal name is to refuse it before that
+# name is created. varnames lists names without rendering any value. At this
+# point only the three documented inputs and the gate main.yml froze may carry
+# the prefix; a preset registered result or frozen input is refused. Presetting
+# the frozen gate itself only enables removal, which every guard below still
+# decides. The materialization role's coding_hosted_postgres_environment_*
+# names never match this prefix, just as that role excludes these names.
+- name: Refuse preset registered results and undocumented role inputs
+  ansible.builtin.assert:
+    that:
+      - >-
+        lookup('ansible.builtin.varnames', '^coding_hosted_postgres_environment_cleanup_', wantlist=True)
+        | sort == ['coding_hosted_postgres_environment_cleanup_confirmation',
+        'coding_hosted_postgres_environment_cleanup_enabled',
+        'coding_hosted_postgres_environment_cleanup_frozen_enabled',
+        'coding_hosted_postgres_environment_cleanup_source_revision']
+    fail_msg: >-
+      Only the enabled, confirmation and source_revision inputs are accepted; a
+      registered result or frozen input name, or another
+      coding_hosted_postgres_environment_cleanup_ variable, is preset. Nothing was removed.
+    quiet: true
+
+# Render each remaining input exactly once, with no loop item in scope, so a
+# lazily templated value cannot render one thing for a guard and another later.
+# default('', true) turns an undefined result, including one produced while
+# reading a secret, into an empty string that then fails validation instead of
+# surfacing in an error message, and no_log keeps a value that resolved to a
+# secret off the wire. Every later task reads only these frozen values.
+- name: Freeze the removal inputs once, neutralising templates and loops
+  ansible.builtin.set_fact:
+    coding_hosted_postgres_environment_cleanup_frozen_confirmation: "{{ coding_hosted_postgres_environment_cleanup_confirmation | default('', true) }}"
+    coding_hosted_postgres_environment_cleanup_frozen_revision: "{{ coding_hosted_postgres_environment_cleanup_source_revision | default('', true) }}"
+  no_log: true
+
+# A -e ansible_facts value replaces gathered facts, so identity comes only from
+# this registered probe, whose name the guard above keeps unforgeable.
+- name: Probe this machine's identity into a result extra vars cannot preset
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', platform, distribution]
+  register: coding_hosted_postgres_environment_cleanup_identity
+
+# The frozen values are inert strings, and this message names none of them: no
+# message renders the revision until this check has proved it is exactly 40
+# lowercase hex characters. A '$' anchor alone accepts a trailing newline, so
+# the exact length is required too.
+- name: Require the exact host, source and removal confirmation
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in groups.get('role_coding_hosted', [])
+      - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
+      - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_architecture == 'x86_64'
+      - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_distribution == 'Debian'
+      - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_distribution_major_version == '13'
+      - coding_hosted_postgres_environment_cleanup_frozen_revision is string
+      - coding_hosted_postgres_environment_cleanup_frozen_revision is match('^[0-9a-f]{40}$')
+      - coding_hosted_postgres_environment_cleanup_frozen_revision | length == 40
+      - coding_hosted_postgres_environment_cleanup_frozen_confirmation == 'REMOVE NATIVE CODING POSTGRES ENVIRONMENT'
+    fail_msg: >-
+      Require the reviewed source, dedicated host and exact removal confirmation.
+      Nothing was removed.
+    quiet: true
+
+# Same listing as coding_hosted_postgres_environment. This role stops nothing;
+# the operator stops the services first.
+- name: List live worker and custody units
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, list-units, --all, --plain, --no-legend, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
+  register: coding_hosted_postgres_environment_cleanup_units
+  changed_when: false
+  check_mode: false
+
+# Allow-list, not deny-list: every listed line must be an expected unit whose
+# ACTIVE column is inactive or failed. Any other state, including refreshing
+# (systemd 256+), maintenance, a future state or an unparseable line, refuses.
+# An empty listing means no such unit is loaded and is allowed.
+- name: Refuse to remove credentials unless every listed unit is inactive or failed
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_postgres_environment_cleanup_units.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
+      Stop the hosted worker and every custody instance before removing credentials;
+      each listed unit must be inactive or failed and this role stops nothing.
+      Nothing was removed. source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
+    quiet: true
+
+# Each reader home and private directory is created 0700 and owned by its
+# reader (coding_hosted, coding_hosted_custody_key and the materialization
+# role), so both must still be real directories owned by that reader and
+# writable by nobody else. Path resolution follows links in parent components
+# even when the final component is inspected with follow=false, so each parent
+# must be real.
+- name: Inspect the reader directories without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - {path: /var/lib/ditto-coding-custody, owner: ditto-coding-custody}
+    - {path: /var/lib/ditto-coding-custody/private, owner: ditto-coding-custody}
+    - {path: /var/lib/ditto-coding-hosted, owner: ditto-coding-hosted}
+    - {path: /var/lib/ditto-coding-hosted/private, owner: ditto-coding-hosted}
+  loop_control:
+    label: "{{ item.path }}"
+  register: coding_hosted_postgres_environment_cleanup_directories
+
+- name: Refuse a linked, non-directory, foreign-owned or shared-writable parent
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists or
+        (item.stat.isdir and not item.stat.islnk and
+         item.stat.pw_name | default('') == item.item.owner and
+         not item.stat.wgrp and not item.stat.woth)
+    fail_msg: >-
+      A PostgreSQL environment parent is not a real directory owned by, and writable
+      only by, its reader; reconcile it by hand. Nothing was removed.
+      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
+    quiet: true
+  loop: "{{ coding_hosted_postgres_environment_cleanup_directories.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Inspect both exact copies as link metadata only
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - {path: /var/lib/ditto-coding-custody/private/postgres-environment.json, owner: ditto-coding-custody}
+    - {path: /var/lib/ditto-coding-hosted/private/postgres-environment.json, owner: ditto-coding-hosted}
+  loop_control:
+    label: "{{ item.path }}"
+  register: coding_hosted_postgres_environment_cleanup_copies
+
+- name: Refuse anything but an absent copy or a regular single-link copy owned by its reader
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists or
+        (item.stat.isreg and not item.stat.islnk and item.stat.nlink == 1 and
+         item.stat.pw_name | default('') == item.item.owner)
+    fail_msg: >-
+      A PostgreSQL environment path is a link, directory, hard link or another
+      account's file; reconcile it by hand. Nothing was removed.
+      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
+    quiet: true
+  loop: "{{ coding_hosted_postgres_environment_cleanup_copies.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Unlink the present copies and report any partial removal
+  block:
+    # The reader owns, and can write, its home and private directory, so it
+    # could swap a component for a symlink after the inspection above. The
+    # role-local module therefore never resolves the path as a string: it opens
+    # each component with O_NOFOLLOW, re-checks the reader-owned directories and
+    # the file through those descriptors, and calls unlinkat(2) relative to the
+    # pinned private directory. unlinkat cannot remove a directory or follow a
+    # link, so a later swap can only remove the reader's own directory entry.
+    - name: Unlink each exact copy that exists through a pinned directory and nothing else
+      coding_hosted_postgres_environment_unlink:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+      loop:
+        - {path: /var/lib/ditto-coding-custody/private/postgres-environment.json, owner: ditto-coding-custody}
+        - {path: /var/lib/ditto-coding-hosted/private/postgres-environment.json, owner: ditto-coding-hosted}
+      loop_control:
+        label: "{{ item.path }}"
+      when: >-
+        item.path in (coding_hosted_postgres_environment_cleanup_copies.results
+        | selectattr('stat.exists') | map(attribute='item.path') | list)
+      register: coding_hosted_postgres_environment_cleanup_unlinked
+  rescue:
+    # Every item is attempted even after one fails. Report which unlinks
+    # succeeded and which present copies remain unconfirmed, then fail.
+    - name: Report the copies unlinked before the removal failure and stop
+      ansible.builtin.fail:
+        msg: >-
+          Native Coding PostgreSQL environment cleanup failed during removal;
+          source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }};
+          removed={{
+          coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
+          | selectattr('state', 'defined') | selectattr('state', 'equalto', 'removed')
+          | map(attribute='item.path') | list | to_json }};
+          not_removed={{
+          coding_hosted_postgres_environment_cleanup_copies.results
+          | selectattr('stat.exists') | map(attribute='item.path')
+          | reject('in', coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
+          | selectattr('state', 'defined') | selectattr('state', 'equalto', 'removed')
+          | map(attribute='item.path') | list)
+          | list | to_json }};
+          reinspect both paths and reconcile by hand before re-running.
+
+# A unit could start between the pre-removal listing and the unlink and read a
+# copy first. Re-list and refuse loudly if so; the role stops nothing and does
+# not restore the copy.
+- name: Re-list live worker and custody units after removal
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, list-units, --all, --plain, --no-legend, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
+  register: coding_hosted_postgres_environment_cleanup_units_after_removal
+  changed_when: false
+  check_mode: false
+
+- name: Refuse if any unit became active during removal
+  ansible.builtin.assert:
+    that:
+      - >-
+        coding_hosted_postgres_environment_cleanup_units_after_removal.stdout_lines
+        | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
+        | list | length == 0
+    fail_msg: >-
+      A worker or custody unit became active during removal; it may have read a copy
+      mid-removal. Stop every unit, reconcile by hand and re-run.
+      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
+    quiet: true
+
+- name: Reinspect both exact paths without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - /var/lib/ditto-coding-custody/private/postgres-environment.json
+    - /var/lib/ditto-coding-hosted/private/postgres-environment.json
+  register: coding_hosted_postgres_environment_cleanup_after
+  when: not ansible_check_mode
+
+- name: Require both exact copies to be absent
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists
+    fail_msg: >-
+      A PostgreSQL environment copy is still present after removal.
+      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
+    quiet: true
+  loop: "{{ coding_hosted_postgres_environment_cleanup_after.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not ansible_check_mode
+
+- name: Report only the source revision and exact paths removed or already absent
+  ansible.builtin.debug:
+    msg: >-
+      Native Coding PostgreSQL environment cleanup;
+      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }};
+      {{ 'would_remove' if ansible_check_mode else 'removed' }}={{
+      coding_hosted_postgres_environment_cleanup_copies.results
+      | selectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+      already_absent={{
+      coding_hosted_postgres_environment_cleanup_copies.results
+      | rejectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+      directories_kept=true; services_stopped=false; password_read=false.
