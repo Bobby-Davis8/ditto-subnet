@@ -125,6 +125,81 @@ async def submit_coding_certification(
     return outcome
 
 
+def _receipt_agent(
+    agent: Agent | None, payload: SubmitCodingCertificationRequest
+) -> Agent:
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    if payload.receipt.agent_artifact_sha256 != agent.sha256:
+        raise HTTPException(
+            status_code=409,
+            detail="coding receipt artifact does not match the agent",
+        )
+    if (
+        agent.screened_image_sha256 is None
+        or payload.screened_image_sha256 != agent.screened_image_sha256
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="coding receipt screened image is absent or stale",
+        )
+    return agent
+
+
+async def _receipt_replay(
+    session: AsyncSession,
+    *,
+    agent: Agent,
+    payload: SubmitCodingCertificationRequest,
+) -> SubmitCodingCertificationResponse | None:
+    """The stored answer for an exact replay of an accepted receipt, if any."""
+
+    receipt = payload.receipt
+    existing = await get_coding_certification_identity(
+        session,
+        agent_id=agent.agent_id,
+        validator_hotkey=payload.validator_hotkey,
+        coding_contract_version=receipt.coding_contract_version,
+        certification_id=receipt.certification_id,
+    )
+    if existing is None:
+        return None
+    if not coding_certification_matches(
+        existing,
+        artifact_sha256=agent.sha256,
+        screened_image_sha256=payload.screened_image_sha256,
+        bench_version=payload.bench_version,
+        lease_id=payload.lease_id,
+        ticket_deadline=_aware(existing.ticket_deadline),
+        receipt=receipt,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="coding certification identity names different evidence",
+        )
+    if (
+        receipt.status is CodingCertificationStatus.CERTIFIED
+        and not coding_certification_settlement_bound(existing)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="certified receipt lacks durable settlement binding",
+        )
+    now = await database_now(session)
+    return SubmitCodingCertificationResponse(
+        agent_id=agent.agent_id,
+        certification_id=receipt.certification_id,
+        status=receipt.status,
+        accepted=True,
+        idempotent=True,
+        active=(
+            receipt.status is CodingCertificationStatus.CERTIFIED
+            and coding_certification_settlement_bound(existing)
+            and _aware(existing.expires_at) > now
+        ),
+    )
+
+
 async def _submit_coding_certification(
     *,
     agent_id: UUID,
@@ -135,73 +210,40 @@ async def _submit_coding_certification(
 ) -> SubmitCodingCertificationResponse | Literal["late"]:
     """Accept one receipt, or expire its late lease and commit that expiry.
 
-    Every deadline decision uses the database clock read after the agent and
-    lease row locks. The shared allowlist lock is taken first, before any row
-    lock, matching the allowlist write's lock order.
+    Lock order is allowlist, agent, lease, grant. The shared allowlist lock is
+    taken first and a new receipt's tuple is decided before the agent row is
+    locked, so a refused caller never waits on or holds that row. An exact
+    replay of an accepted receipt stays idempotent and is answered before the
+    allowlist decision, because it writes nothing. Every deadline decision uses
+    the database clock read after the lease row lock.
     """
 
     receipt = payload.receipt
     async with session.begin():
-        await active_coding_certification_allowlist(session)
-        agent = await session.get(Agent, agent_id, with_for_update=True)
-        if agent is None:
-            raise HTTPException(status_code=404, detail="agent not found")
-        if receipt.agent_artifact_sha256 != agent.sha256:
-            raise HTTPException(
-                status_code=409,
-                detail="coding receipt artifact does not match the agent",
-            )
-        if (
-            agent.screened_image_sha256 is None
-            or payload.screened_image_sha256 != agent.screened_image_sha256
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="coding receipt screened image is absent or stale",
-            )
-
-        now = await database_now(session)
-        existing = await get_coding_certification_identity(
-            session,
+        allowlist = await active_coding_certification_allowlist(session)
+        agent = _receipt_agent(await session.get(Agent, agent_id), payload)
+        replay = await _receipt_replay(session, agent=agent, payload=payload)
+        if replay is not None:
+            return replay
+        if not allowlist.admits(
             agent_id=agent_id,
+            artifact_sha256=agent.sha256,
             validator_hotkey=payload.validator_hotkey,
-            coding_contract_version=receipt.coding_contract_version,
-            certification_id=receipt.certification_id,
-        )
-        if existing is not None:
-            if not coding_certification_matches(
-                existing,
-                artifact_sha256=agent.sha256,
-                screened_image_sha256=payload.screened_image_sha256,
-                bench_version=payload.bench_version,
-                lease_id=payload.lease_id,
-                ticket_deadline=_aware(existing.ticket_deadline),
-                receipt=receipt,
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="coding certification identity names different evidence",
-                )
-            if (
-                receipt.status is CodingCertificationStatus.CERTIFIED
-                and not coding_certification_settlement_bound(existing)
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="certified receipt lacks durable settlement binding",
-                )
-            return SubmitCodingCertificationResponse(
-                agent_id=agent_id,
-                certification_id=receipt.certification_id,
-                status=receipt.status,
-                accepted=True,
-                idempotent=True,
-                active=(
-                    receipt.status is CodingCertificationStatus.CERTIFIED
-                    and coding_certification_settlement_bound(existing)
-                    and _aware(existing.expires_at) > now
-                ),
+        ):
+            # Nothing was written; no receipt row exists for a refused tuple.
+            raise HTTPException(
+                status_code=403, detail=CODING_CERTIFICATION_NOT_ALLOWLISTED
             )
+        agent = _receipt_agent(
+            await session.get(
+                Agent, agent_id, with_for_update=True, populate_existing=True
+            ),
+            payload,
+        )
+        # An identical submission may have committed while this one waited.
+        replay = await _receipt_replay(session, agent=agent, payload=payload)
+        if replay is not None:
+            return replay
 
         by_lease = await get_coding_certification_by_lease(
             session, lease_id=payload.lease_id
@@ -220,7 +262,6 @@ async def _submit_coding_certification(
         except CodingCertificationLeaseNotAvailableError:
             raise HTTPException(status_code=404, detail=_LEASE_UNAVAILABLE) from None
         except CodingCertificationAllowlistRefusedError:
-            # Nothing was written; no receipt row exists for a refused tuple.
             raise HTTPException(
                 status_code=403, detail=CODING_CERTIFICATION_NOT_ALLOWLISTED
             ) from None

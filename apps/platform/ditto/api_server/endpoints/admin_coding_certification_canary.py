@@ -45,6 +45,7 @@ from ditto.db.queries.coding_certification_leases import (
     abort_unlisted_coding_certification_leases,
     list_coding_certification_leases,
     receipt_window_ends_at,
+    restamp_admitted_coding_certification_leases,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -135,6 +136,9 @@ async def set_coding_certification_allowlist(
             )
             allowlist = await active_coding_certification_allowlist(session)
             aborted = await abort_unlisted_coding_certification_leases(
+                session, allowlist=allowlist
+            )
+            await restamp_admitted_coding_certification_leases(
                 session, allowlist=allowlist
             )
             revoked = await revoke_unlisted_coding_certification_inference_grants(

@@ -73,6 +73,7 @@ from ditto.db.queries.coding_certification_leases import (
     abort_coding_certification_lease,
     authorize_coding_certification_harness_delivery,
     claim_coding_certification_lease,
+    database_now,
     issue_coding_certification_lease,
 )
 from ditto.db.queries.coding_inference_grants import (
@@ -310,6 +311,7 @@ async def request_coding_certification_harness_launch(
         network=request.app.state.config.chain.subtensor_network,
     )
     authority = None
+    issued_at: datetime | None = None
     async with session.begin():
         try:
             await consume_validator_nonce(
@@ -341,13 +343,15 @@ async def request_coding_certification_harness_launch(
                 detail="coding certification harness is unavailable",
                 headers=_NO_STORE,
             ) from None
-    if authority is None:  # pragma: no cover - exhaustive transaction outcome
+        # The URL lifetime is bounded by the lease deadline on the same clock
+        # that authorized it, read while the lease row is still locked.
+        issued_at = await database_now(session)
+    if authority is None or issued_at is None:  # pragma: no cover
         raise HTTPException(
             status_code=404,
             detail="coding certification harness is unavailable",
             headers=_NO_STORE,
         )
-    issued_at = datetime.now(UTC)
     ttl_seconds = min(
         int(_ARTIFACT_URL_TTL.total_seconds()),
         int((authority.deadline - issued_at).total_seconds()),
@@ -383,13 +387,14 @@ async def request_coding_certification_harness_launch(
                 ),
                 headers=_NO_STORE,
             ) from None
+        refreshed_at = await database_now(session)
     if refreshed != authority:
         raise HTTPException(
             status_code=409,
             detail="coding certification harness authority changed after URL minting",
             headers=_NO_STORE,
         )
-    if datetime.now(UTC) >= expires_at:
+    if refreshed_at >= expires_at:
         raise HTTPException(
             status_code=409,
             detail="coding certification harness URL expired",

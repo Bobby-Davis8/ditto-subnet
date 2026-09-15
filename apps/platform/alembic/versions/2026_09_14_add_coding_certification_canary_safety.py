@@ -183,21 +183,7 @@ def upgrade() -> None:
     )
 
     op.create_check_constraint(_STATUS, _TABLE, _STRICT_STATUS)
-    # Only a downgrade of this revision can leave an aborted claimed lease
-    # without the allowlist revision that aborted it (the column was dropped).
-    # That audit history is not rewritten; the CHECK then binds new writes only.
-    orphaned_abort = op.get_bind().scalar(
-        sa.text(
-            "SELECT EXISTS (SELECT 1 FROM coding_certification_leases "
-            "WHERE status = 'aborted' AND claimed_at IS NOT NULL)"
-        )
-    )
-    op.create_check_constraint(
-        _LIFECYCLE,
-        _TABLE,
-        _RECOVERABLE_LIFECYCLE,
-        postgresql_not_valid=bool(orphaned_abort),
-    )
+    op.create_check_constraint(_LIFECYCLE, _TABLE, _RECOVERABLE_LIFECYCLE)
     op.create_check_constraint(
         _CLAIM_ALLOWLIST,
         _TABLE,
@@ -207,6 +193,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Restore the prior schema. This is not a safe rollback for a live canary.
+
+    The prior code has no allowlist, so a downgrade reopens certification lease
+    issue to every qualified agent and validator, and it drops the allowlist
+    revision history and each lease's admitting and aborting revision.
+    """
+
     op.drop_constraint(_CLAIM_ALLOWLIST, _TABLE, type_="check")
     op.drop_constraint(_LIFECYCLE, _TABLE, type_="check")
     op.drop_constraint(_STATUS, _TABLE, type_="check")
@@ -214,6 +207,15 @@ def downgrade() -> None:
     op.execute(
         "UPDATE coding_certification_leases SET status = 'claimed' "
         "WHERE status = 'completed'"
+    )
+    # The prior schema cannot represent a claimed lease aborted by an allowlist
+    # revision. Map it to the one terminal no-receipt state a claimed lease can
+    # re-enter this revision with (``expired``, keeping ``claimed_at``), so a
+    # later upgrade validates its lifecycle CHECK over every row.
+    op.execute(
+        "UPDATE coding_certification_leases "
+        "SET status = 'expired', aborted_at = NULL "
+        "WHERE status = 'aborted' AND claimed_at IS NOT NULL"
     )
     op.drop_constraint(_ABORTED_ALLOWLIST_FK, _TABLE, type_="foreignkey")
     op.drop_constraint(_CLAIM_ALLOWLIST_FK, _TABLE, type_="foreignkey")

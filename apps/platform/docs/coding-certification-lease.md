@@ -99,15 +99,21 @@ crash, Platform `503`, host mismatch) therefore costs at most one deadline plus
 the receipt window instead of the identity.
 
 A receipt that arrives after the receipt window is refused with `404` and no
-receipt row, and the expiry commits. An exact replay of an accepted receipt
-stays idempotent at any time.
+receipt row, and the expiry commits.
+
+An exact replay of an accepted receipt stays idempotent at any time, and it is
+the one exception to the allowlist: it is answered from the stored row before
+the allowlist is consulted, so a replay still returns `200` with
+`idempotent=true` after the tuple was removed or the allowlist refuses
+everything. It writes nothing and cannot create or change a certification. Any
+receipt that is not an exact replay is refused with `403` under that allowlist.
 
 Because expiry releases the identity, re-runs are bounded: at most 3 claims
 per identity in any rolling 24 hours, counted from `claimed_at`. Only claims
 an allowlist revision admitted count (`claim_allowlist_revision` is set at
-claim time), so claims made before the strict allowlist, or by a validator the
-allowlist never named, cannot exhaust the canary's budget. An unclaimed lease
-does not count.
+claim time and is never cleared), so claims made before the strict allowlist,
+or by a validator the allowlist never named, cannot exhaust the canary's
+budget. An unclaimed lease does not count.
 
 The validator-signed abort was deliberately not extended to claimed leases.
 Doing so would let the claiming validator discard an attempt it has already
@@ -137,22 +143,42 @@ validator_hotkey)` tuples, there are no wildcards, and there is no admin
 certification bypass.
 
 The check runs in the one lease authority gate shared by claim, harness launch,
-grant offer, grant exchange, and receipt submission, and on lease issue before
-any row is written. A refused grant offer or exchange also terminally revokes
-the lease's live grant. A settlement-bound `certified` receipt is never inserted
-for a tuple the current allowlist refuses.
+grant offer, grant exchange, and receipt submission, and on lease issue and new
+receipts before the agent row is locked. A refused grant offer or exchange also
+terminally revokes the lease's live grant. A settlement-bound `certified`
+receipt is never inserted for a tuple the current allowlist refuses.
 
 Writing a revision, in the same transaction, aborts every `issued` or `claimed`
 lease the new revision does not admit (status `aborted`, `aborted_at` set,
-`claimed_at` kept, `aborted_allowlist_revision` naming the revision) and
-terminally revokes every live certification grant it does not admit. The tuple
-filter runs in SQL, so only refused rows are locked. A `completed`, `expired`, or
-already `aborted` lease is never rewritten.
+`claimed_at` kept, `aborted_allowlist_revision` naming the revision), re-stamps
+every `claimed` lease it still admits with the new revision in
+`claim_allowlist_revision`, and terminally revokes every live certification
+grant it does not admit. The tuple filters run in SQL, so the only lease or
+grant rows locked are the refused ones and the admitted claimed leases being
+re-stamped. A `completed`, `expired`, or already `aborted` lease is never
+rewritten.
 
-Every authorizing transaction takes the shared transaction advisory lock before
-it locks any lease, agent, or grant row, and a write takes it exclusively before
-it locks leases and grants, so no lease, grant, or receipt commits against a
-stale revision and the two orders cannot deadlock.
+The model relay enforces the same authority on every paid canary dispatch. It
+admits a request only while the grant's lease is `claimed`, before its
+deadline on the database clock, and stamped with the latest allowlist revision
+(`claim_allowlist_revision` equals the newest revision number); otherwise it
+terminally revokes the grant and returns `409` without calling the provider.
+Claims stamp the revision that admitted them and allowlist writes re-stamp
+admitted claimed leases, so no revision, a refuse-all revision, a revision
+appended outside the admin write, and grants that were live before this
+migration all stop at the relay, not at the grant's `expires_at`. The relay
+compares revision numbers and does not re-verify a revision's checksum. The
+residual is a latest revision that Platform wrote intact but later reads as
+invalid (for example after a checksum-rule change): Platform then refuses every
+call, but the relay keeps serving already-exchanged grants until their
+`expires_at`, at most the 20-minute lease deadline.
+
+Lock order is allowlist, agent, lease, grant. Every authorizing transaction
+takes the shared transaction advisory lock before it locks any agent, lease, or
+grant row, and a write takes it exclusively before it locks leases and grants,
+so no lease, grant, or receipt commits against a stale revision and the two
+orders cannot deadlock. The relay reads the lease without locking it, because
+it already holds the grant row lock.
 
 Admin API (`DITTO_ADMIN_API_TOKEN`):
 
@@ -198,6 +224,13 @@ accepted), `claimed → expired` (after the receipt window, keeping
 `claimed_at`), and `claimed → aborted` (only by an allowlist revision, keeping
 `claimed_at`). The migration backfills claimed leases that already carry a
 receipt to `completed`. Coding contract v1 stays `weight_eligible=false`.
+
+Downgrading this migration is not a safe rollback for a live canary. The prior
+code has no allowlist, so a downgrade reopens lease issue to every qualified
+agent and validator. It drops the allowlist revision history and each lease's
+admitting and aborting revision, maps `completed` leases back to `claimed`, and
+maps allowlist-aborted claimed leases to `expired` (clearing `aborted_at`). A
+later upgrade backfills `completed` again and validates every lease CHECK.
 
 ## Activation boundary
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, not_, select, tuple_
+from sqlalchemy import ColumnElement, func, not_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ditto.api_models.coding_certification_leases import (
@@ -322,6 +322,56 @@ def complete_coding_certification_lease(lease: CodingCertificationLease) -> None
     lease.status = CodingCertificationLeaseStatus.COMPLETED.value
 
 
+def _admitted_tuple_filter(
+    allowlist: CodingCertificationAllowlist,
+) -> ColumnElement[bool]:
+    return tuple_(
+        CodingCertificationLease.agent_id,
+        CodingCertificationLease.artifact_sha256,
+        CodingCertificationLease.validator_hotkey,
+    ).in_(
+        [
+            (UUID(agent_id), artifact_sha256, validator_hotkey)
+            for agent_id, artifact_sha256, validator_hotkey in sorted(allowlist.tuples)
+        ]
+    )
+
+
+async def restamp_admitted_coding_certification_leases(
+    session: AsyncSession,
+    *,
+    allowlist: CodingCertificationAllowlist,
+) -> int:
+    """Stamp every claimed lease the new revision still admits with that revision.
+
+    The model relay admits paid canary inference only while a claimed lease's
+    ``claim_allowlist_revision`` equals the latest allowlist revision. Claims
+    stamp the revision that admitted them, and each allowlist write re-stamps
+    the claimed leases it still admits, so any other latest revision (none, a
+    refuse-all, or a row appended outside this write) refuses at the relay.
+    """
+
+    if allowlist.revision < 1 or not allowlist.tuples:
+        return 0
+    rows = (
+        await session.scalars(
+            select(CodingCertificationLease)
+            .where(
+                CodingCertificationLease.status
+                == CodingCertificationLeaseStatus.CLAIMED.value,
+                _admitted_tuple_filter(allowlist),
+            )
+            .order_by(CodingCertificationLease.lease_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    for row in rows:
+        row.claim_allowlist_revision = allowlist.revision
+    await session.flush()
+    return len(rows)
+
+
 async def abort_unlisted_coding_certification_leases(
     session: AsyncSession,
     *,
@@ -341,22 +391,7 @@ async def abort_unlisted_coding_certification_leases(
         CodingCertificationLease.status.in_(_INFLIGHT)
     )
     if allowlist.tuples:
-        statement = statement.where(
-            not_(
-                tuple_(
-                    CodingCertificationLease.agent_id,
-                    CodingCertificationLease.artifact_sha256,
-                    CodingCertificationLease.validator_hotkey,
-                ).in_(
-                    [
-                        (UUID(agent_id), artifact_sha256, validator_hotkey)
-                        for agent_id, artifact_sha256, validator_hotkey in sorted(
-                            allowlist.tuples
-                        )
-                    ]
-                )
-            )
-        )
+        statement = statement.where(not_(_admitted_tuple_filter(allowlist)))
     rows = (
         await session.scalars(
             statement.order_by(CodingCertificationLease.lease_id)
@@ -398,8 +433,29 @@ async def issue_coding_certification_lease(
             "coding certification lease contract is not available"
         )
     allowlist = await active_coding_certification_allowlist(session)
-    agent = await session.get(Agent, agent_id, with_for_update=True)
-    if agent is None or not _screened_image_is_complete(agent):
+    # Decide the allowlist before any row lock (lock order: allowlist, agent,
+    # lease, grant), so a refused caller never waits on or holds the agent row.
+    artifact_sha256 = await session.scalar(
+        select(Agent.sha256).where(Agent.agent_id == agent_id)
+    )
+    if artifact_sha256 is None:
+        raise CodingCertificationLeaseNotAvailableError(
+            "coding certification lease is not available"
+        )
+    if not allowlist.admits(
+        agent_id=agent_id,
+        artifact_sha256=artifact_sha256,
+        validator_hotkey=validator_hotkey,
+    ):
+        raise CodingCertificationAllowlistRefusedError()
+    agent = await session.get(
+        Agent, agent_id, with_for_update=True, populate_existing=True
+    )
+    if (
+        agent is None
+        or agent.sha256 != artifact_sha256
+        or not _screened_image_is_complete(agent)
+    ):
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease is not available"
         )
@@ -407,12 +463,6 @@ async def issue_coding_certification_lease(
     assert agent.screened_image_id is not None
     assert agent.screened_image_ref is not None
     assert agent.screened_image_upload_id is not None
-    if not allowlist.admits(
-        agent_id=agent.agent_id,
-        artifact_sha256=agent.sha256,
-        validator_hotkey=validator_hotkey,
-    ):
-        raise CodingCertificationAllowlistRefusedError()
     # Contract v1: an accepted receipt (certified, failed, or unsupported) is the
     # terminal certification result for this exact identity, whichever
     # validator produced it. Only a run that ended without a receipt may rerun.
