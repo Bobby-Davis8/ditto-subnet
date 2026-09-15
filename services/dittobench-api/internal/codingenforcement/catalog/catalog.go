@@ -92,7 +92,11 @@ var VersionedResourceContainers = map[string]ResourceContainer{
 	"executor_grading":   {Profile: "grading_profile_sha256", Scratch: "executor", NofileLimit: 1024, LogLimitBytes: 24576},
 }
 
-var bindFields = map[string]string{ExpectProfileEqual: "profile", ExpectBounded: "limit", ExpectSupervisorTimeout: "deadline_ms"}
+var bindFields = map[string]string{ExpectProfileEqual: "profile", ExpectBounded: "limit", ExpectSupervisorTimeout: "deadline_ms", ExpectZeroRetained: "limit"}
+
+// ZeroRetainedProbe is the one probe whose policy retains no candidate
+// output: hosted grading keeps 0 bytes, so no per-mille floor applies.
+const ZeroRetainedProbe = "executor_grading.log_bound"
 
 // Probe scopes: once per record, once per approved language image, or once
 // per trusted endpoint listed in the record.
@@ -326,10 +330,15 @@ func (c *Catalog) validate() error {
 		}
 	}
 	timeouts := map[string]bool{}
+	zeroRetained := false
 	for _, probe := range c.Kinds["resource_enforcement"].Probes {
 		if probe.Expect.Type == ExpectSupervisorTimeout {
 			timeouts[probe.Bind["deadline_ms"]] = true
 		}
+		zeroRetained = zeroRetained || (probe.ID == ZeroRetainedProbe && probe.Expect.Type == ExpectZeroRetained)
+	}
+	if !zeroRetained {
+		return errors.New("grading output retention is not an exact zero-byte assertion")
 	}
 	for source := range CommandTimeoutSources {
 		if !timeouts[source] {
@@ -409,6 +418,10 @@ func (probe Probe) validateBind(kindName string) error {
 	if probe.Bind == nil {
 		return errors.New("bind is malformed")
 	}
+	zeroRetained := probe.Expect.Type == ExpectZeroRetained
+	if zeroRetained != (probe.ID == ZeroRetainedProbe) || (zeroRetained && kindName != "resource_enforcement") {
+		return errors.New("zero-byte retention fits only grading output")
+	}
 	field, bindable := bindFields[probe.Expect.Type]
 	if kindName != "resource_enforcement" || !bindable {
 		if len(probe.Bind) != 0 {
@@ -434,6 +447,9 @@ func (probe Probe) validateBind(kindName string) error {
 	}
 	if timeout && probe.ID != container+".supervisor_timeout."+group {
 		return errors.New("names another test group")
+	}
+	if probe.Expect.Type == ExpectZeroRetained && source != "log_limit_bytes" {
+		return errors.New("zero-byte retention must bind the output limit")
 	}
 	return nil
 }

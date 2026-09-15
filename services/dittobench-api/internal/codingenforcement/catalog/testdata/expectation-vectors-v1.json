@@ -1104,6 +1104,138 @@
         "measured": 499
       },
       "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero retained after emitting the cap",
+      "observed": {
+        "emitted_bytes": 24576,
+        "limit": 24576,
+        "retained_bytes": 0
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero retained after emitting past the cap",
+      "observed": {
+        "emitted_bytes": 98304,
+        "limit": 24576,
+        "retained_bytes": 0
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "one retained byte is not zero",
+      "observed": {
+        "emitted_bytes": 24576,
+        "limit": 24576,
+        "retained_bytes": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "retained at the old floor is not zero",
+      "observed": {
+        "emitted_bytes": 24576,
+        "limit": 24576,
+        "retained_bytes": 12288
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "idle writer retaining nothing proves nothing",
+      "observed": {
+        "emitted_bytes": 0,
+        "limit": 24576,
+        "retained_bytes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "writer short of the cap proves nothing",
+      "observed": {
+        "emitted_bytes": 24575,
+        "limit": 24576,
+        "retained_bytes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero limit",
+      "observed": {
+        "emitted_bytes": 24576,
+        "limit": 0,
+        "retained_bytes": 0
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero retained as false",
+      "observed": {
+        "emitted_bytes": 24576,
+        "limit": 24576,
+        "retained_bytes": false
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero retained missing emitted",
+      "observed": {
+        "limit": 24576,
+        "retained_bytes": 0
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero retained extra key",
+      "observed": {
+        "emitted_bytes": 24576,
+        "enforced": true,
+        "limit": 24576,
+        "retained_bytes": 0
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "type": "zero_retained"
+      },
+      "name": "zero retained negative",
+      "observed": {
+        "emitted_bytes": 24576,
+        "limit": 24576,
+        "retained_bytes": -1
+      },
+      "result": "invalid"
     }
   ]
 }

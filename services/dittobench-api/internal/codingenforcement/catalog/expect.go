@@ -21,6 +21,11 @@ const (
 	ExpectSupervisorTimeout = "supervisor_timeout"
 	ExpectControl           = "control"
 	ExpectSubordinateIDs    = "subordinate_ids"
+	// ExpectZeroRetained is an exact assertion that a container policy keeps
+	// zero bytes of candidate output (Peyton, 2026-09-15: hosted grading). The
+	// candidate must have emitted at least the bound limit, so an idle or
+	// crashed writer, which also retains nothing, never counts.
+	ExpectZeroRetained = "zero_retained"
 )
 
 var expectKeys = map[string][]string{
@@ -31,6 +36,7 @@ var expectKeys = map[string][]string{
 	ExpectSupervisorTimeout: {"tolerance", "type"},
 	ExpectControl:           {"result", "type"},
 	ExpectSubordinateIDs:    {"gid", "type", "uid"},
+	ExpectZeroRetained:      {"type"},
 }
 
 // Observed strings are short lowercase names; no address can be recorded.
@@ -196,7 +202,7 @@ func (e Expectation) validate(outcomes map[string]bool) error {
 		if e.UID < 1 || e.UID >= SubordinateMinCount || e.GID < 1 || e.GID >= SubordinateMinCount {
 			return errors.New("candidate ids are malformed")
 		}
-	case ExpectProfileEqual:
+	case ExpectProfileEqual, ExpectZeroRetained:
 	default:
 		return errors.New("expect type is unknown")
 	}
@@ -338,6 +344,17 @@ func Evaluate(expect Expectation, observed any, subordinate SubordinateIDs, outc
 			return false, err
 		}
 		return values[1] >= 1 && values[0] == values[1], nil
+	case ExpectZeroRetained:
+		object, err := observedObject(observed, "emitted_bytes", "limit", "retained_bytes")
+		if err != nil {
+			return false, err
+		}
+		values, err := integers(object, "emitted_bytes", "limit", "retained_bytes")
+		if err != nil {
+			return false, err
+		}
+		emitted, limit, retained := values[0], values[1], values[2]
+		return limit >= 1 && emitted >= limit && retained == 0, nil
 	case ExpectBounded:
 		object, err := observedObject(observed, "enforced", "limit", "measured")
 		if err != nil {

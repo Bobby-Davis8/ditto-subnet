@@ -245,6 +245,37 @@ func TestCatalogRefusals(t *testing.T) {
 		"container limit drift": func(v map[string]any) {
 			v["resource_containers"].(map[string]any)["harness"].(map[string]any)["nofile_limit"] = 4096
 		},
+		"grading log back on a per-mille floor": func(v map[string]any) {
+			withProbe(kind(v, "resource_enforcement"), "executor_grading.log_bound", func(probe map[string]any) {
+				probe["expect"] = map[string]any{"type": "bounded", "floor": "log_min_permille_of_limit", "tolerance": "log_max_permille_of_limit"}
+			})
+		},
+		"grading log as a loose exact zero": func(v map[string]any) {
+			withProbe(kind(v, "resource_enforcement"), "executor_grading.log_bound", func(probe map[string]any) {
+				probe["expect"] = map[string]any{"type": "exact", "value": map[string]any{"retained_bytes": 0}}
+				probe["bind"] = map[string]any{}
+			})
+		},
+		"zero retention on the harness log": func(v map[string]any) {
+			withProbe(kind(v, "resource_enforcement"), "harness.log_bound", func(probe map[string]any) {
+				probe["expect"] = map[string]any{"type": "zero_retained"}
+			})
+		},
+		"zero retention unbound": func(v map[string]any) {
+			withProbe(kind(v, "resource_enforcement"), "executor_grading.log_bound", func(probe map[string]any) {
+				probe["bind"] = map[string]any{}
+			})
+		},
+		"zero retention bound to another limit": func(v map[string]any) {
+			withProbe(kind(v, "resource_enforcement"), "executor_grading.log_bound", func(probe map[string]any) {
+				probe["bind"] = map[string]any{"limit": "pids_limit"}
+			})
+		},
+		"zero retention with a floor key": func(v map[string]any) {
+			withProbe(kind(v, "resource_enforcement"), "executor_grading.log_bound", func(probe map[string]any) {
+				probe["expect"].(map[string]any)["floor"] = "log_min_permille_of_limit"
+			})
+		},
 		"repeated phase": func(v map[string]any) {
 			cleanup := kind(v, "cleanup_recovery")
 			phases := cleanup["phases"].([]any)
@@ -263,4 +294,13 @@ func manyHashes(count int) []string {
 		result[index] = fmt.Sprintf("%064x", index+1)
 	}
 	return result
+}
+
+// withProbe edits one probe of a decoded kind by id.
+func withProbe(kind map[string]any, id string, edit func(map[string]any)) {
+	for _, item := range kind["probes"].([]any) {
+		if probe := item.(map[string]any); probe["id"] == id {
+			edit(probe)
+		}
+	}
 }

@@ -1276,9 +1276,7 @@
             "limit": "log_limit_bytes"
           },
           "expect": {
-            "floor": "log_min_permille_of_limit",
-            "tolerance": "log_max_permille_of_limit",
-            "type": "bounded"
+            "type": "zero_retained"
           },
           "id": "executor_grading.log_bound",
           "phase": "measured",
