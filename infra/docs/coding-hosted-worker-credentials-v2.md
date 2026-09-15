@@ -180,7 +180,9 @@ adding an operation never edits the script or a shared registry. It:
   `ANSIBLE_*` and `_ANSIBLE_*` variable (including `ANSIBLE_CONFIG`,
   `ANSIBLE_KEEP_REMOTE_FILES`, `ANSIBLE_DEBUG`, `ANSIBLE_VERBOSITY`,
   `ANSIBLE_LOG_PATH`, callback, strategy, plugin and library paths and
-  `ANSIBLE_REMOTE_TEMP`), `LD_*`, `DYLD_*`, every `PYTHON*` variable except
+  `ANSIBLE_REMOTE_TEMP`), `LD_*`, `DYLD_*`, `OPENSSL_*`, `GCONV_*`, `GLIBC_*`, `UV_PYTHON*`,
+  `CLOUDSDK_PYTHON*`, `SSL_CERT_FILE`/`SSL_CERT_DIR`, `UV_NO_VERIFY_HASHES`,
+  `UV_INSECURE_HOST`, `UV_CONFIG_FILE`, every `PYTHON*` variable except
   `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `PYTHONIOENCODING`,
   `PYTHONUTF8` and `PYTHONHASHSEED`, a preset marker, an empty or relative
   `PATH` entry, a relative `HOME`, a malformed `GCP_OSLOGIN_USER`, template
@@ -209,7 +211,9 @@ adding an operation never edits the script or a shared registry. It:
   directory is dropped from `sys.path` before any other import.
 - **Builds Ansible's environment from an allowlist** (`HOME`, `USER`, `LOGNAME`,
   `PATH`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `NO_COLOR`, `SSH_AUTH_SOCK`,
-  `GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_*`, `GCP_*` and the operation's
+  `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_OSLOGIN_USER`, `CLOUDSDK_CONFIG`,
+  `CLOUDSDK_ACTIVE_CONFIG_NAME`, `CLOUDSDK_CORE_ACCOUNT`, `CLOUDSDK_CORE_PROJECT`
+  and the operation's
   validated inputs) plus fixed settings: `ANSIBLE_CONFIG` and
   `ANSIBLE_ROLES_PATH` in the verified tree, `ANSIBLE_KEEP_REMOTE_FILES=False`,
   `ANSIBLE_DEBUG=False`, `ANSIBLE_VERBOSITY=0`,
@@ -217,6 +221,20 @@ adding an operation never edits the script or a shared registry. It:
   module_utils path pointed at a directory that cannot exist in a verified tree,
   so nothing in `~/.ansible/plugins` shadows a builtin. Pipelining stays with the
   playbook and `ansible.cfg`, as the role's guard expects.
+- **Fails a run that reaches no host.** `uv run --locked --script` also
+  installs the pinned `google-auth` and `requests` the `google.cloud.gcp_compute`
+  inventory plugin needs, and the script refuses unless both import. Ansible
+  gets `ANSIBLE_INVENTORY_UNPARSED_FAILED`, `ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED`
+  and `ANSIBLE_HOST_PATTERN_MISMATCH=error`, so an inventory that does not parse
+  or a `--limit` that matches no host fails the run instead of skipping every
+  play and exiting 0. Each run uses a fresh `ANSIBLE_SSH_CONTROL_PATH_DIR`, so no
+  ssh master connection from an earlier session is reused.
+- **Refuses hidden paths.** Any untracked directory (even empty, such as a
+  `playbooks/roles` that would shadow a reviewed role) and any directory it
+  cannot list (an execute-only directory hides files from a walk but not from
+  Ansible) is refused. The code-loading variables above are refused right after
+  `sys` and `os` load, before `hashlib` or any other import can read them.
+  Printed names and paths are escaped, so they cannot carry terminal escapes.
 - **Sets the marker** `DITTO_CODING_HOSTED_GUARDED_RUN=<operation>`, which each
   role requires as the second task of its dynamic include.
 
@@ -228,7 +246,8 @@ Residual trust, documented rather than closed: the operator's `PATH` (which
 resolves `git`, `ssh` and the IAP ProxyCommand's `gcloud`), `~/.ssh/config`, and
 the collections in `~/.ansible/collections` (the `google.cloud` inventory plugin
 and the `ansible.posix` callbacks the repo `ansible.cfg` enables) run with the
-credentials in the controller environment, so install collections only from
+credentials in the controller environment (Ansible passes its whole
+environment to ssh, so the IAP ProxyCommand's `gcloud` inherits it too), so install collections only from
 `infra/ansible/requirements.yml`. The script verifies the checkout it runs from,
 including itself, so a modified script can skip its own checks: run it
 unmodified from a fresh checkout. Code injected into the interpreter (for
