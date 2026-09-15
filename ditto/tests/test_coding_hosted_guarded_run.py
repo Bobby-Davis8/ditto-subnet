@@ -255,22 +255,42 @@ def test_guard_is_a_locked_uv_script_pinning_ansible_core() -> None:
     assert hashlib.sha256(GUARD.read_bytes()).hexdigest() == GUARD_SHA256
 
 
-def test_script_directory_is_dropped_from_sys_path_before_other_imports() -> None:
+def test_script_directory_is_dropped_from_sys_path_before_other_imports(
+    tmp_path: Path,
+) -> None:
     # An untracked json.py or ansible/ beside the script would otherwise shadow
-    # the standard library or ansible before the checkout is verified.
+    # the standard library or ansible before the checkout is verified, even
+    # when the checkout is reached through a symlinked directory.
     lines = [
         line
         for line in GUARD.read_text().split('"""', 2)[2].splitlines()
-        if line.startswith(("import ", "from ", "sys.path"))
+        if line.startswith(("import ", "from ", "sys.path", "if __name__"))
     ]
-    assert lines[:2] == [
+    assert lines[:3] == [
         "import sys",
-        'sys.path[:] = [entry for entry in sys.path if entry not in ("", _SCRIPT_DIRECTORY)]',  # noqa: E501
+        'if __name__ == "__main__" and not sys.flags.safe_path and sys.path:',
+        'sys.path[:] = [entry for entry in sys.path if entry not in ("", ".")]',
     ]
-    assert '_SCRIPT_DIRECTORY = __file__.rpartition("/")[0]' in GUARD.read_text()
+    real = tmp_path / "real/infra/scripts"
+    real.mkdir(parents=True)
+    head = GUARD.read_text().split("import hashlib", 1)[0]
+    (real / "probe.py").write_text(head + "import json\nprint(json.__file__)\n")
+    (real / "json.py").write_text("raise SystemExit('shadowed')\n")
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    for script in (real / "probe.py", tmp_path / "link/infra/scripts/probe.py"):
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"PATH": os.environ["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "shadowed" not in completed.stdout + completed.stderr
+        assert str(real) not in completed.stdout
 
 
-GUARD_SHA256 = "55cbf5154679319be9b9048e6b45a770e697e8246c6d298449c613b79f30aba9"
+GUARD_SHA256 = "647623db1f3229669d38ef88024e66081006e0bfe34ad59d3596573169902b10"
 
 
 # ---------------------------------------------------------------------------
