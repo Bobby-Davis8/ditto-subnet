@@ -164,8 +164,10 @@ CONNECTIVITY_PROFILE: dict[str, Any] = {
     "schema": "dittobench-coding-hosted-connectivity-v2",
     "shadow_only": True,
     "weight_eligible": False,
+    # The network record's active and stop_rollback phases end at T0+102 and
+    # T0+104, and its expiry phase ends at T0+106.
     "issued_at_unix": T0 + 50,
-    "expires_at_unix": T0 + 3650,
+    "expires_at_unix": T0 + 105,
     "trusted_tcp": [
         {"address": "10.20.0.7", "port": 5432},
         {"address": "10.20.0.9", "port": 443},
@@ -195,12 +197,38 @@ INPUTS = {
 }
 
 
+def endpoint_set_sha256(profile: dict) -> str:
+    """Independent restatement: the profile minus its per-issue fields."""
+
+    endpoint_set = {
+        "schema": "dittobench-coding-native-endpoint-set-v1",
+        "trusted_loopback_tcp": profile["trusted_loopback_tcp"],
+        **{
+            label: sorted(
+                profile[label], key=lambda item: (item["address"], item["port"])
+            )
+            for label in ("trusted_tcp", "trusted_dns", "candidate_tcp")
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(endpoint_set, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+ENDPOINT_SET_SHA256 = endpoint_set_sha256(CONNECTIVITY_PROFILE)
+PINS = {
+    "connectivity_endpoint_set_sha256": ENDPOINT_SET_SHA256,
+    "execution_profile_sha256": EXECUTION_SHA256,
+    "grading_profile_sha256": GRADING_SHA256,
+}
+
+
 def endpoint_hash(label: str, entry: dict) -> str:
     return hashlib.sha256(
         b"\x00".join(
             [
                 ENDPOINT_DOMAIN,
-                CONNECTIVITY_SHA256.encode(),
+                ENDPOINT_SET_SHA256.encode(),
                 label.encode(),
                 f"{entry['address']}:{entry['port']}".encode(),
             ]
@@ -267,13 +295,14 @@ def observed_for(probe: dict, language: str | None) -> dict:
         value = expected_limit(probe["bind"]["limit"], container, language)
         return {"enforced": True, "limit": value, "measured": value}
     if kind == "supervisor_timeout":
-        deadline = GROUP_TIMEOUTS_MS["hidden"]
+        group = probe["id"].rsplit(".", 1)[1]
+        deadline = GROUP_TIMEOUTS_MS[group]
         return {
             "deadline_ms": deadline,
             "elapsed_ms": deadline + deadline // 20,
             "exit_code": 124,
             "live_processes": 0,
-            "test_group": "hidden",
+            "test_group": group,
         }
     if kind == "control":
         suite = digest(f"{language}-control-suite")
@@ -313,7 +342,14 @@ def build_record(
             elif probe["scope"] == "language":
                 scopes = [(language, None) for language in EVIDENCE.LANGUAGES]
             else:
-                scopes = [(None, endpoint) for endpoint in TRUSTED]
+                scopes = [
+                    (None, endpoint)
+                    for endpoint in {
+                        "trusted_endpoint": TRUSTED,
+                        "router_endpoint": [ROUTER],
+                        "proxy_endpoint": [PROXY],
+                    }[probe["scope"]]
+                ]
             for language, endpoint in scopes:
                 probes.append(
                     {
@@ -655,6 +691,12 @@ GO_TOLERANCES = {
     "scratch_max_permille_of_limit": "ScratchMaxPermilleOfLimit",
     "log_max_permille_of_limit": "LogMaxPermilleOfLimit",
     "timeout_elapsed_max_permille_of_deadline": "TimeoutElapsedMaxPermilleOfDeadline",
+    "cpu_usage_min_permille_of_quota": "CPUUsageMinPermilleOfQuota",
+    "memory_peak_min_permille_of_limit": "MemoryPeakMinPermilleOfLimit",
+    "pids_min_permille_of_limit": "PidsMinPermilleOfLimit",
+    "nofile_min_permille_of_limit": "NofileMinPermilleOfLimit",
+    "scratch_min_permille_of_limit": "ScratchMinPermilleOfLimit",
+    "log_min_permille_of_limit": "LogMinPermilleOfLimit",
 }
 
 
@@ -721,7 +763,7 @@ def test_catalog_defines_every_required_probe_set():
     assert network["probes"][0] == {
         "id": "candidate.router.source",
         "phase": "active",
-        "scope": "host",
+        "scope": "router_endpoint",
         "expect": {"type": "outcome_in", "accept": ["container_address"]},
         "bind": {},
     }
@@ -822,7 +864,7 @@ def resource_probe(value, probe_id):
         ),
         (
             lambda c: resource_probe(c, "harness.pids_cap").update(
-                bind={"limit": "command_timeout_ms"}
+                bind={"limit": "hidden_command_timeout_ms"}
             ),
             "does not fit its type",
         ),
@@ -839,6 +881,30 @@ def resource_probe(value, probe_id):
         (
             lambda c: c.update(pre_collection_preflight_max_age_seconds=86400),
             "preflight age differs",
+        ),
+        (
+            lambda c: resource_probe(c, "harness.memory_oom")["expect"].update(
+                floor="cpu_usage_min_permille_of_quota"
+            ),
+            "tolerance is unknown",
+        ),
+        (
+            lambda c: c["kinds"]["resource_enforcement"]["probes"].remove(
+                resource_probe(c, "executor_grading.supervisor_timeout.visible")
+            ),
+            "does not evidence every grading test group timeout",
+        ),
+        (
+            lambda c: resource_probe(
+                c, "executor_grading.supervisor_timeout.visible"
+            ).update(bind={"deadline_ms": "hidden_command_timeout_ms"}),
+            "names another test group",
+        ),
+        (
+            lambda c: c["kinds"]["cleanup_recovery"]["probes"][0].update(
+                scope="router_endpoint"
+            ),
+            "needs router_endpoint roles",
         ),
     ],
 )
@@ -965,11 +1031,14 @@ def test_profile_shapes_match_the_go_and_platform_sources():
                 json.dumps(
                     {
                         **CONNECTIVITY_PROFILE,
-                        "candidate_tcp": CONNECTIVITY_PROFILE["candidate_tcp"][:1],
+                        "candidate_tcp": [
+                            *CONNECTIVITY_PROFILE["candidate_tcp"],
+                            {"address": "10.30.0.6", "port": 3129},
+                        ],
                     }
                 )
             ),
-            "router and proxy",
+            "candidate_tcp is malformed",
         ),
         (
             "connectivity_profile_sha256",
@@ -996,11 +1065,20 @@ def test_profile_shapes_match_the_go_and_platform_sources():
                     }
                 )
             ),
-            "candidate is public",
+            "not a private high port",
         ),
         (
             "connectivity_profile_sha256",
             lambda p: p.symlink_to(p.with_suffix(".elsewhere")),
+            "is missing",
+        ),
+        (
+            # A link to a real, valid profile is still refused (O_NOFOLLOW).
+            "connectivity_profile_sha256",
+            lambda p: (
+                p.with_suffix(".real").write_text(json.dumps(CONNECTIVITY_PROFILE)),
+                p.symlink_to(p.with_suffix(".real")),
+            ),
             "is missing",
         ),
     ],
@@ -1017,6 +1095,10 @@ def test_profile_document_refusals(world, name, change, reason):
 def test_profiles_derive_digests_and_hashed_endpoints_only(world):
     profiles = world.profiles()
     assert {name: profile["sha256"] for name, profile in profiles.items()} == INPUTS
+    assert (
+        profiles["connectivity_profile_sha256"]["endpoint_set_sha256"]
+        == ENDPOINT_SET_SHA256
+    )
     assert profiles["connectivity_profile_sha256"]["endpoints"] == {
         "trusted": TRUSTED,
         "trusted_dns": DNS,
@@ -1326,6 +1408,27 @@ def drop_trusted_endpoint(record):
         ]
 
 
+def replace_dns(record):
+    for item in record["endpoints"]:
+        if item["role"] == "trusted_dns":
+            item["endpoint_sha256"] = digest("unlisted-dns")
+    record["endpoints"].sort(key=lambda item: (item["role"], item["endpoint_sha256"]))
+
+
+def router_probe_on_proxy(record):
+    find_probe(record, "candidate.router.source", endpoint=ROUTER)[
+        "endpoint_sha256"
+    ] = PROXY
+
+
+def swap_endpoint_roles(record):
+    for item in record["endpoints"]:
+        item["role"] = {"router": "refusing_proxy", "refusing_proxy": "router"}.get(
+            item["role"], item["role"]
+        )
+    record["endpoints"].sort(key=lambda item: (item["role"], item["endpoint_sha256"]))
+
+
 def replace_router(record):
     for item in record["endpoints"]:
         if item["role"] == "router":
@@ -1430,6 +1533,25 @@ RECORD_REFUSALS = [
     (network(lambda r: r["endpoints"].pop(0)), "refusing_proxy endpoints"),
     (network(drop_trusted_endpoint), "trusted endpoints differ from the connectivity"),
     (network(replace_router), "router and proxy differ from the connectivity"),
+    (network(replace_dns), "trusted endpoints differ from the connectivity"),
+    (
+        network(
+            lambda r: r["endpoints"].remove(
+                next(i for i in r["endpoints"] if i["role"] == "trusted_dns")
+            )
+        ),
+        "trusted endpoints differ from the connectivity",
+    ),
+    (network(router_probe_on_proxy), "unexpected probe candidate.router.source"),
+    (network(swap_endpoint_roles), "unexpected probe candidate"),
+    (
+        network(drop_probe("candidate.proxy.connect", PROXY)),
+        "missing probe candidate.proxy.connect",
+    ),
+    (
+        resource(drop_probe("executor_grading.supervisor_timeout.visible")),
+        "missing probe",
+    ),
     (
         network(
             lambda r: [i for i in r["endpoints"] if i["role"] == "trusted_dns"][
@@ -1484,7 +1606,7 @@ RECORD_REFUSALS = [
         "completed before its last phase",
     ),
     (
-        network(drop_probe("candidate.router.source")),
+        network(drop_probe("candidate.router.source", ROUTER)),
         "missing probe candidate.router.source",
     ),
     (
@@ -1492,7 +1614,7 @@ RECORD_REFUSALS = [
         "missing probe worker.trusted.handshake",
     ),
     (
-        network(drop_probe("candidate.proxy.forward")),
+        network(drop_probe("candidate.proxy.forward", PROXY)),
         "missing probe candidate.proxy.forward",
     ),
     (cleanup(add_cleanup_probe), "unexpected probe cleanup.reboot.absent"),
@@ -1530,7 +1652,9 @@ RECORD_REFUSALS = [
     ),
     (
         network(
-            edit_probe("candidate.router.source", observed={"outcome": "host_address"})
+            edit_probe(
+                "candidate.router.source", ROUTER, observed={"outcome": "host_address"}
+            )
         ),
         "matched value is misreported",
     ),
@@ -1550,6 +1674,7 @@ RECORD_REFUSALS = [
         network(
             edit_probe(
                 "candidate.router.source",
+                ROUTER,
                 observed={"outcome": "host_address"},
                 matched=False,
             )
@@ -1690,7 +1815,7 @@ BOUND_REFUSALS = [
     (
         resource(
             edit_observed(
-                "executor_grading.supervisor_timeout",
+                "executor_grading.supervisor_timeout.hidden",
                 "go",
                 deadline_ms=3_600_000,
                 elapsed_ms=3_600_000,
@@ -1701,10 +1826,14 @@ BOUND_REFUSALS = [
     (
         resource(
             edit_observed(
-                "executor_grading.supervisor_timeout", "go", test_group="visible"
+                "executor_grading.supervisor_timeout.hidden",
+                "go",
+                test_group="visible",
+                deadline_ms=GROUP_TIMEOUTS_MS["visible"],
+                elapsed_ms=GROUP_TIMEOUTS_MS["visible"],
             )
         ),
-        "deadline_ms differs from the approved profile",
+        "supervisor_timeout.hidden test_group is not hidden",
     ),
     # Tolerances against the bound values.
     (
@@ -1746,14 +1875,16 @@ BOUND_REFUSALS = [
     (
         resource(
             edit_observed(
-                "executor_grading.supervisor_timeout", "go", elapsed_ms=330_001
+                "executor_grading.supervisor_timeout.hidden", "go", elapsed_ms=330_001
             )
         ),
         "misreported",
     ),
     (
         resource(
-            edit_observed("executor_grading.supervisor_timeout", "go", live_processes=1)
+            edit_observed(
+                "executor_grading.supervisor_timeout.visible", "go", live_processes=1
+            )
         ),
         "misreported",
     ),
@@ -2078,7 +2209,8 @@ def test_records_never_overlap_and_follow_the_collection_order(world):
         "cleanup_recovery overlaps or precedes network_enforcement"
         in (result["consistency"]["failure"])
     )
-    second = shifted(network_record, T0 + 150)
+    second = copy.deepcopy(network_record)
+    find_probe(second, "candidate.dns")["observed"] = {"outcome": "timeout"}
     result, ok = world.verify(
         [selection["network_enforcement"], world.put(canonical(second))]
     )
@@ -2132,6 +2264,7 @@ def test_review_assembles_six_digests_without_approval(world, capsys):
     assert value["not_covered"] == ["daemon_restart_recovery", "reboot_recovery"]
     assert value["host"]["router_namespace"] == "rootless-netns"
     assert value["inputs"] == INPUTS
+    assert value["endpoint_set_sha256"] == ENDPOINT_SET_SHA256
     assert value["endpoints"] == ENDPOINTS
     assert value["endpoint_counts"] == {
         "refusing_proxy": 1,
@@ -2438,7 +2571,7 @@ class Approval:
                 store=store,
                 checkout=checkout,
                 profiles=self.world.profiles(),
-                profile_pins=dict(INPUTS) if pins is None else pins,
+                profile_pins=dict(PINS) if pins is None else pins,
                 review_raw=(review or self.review).read_bytes(),
                 approval_raw=approval.read_bytes(),
                 signature=signature.read_bytes(),
@@ -2468,7 +2601,7 @@ class Approval:
             OPENSSL_BIN,
             *self.world.profile_arguments(),
         ]
-        for name, value in INPUTS.items():
+        for name, value in PINS.items():
             arguments += ["--" + name.replace("_", "-"), value]
         return arguments
 
@@ -2493,6 +2626,7 @@ def test_check_approval_accepts_a_signed_consistent_approval(signed, capsys):
         "review_sha256": hashlib.sha256(signed.review.read_bytes()).hexdigest(),
         "signature_sha256": hashlib.sha256(signature.read_bytes()).hexdigest(),
         "inputs": INPUTS,
+        "endpoint_set_sha256": ENDPOINT_SET_SHA256,
         "endpoint_counts": signed.review_value["endpoint_counts"],
         "consistent": True,
     }
@@ -2687,12 +2821,26 @@ def test_check_approval_refuses_inconsistent_approvals(signed, change, reason):
 
 
 @needs_openssl
-@pytest.mark.parametrize("name", EVIDENCE.PROFILE_INPUTS)
-def test_check_approval_binds_profiles_to_reviewed_pins(signed, name):
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        ("connectivity_endpoint_set_sha256", "connectivity endpoint set differs"),
+        ("execution_profile_sha256", "review execution_profile_sha256 differs"),
+        ("grading_profile_sha256", "review grading_profile_sha256 differs"),
+    ],
+)
+def test_check_approval_binds_profiles_to_reviewed_pins(signed, name, reason):
     approval, signature = signed.write()
-    pins = {**INPUTS, name: digest("a different approved profile")}
-    with pytest.raises(EVIDENCE.Refusal, match=f"review {name} differs"):
+    pins = {**PINS, name: digest("a different approved profile")}
+    with pytest.raises(EVIDENCE.Refusal, match=reason):
         signed.check(approval=approval, signature=signature, pins=pins)
+    # The evidenced probe profile's full digest is not an accepted pin.
+    with pytest.raises(EVIDENCE.Refusal, match="profile pins are malformed"):
+        signed.check(
+            approval=approval,
+            signature=signature,
+            pins={**INPUTS},
+        )
 
 
 @needs_openssl
@@ -2889,3 +3037,318 @@ def test_script_runs_isolated_from_the_checkout(world):
     result = subprocess.run(arguments, capture_output=True, check=False, cwd="/")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["evidence_sha256"] == selection
+
+
+# ---------------------------------------------------------------------------
+# Second review: profile window, endpoint set, floors, self-hash, parity
+
+
+def network_with_connectivity(world, **changes) -> dict:
+    profile = {**CONNECTIVITY_PROFILE, **changes}
+    world.profile_paths["connectivity_profile_sha256"].write_text(json.dumps(profile))
+    record = copy.deepcopy(world.records["network_enforcement"])
+    record["inputs"]["connectivity_profile_sha256"] = hashlib.sha256(
+        json.dumps(profile, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return record
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"issued_at_unix": T0 + 101}, "issued after network collection started"),
+        ({"issued_at_unix": T0 + 100}, None),
+        ({"expires_at_unix": T0 + 102}, "active phase does not end before"),
+        ({"expires_at_unix": T0 + 104}, "stop_rollback phase does not end before"),
+        ({"expires_at_unix": T0 + 106}, None),
+        ({"expires_at_unix": T0 + 107}, "expiry phase ends before the connectivity"),
+        ({"expires_at_unix": T0 + 3650}, "expiry phase ends before the connectivity"),
+    ],
+)
+def test_network_phases_bind_to_the_connectivity_window(world, changes, reason):
+    record = network_with_connectivity(world, **changes)
+    failure = world.verify_record(record)
+    if reason is None:
+        assert failure is None
+    else:
+        assert failure is not None and reason in failure, failure
+
+
+def test_endpoint_set_digest_survives_reissue_but_not_endpoint_changes(world, capsys):
+    canary = {
+        **CONNECTIVITY_PROFILE,
+        "schema": "dittobench-coding-hosted-connectivity-v3",
+        "issued_at_unix": T0 + 90000,
+        "expires_at_unix": T0 + 90600,
+        "trusted_tcp": CONNECTIVITY_PROFILE["trusted_tcp"][::-1],
+    }
+    reissued = EVIDENCE.parse_connectivity_profile(json.dumps(canary).encode())
+    assert reissued["endpoint_set_sha256"] == ENDPOINT_SET_SHA256
+    assert reissued["sha256"] != CONNECTIVITY_SHA256
+    assert (
+        reissued["endpoints"]
+        == world.profiles()["connectivity_profile_sha256"]["endpoints"]
+    )
+    for changed in (
+        {"trusted_loopback_tcp": False},
+        {"trusted_dns": []},
+        {"trusted_tcp": [{"address": "10.20.0.8", "port": 5432}]},
+        {
+            "candidate_tcp": [
+                {"address": "10.30.0.4", "port": 18081},
+                {"address": "10.30.0.5", "port": 3128},
+            ]
+        },
+    ):
+        other = EVIDENCE.parse_connectivity_profile(
+            json.dumps({**CONNECTIVITY_PROFILE, **changed}).encode()
+        )
+        assert other["endpoint_set_sha256"] != ENDPOINT_SET_SHA256, changed
+
+    path = world.tmp / "canary-connectivity.json"
+    path.write_text(json.dumps(canary))
+    assert EVIDENCE.main(["endpoint-set", "--connectivity-profile", str(path)]) == 0
+    printed = capsys.readouterr().out
+    assert json.loads(printed) == {
+        "schema": "dittobench-coding-native-endpoint-set-digest-v1",
+        "connectivity_profile_sha256": reissued["sha256"],
+        "endpoint_set_sha256": ENDPOINT_SET_SHA256,
+        "endpoint_counts": {"candidate": 2, "trusted": 2, "trusted_dns": 1},
+    }
+    for entry in (
+        *canary["trusted_tcp"],
+        *canary["candidate_tcp"],
+        *canary["trusted_dns"],
+    ):
+        assert entry["address"] not in printed
+
+
+def test_a_consistent_router_proxy_swap_is_the_documented_residual(world):
+    record = copy.deepcopy(world.records["network_enforcement"])
+    swap_endpoint_roles(record)
+    for phase in record["phases"]:
+        for probe in phase["probes"]:
+            if probe["endpoint_sha256"] in (ROUTER, PROXY):
+                probe["endpoint_sha256"] = (
+                    PROXY if probe["endpoint_sha256"] == ROUTER else ROUTER
+                )
+        phase["probes"].sort(
+            key=lambda item: (
+                item["id"],
+                item["language"] or "",
+                item["endpoint_sha256"] or "",
+            )
+        )
+    assert world.verify_record(record) is None
+
+
+LIMIT = EXECUTION_POLICY
+FLOOR_REFUSALS = [
+    ("harness.memory_oom", "go", {"measured": 1}),
+    ("harness.memory_oom", "go", {"measured": LIMIT["MemoryLimitBytes"] * 9 // 10 - 1}),
+    ("harness.cpu_throttle", "node", {"measured": 1}),
+    (
+        "harness.cpu_throttle",
+        "node",
+        {"measured": LIMIT["CPUQuotaMillis"] * 3 // 4 - 1},
+    ),
+    ("executor_authoring.pids_cap", "python", {"measured": 1}),
+    ("executor_authoring.pids_cap", "python", {"measured": LIMIT["PidsLimit"] - 1}),
+    ("executor_authoring.scratch_enospc", "go", {"measured": 1}),
+    ("harness.nofile_cap", "rust", {"measured": 3}),
+    ("harness.nofile_cap", "rust", {"measured": 1013}),
+    ("executor_grading.log_bound", "go", {"measured": 1}),
+]
+
+
+@pytest.mark.parametrize(("probe_id", "language", "observed"), FLOOR_REFUSALS)
+def test_idle_or_crashed_burners_never_count_as_enforcement(
+    world, probe_id, language, observed
+):
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    edit_observed(probe_id, language, **observed)(record)
+    failure = world.verify_record(record)
+    assert failure is not None and f"{probe_id} matched value is misreported" in failure
+
+
+def test_burners_at_their_floor_count(world):
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    edit_observed(
+        "harness.cpu_throttle", "node", measured=LIMIT["CPUQuotaMillis"] * 3 // 4
+    )(record)
+    edit_observed("harness.nofile_cap", "rust", measured=1014)(record)
+    edit_observed(
+        "harness.memory_oom", "go", measured=-(-LIMIT["MemoryLimitBytes"] * 9 // 10)
+    )(record)
+    assert world.verify_record(record) is None
+
+
+def test_the_running_verifier_must_be_the_reviewed_tool(world, monkeypatch):
+    selection = world.selection()
+    edited = world.tmp / "edited-coding-native-evidence.py"
+    edited.write_bytes(SCRIPT.read_bytes() + b"\n# local edit\n")
+    monkeypatch.setattr(EVIDENCE, "__file__", str(edited))
+    with pytest.raises(EVIDENCE.Refusal, match="running verifier differs"):
+        world.verify([selection["network_enforcement"]])
+    with pytest.raises(EVIDENCE.Refusal, match="running verifier differs"):
+        world.review()
+
+
+def deployer():
+    deployer_spec = importlib.util.spec_from_file_location(
+        "connectivity_policy_for_evidence_tests",
+        ROOT
+        / "infra/ansible/roles/coding_hosted_connectivity/files/connectivity-policy.py",
+    )
+    assert deployer_spec is not None and deployer_spec.loader is not None
+    module = importlib.util.module_from_spec(deployer_spec)
+    deployer_spec.loader.exec_module(module)
+    return module
+
+
+def entries(*pairs):
+    return [{"address": address, "port": port} for address, port in pairs]
+
+
+PAIR_VECTORS = [
+    ("candidate_tcp", False, entries(("127.0.0.1", 18080))),
+    ("candidate_tcp", False, entries(("198.18.0.1", 18080))),
+    ("candidate_tcp", False, entries(("0.1.2.3", 18080))),
+    ("candidate_tcp", False, entries(("192.0.0.5", 18080))),
+    ("candidate_tcp", False, entries(("100.64.0.1", 18080))),
+    ("candidate_tcp", False, entries(("10.0.0.1", 1024))),
+    ("candidate_tcp", False, entries(("10.0.0.1", 1023))),
+    ("candidate_tcp", False, entries(("172.31.255.255", 2000))),
+    ("candidate_tcp", False, entries(("172.32.0.1", 2000))),
+    ("candidate_tcp", False, entries(("192.168.1.1", 2000), ("10.0.0.2", 2000))),
+    ("candidate_tcp", False, entries(*(("10.0.0.1", 2000 + n) for n in range(3)))),
+    ("candidate_tcp", True, entries(*(("10.0.0.1", 2000 + n) for n in range(8)))),
+    ("candidate_tcp", True, entries(*(("10.0.0.1", 2000 + n) for n in range(9)))),
+    ("candidate_tcp", False, entries(("10.0.0.1", 2000), ("10.0.0.1", 2000))),
+    ("candidate_tcp", False, [{"address": "10.0.0.1", "port": True}]),
+    ("candidate_tcp", False, entries(("010.0.0.1", 2000))),
+    ("trusted_tcp", False, entries(("240.0.0.1", 443))),
+    ("trusted_tcp", False, entries(("169.254.1.1", 443))),
+    ("trusted_tcp", False, entries(("224.0.0.1", 443))),
+    ("trusted_tcp", False, entries(("0.0.0.0", 443))),
+    ("trusted_tcp", False, entries(("127.0.0.53", 5432))),
+    ("trusted_tcp", False, entries(("8.8.8.8", 443))),
+    ("trusted_tcp", False, entries(("8.8.8.8", 0))),
+    ("trusted_tcp", False, entries(("8.8.8.8", 65536))),
+    ("trusted_tcp", False, entries(*(("8.8.8.8", 1 + n) for n in range(33)))),
+    ("trusted_tcp", False, [{"address": "8.8.8.8", "port": 443, "tls": True}]),
+    ("trusted_dns", False, entries(("10.0.0.53", 53))),
+    ("trusted_dns", False, entries(("10.0.0.53", 54))),
+    (
+        "trusted_dns",
+        False,
+        entries(
+            *(("10.0.0.53", 53) for _ in range(1)), ("10.0.0.54", 53), ("10.0.0.55", 53)
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(("label", "rollout", "items"), PAIR_VECTORS)
+def test_endpoint_rules_match_the_connectivity_deployer(label, rollout, items):
+    policy = deployer()
+    try:
+        expected = policy.pairs(
+            copy.deepcopy(items),
+            candidate=label == "candidate_tcp",
+            dns=label == "trusted_dns",
+            rollout=rollout,
+        )
+    except Exception:  # noqa: BLE001 - any deployer refusal
+        expected = None
+    try:
+        actual = EVIDENCE._endpoint_pairs(copy.deepcopy(items), label, rollout=rollout)
+    except EVIDENCE.Refusal:
+        actual = None
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"issued_at_unix": (1 << 32) - 100, "expires_at_unix": 1 << 32},
+        {"issued_at_unix": T0, "expires_at_unix": T0 + 86401},
+        {"trusted_tcp": []},
+        {"candidate_tcp": []},
+        {"schema": "dittobench-coding-hosted-connectivity-v1"},
+        {"shadow_only": False},
+        {"trusted_loopback_tcp": 1},
+    ],
+)
+def test_connectivity_profile_rules_match_the_deployer(changes):
+    config = {**CONNECTIVITY_PROFILE, **changes}
+    policy = deployer()
+    try:
+        policy.policy(copy.deepcopy(config), 1000, config["issued_at_unix"])
+        expected = True
+    except Exception:  # noqa: BLE001 - any deployer refusal
+        expected = False
+    try:
+        EVIDENCE.parse_connectivity_profile(json.dumps(config).encode())
+        actual = True
+    except EVIDENCE.Refusal:
+        actual = False
+    assert actual == expected
+
+
+def approval_for(world: World, issued: int) -> tuple["Approval", Path, Path]:
+    signer = Approval(world)
+    value = approval_value(
+        signer.review_value, issued_at_unix=issued, expires_at_unix=issued + 3600
+    )
+    approval, signature = signer.write(value)
+    return signer, approval, signature
+
+
+@needs_openssl
+def test_custody_binding_must_be_fresh_at_issuance(world):
+    world.custody_value["bound_at_unix"] = T0 + 50
+    signer, approval, signature = approval_for(world, T0 + 50 + 21600)
+    signer.check(approval=approval, signature=signature)
+    signer, approval, signature = approval_for(world, T0 + 50 + 21601)
+    with pytest.raises(EVIDENCE.Refusal, match="older than six hours"):
+        signer.check(approval=approval, signature=signature)
+
+
+@needs_openssl
+def test_approval_must_follow_the_post_collection_preflight(world):
+    world.custody_value["bound_at_unix"] = T0 + 300
+    signer, approval, signature = approval_for(world, T0 + 3000)
+    with pytest.raises(
+        EVIDENCE.Refusal, match="issued before its evidence was complete"
+    ):
+        signer.check(approval=approval, signature=signature)
+
+
+@needs_openssl
+def test_approval_at_exactly_six_hours_is_accepted(world):
+    signer, approval, signature = approval_for(world, T0 + 100 + 21600)
+    signer.check(approval=approval, signature=signature)
+    signer, approval, signature = approval_for(world, T0 + 100 + 21601)
+    with pytest.raises(EVIDENCE.Refusal, match="older than six hours"):
+        signer.check(approval=approval, signature=signature)
+
+
+@needs_openssl
+def test_openssl_ancestors_must_be_root_owned(signed, monkeypatch):
+    approval, signature = signed.write()
+    parent = str(Path(OPENSSL_BIN).parent)
+    real = Path.lstat
+
+    def lstat(self):
+        info = real(self)
+        if str(self) != parent:
+            return info
+        values = list(info[:10])
+        values[4] = 4242  # st_uid
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(EVIDENCE.Refusal, match="ancestors must be root-owned"):
+        signed.check(approval=approval, signature=signature)
