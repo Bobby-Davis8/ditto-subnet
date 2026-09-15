@@ -214,6 +214,13 @@ services:
       # the privileged rootful sandbox daemon that ordinary scoring uses. This
       # file mounts no such socket yet; that daemon is a separate reviewed change.
       DITTOBENCH_CODING_DOCKER_HOST: ${DITTOBENCH_CODING_DOCKER_HOST:-}
+      # The coding runtime's own egress network, proxy and in-namespace gateway
+      # on that dedicated daemon. They never fall back to the DITTOBENCH_SANDBOX_*
+      # values above, and the coding runtime mounts no OpenRouter shim CA bundle.
+      # Empty refuses every coding gate.
+      DITTOBENCH_CODING_EGRESS_NETWORK: ${DITTOBENCH_CODING_EGRESS_NETWORK:-}
+      DITTOBENCH_CODING_EGRESS_PROXY: ${DITTOBENCH_CODING_EGRESS_PROXY:-}
+      DITTOBENCH_CODING_HOST_GATEWAY_IP: ${DITTOBENCH_CODING_HOST_GATEWAY_IP:-}
       # Authorizes the validator's session prepare/activate/cancel calls. Same
       # anchor as VALIDATOR_DITTOBENCH_CONTROL_TOKEN on the validator.
       DITTOBENCH_BROKER_CONTROL_TOKEN: *broker-control-token

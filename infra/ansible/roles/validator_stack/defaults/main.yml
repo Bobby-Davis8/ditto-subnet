@@ -78,6 +78,15 @@ validator_stack_coding_runtime_image_digest: ""
 # label, or its runtime image; they are a separately reviewed change. Until they
 # exist, leave both canary switches false.
 validator_stack_coding_docker_host: ""
+# The coding runtime's own container settings on that dedicated daemon:
+# DITTOBENCH_CODING_EGRESS_NETWORK (its egress-restricted network name),
+# DITTOBENCH_CODING_EGRESS_PROXY (exactly http://<private IPv4>:<port>) and
+# DITTOBENCH_CODING_HOST_GATEWAY_IP (the private IPv4 that host.docker.internal
+# names inside that daemon's network namespace). The scorer never falls back to
+# the ordinary DITTOBENCH_SANDBOX_* values or the OpenRouter shim CA bundle.
+validator_stack_coding_egress_network: ""
+validator_stack_coding_egress_proxy: ""
+validator_stack_coding_host_gateway_ip: ""
 # Exact certification canary targets. The empty defaults refuse every lease.
 # The hotkey must equal validator_stack_hotkey, so the targets cannot be reused
 # on another validator.
