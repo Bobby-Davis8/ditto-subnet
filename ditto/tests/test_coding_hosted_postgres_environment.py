@@ -113,6 +113,10 @@ LIVE_VERIFY = "Refuse if any unit became active during verification"
 REPORT = "Report only that the copies exist"
 RAW_GATE = "Require the raw enabled flag to be a boolean true inside the include"
 CHECK_MODE = "Refuse check mode, which cannot verify the write"
+GUARD_MARKER = "Require the guarded entry point marker, an accident guard only"
+OPERATION = "postgres-environment-materialize"
+MARKER_ENV = "DITTO_CODING_HOSTED_GUARDED_RUN"
+SPEC_PATH = ROOT / f"infra/ansible/guarded-runs/{OPERATION}.json"
 PIPELINING = (
     "Require pipelining on and remote files not kept before reading the password"
 )
@@ -217,8 +221,9 @@ def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() ->
     tasks = _materialize()
     # The raw-gate and check-mode refusals lead; the password and preset guards
     # follow, still before any register or set_fact.
-    assert [t["name"] for t in tasks[:4]] == [
+    assert [t["name"] for t in tasks[:5]] == [
         RAW_GATE,
+        GUARD_MARKER,
         CHECK_MODE,
         PASSWORD_VARIABLE,
         PRESET,
@@ -624,8 +629,8 @@ def test_write_module_refuses_swapped_parents_and_writes_atomically(tmp_path) ->
 
 def test_check_mode_and_raw_gate_and_pipelining_are_refused_first() -> None:
     names = [t["name"] for t in _materialize()]
-    # The raw-gate and check-mode refusals run before any probe or capture.
-    assert names[:2] == [RAW_GATE, CHECK_MODE]
+    # The raw-gate, marker and check-mode refusals run before any probe or capture.
+    assert names[:3] == [RAW_GATE, GUARD_MARKER, CHECK_MODE]
     raw = _task(RAW_GATE)
     assert raw["no_log"] is True
     assert raw["ansible.builtin.assert"]["that"] == [
@@ -641,6 +646,72 @@ def test_check_mode_and_raw_gate_and_pipelining_are_refused_first() -> None:
     # repo ansible.cfg's [ssh_connection] setting does not populate it.
     (play,) = yaml.safe_load(PLAYBOOK.read_text())
     assert play["vars"] == {"ansible_pipelining": True}
+
+
+def test_guarded_entry_point_spec_and_marker() -> None:
+    # The supported entry point is infra/scripts/coding-hosted-guarded-run.py
+    # with this spec; the marker is an accident guard inside the dynamic include,
+    # reading the controller environment rather than an operator template.
+    marker = _task(GUARD_MARKER)
+    assert marker["ansible.builtin.assert"]["that"] == [
+        f"lookup('ansible.builtin.env', '{MARKER_ENV}') == '{OPERATION}'"
+    ]
+    assert marker["ansible.builtin.assert"]["quiet"] is True
+    assert "Nothing was written" in marker["ansible.builtin.assert"]["fail_msg"]
+    assert "{{" not in marker["ansible.builtin.assert"]["fail_msg"]
+    assert MARKER_ENV not in MAIN
+    spec = json.loads(SPEC_PATH.read_text())
+    host_pattern = spec["nonsecret_env_vars"][0]["pattern"]
+    assert spec == {
+        "schema": "ditto-coding-hosted-guarded-run/v1",
+        "operation": OPERATION,
+        "playbook": "playbooks/gcp-coding-hosted-postgres-environment.yml",
+        "limit": "ditto-coding-hosted-v2",
+        "enabled_var": f"{PFX}enabled",
+        "confirmation_var": f"{PFX}confirmation",
+        "confirmation": CONFIRMATION,
+        "revision_var": f"{PFX}source_revision",
+        "nonsecret_env_vars": [
+            {
+                "env": "DITTO_CODING_PG_HOST",
+                "var": f"{PFX}host",
+                "pattern": host_pattern,
+                "max_length": 15,
+            }
+        ],
+        "secret_env": [
+            {
+                "name": "DITTO_CODING_PG_PASSWORD",
+                "charset": "single_line",
+                "prefix": "",
+                "min_length": 1,
+                "max_length": 1024,
+            }
+        ],
+        "distinct_secret_values": False,
+        "forbidden_env": [],
+        "forbidden_env_prefixes": [],
+    }
+    # The guard's host pattern accepts exactly what the role's own check does.
+    (role_regex,) = [
+        re.search(r"is match\('(.*)'\)", line).group(1)  # type: ignore[union-attr]
+        for line in _task(HOST)["ansible.builtin.assert"]["that"]
+        if line.startswith(f"{PFX}captured_host is match(")
+    ]
+    candidates = [f"10.30.0.{n}" for n in range(0, 300)]
+    candidates += ["10.30.0.05", "10.30.1.5", "10.30.0.5\n", " 10.30.0.5", "10.30.0."]
+    for candidate in candidates:
+        role_accepts = bool(re.match(role_regex, candidate)) and candidate == (
+            candidate.strip()
+        )
+        assert bool(re.fullmatch(host_pattern, candidate)) == role_accepts, candidate
+    # The spec's secret bounds mirror the role's password assert.
+    password_that = _task(PASSWORD)["ansible.builtin.assert"]["that"]
+    assert f"{PASSWORD_LOOKUP} | length <= 1024" in password_that
+    playbook = PLAYBOOK.read_text()
+    assert "infra/scripts/coding-hosted-guarded-run.py" in playbook
+    assert OPERATION in playbook
+    assert "-e '" not in playbook
 
 
 def test_identity_check_pins_the_reviewed_host_by_inventory_name() -> None:
@@ -755,6 +826,12 @@ def test_docs_describe_every_forgery_guard() -> None:
         "`serial: 1`",
         "SHA-1, MD5 and SHA-256",
         f"`{REHEARSAL_GATE}=1`",
+        "infra/scripts/coding-hosted-guarded-run.py",
+        OPERATION,
+        "accident guard only",
+        "`#jinja2`",
+        "Direct `ansible-playbook`",
+        "closes this for the",
     ):
         assert phrase in section, phrase
 
@@ -1071,6 +1148,7 @@ def _run(
     host_name: str | None = None,
     seed_homes: bool = False,
     serial: int | None = None,
+    marker: str | None = OPERATION,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
@@ -1121,6 +1199,8 @@ def _run(
         # playbook's play vars and the repo ansible.cfg, as in the documented run.
         "DITTO_CODING_PG_PASSWORD": REHEARSAL_PASSWORD,
     }
+    if marker is not None:
+        environment[MARKER_ENV] = marker
     if keep_remote_files is not None:
         environment["ANSIBLE_KEEP_REMOTE_FILES"] = keep_remote_files
     completed = subprocess.run(
@@ -1303,6 +1383,12 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
             PRESET,
         ),
     }
+    # A run without the guarded entry point's marker, or with another
+    # operation's marker, is refused inside the include before any probe.
+    for name, marker in {"no_marker": None, "wrong_marker": "other-op"}.items():
+        _run(tmp_path, f"ref_{name}", {name: host(name)}, marker=marker)
+        _refused_at(tmp_path / "hosts" / name, GUARD_MARKER)
+
     for name, (payload, task) in refusals.items():
         root = tmp_path / "hosts" / name
         if name in LIVE_UNITS:

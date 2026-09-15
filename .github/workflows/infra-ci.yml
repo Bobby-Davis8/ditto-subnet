@@ -9,6 +9,7 @@ on:
       - .github/workflows/infra-plan-apply.yml
       - ditto/tests/test_coding_hosted_postgres_environment.py
       - ditto/tests/test_coding_hosted_postgres_environment_cleanup.py
+      - ditto/tests/test_coding_hosted_guarded_run.py
       - pyproject.toml
       - uv.lock
   push:
@@ -20,6 +21,7 @@ on:
       - .github/workflows/infra-plan-apply.yml
       - ditto/tests/test_coding_hosted_postgres_environment.py
       - ditto/tests/test_coding_hosted_postgres_environment_cleanup.py
+      - ditto/tests/test_coding_hosted_guarded_run.py
       - pyproject.toml
       - uv.lock
 
@@ -135,6 +137,19 @@ jobs:
           uv run --locked --only-group dev
           pytest -p no:cacheprovider -rs
           ditto/tests/test_coding_hosted_postgres_environment.py
+
+      # The guarded entry point's rehearsal runs the real script with
+      # uv run --locked --script against a synthetic checkout and ansible-core
+      # 2.21.2. It needs network for uv, so it runs here and not in every root
+      # pytest shard, which still runs the structural guard tests.
+      - name: Rehearse the guarded entry point for the native Coding secret roles
+        working-directory: ${{ github.workspace }}
+        env:
+          DITTO_ANSIBLE_REHEARSAL: "1"
+        run: >-
+          uv run --locked --only-group dev
+          pytest -p no:cacheprovider -rs
+          ditto/tests/test_coding_hosted_guarded_run.py
 
       - name: Prove native PostgreSQL environment materialization stays disabled
         run: >-

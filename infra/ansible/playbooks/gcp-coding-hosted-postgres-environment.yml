@@ -4,12 +4,18 @@
 # platform-db-password secret runs it, and no workflow identity gets Secret
 # Manager access. It writes files only; it starts nothing.
 #
-#   export DITTO_CODING_PG_PASSWORD=$(gcloud secrets versions access latest \
-#     --secret=platform-db-password --project=ditto-app-dev)
-#   GCP_OSLOGIN_USER=… ansible-playbook -i infra/ansible/inventory/gcp.yml \
-#     infra/ansible/playbooks/gcp-coding-hosted-postgres-environment.yml \
-#     --limit ditto-coding-hosted-v2 -e '{"coding_hosted_postgres_environment_enabled": true, …}'
-#   unset DITTO_CODING_PG_PASSWORD
+# Run it only through the guarded entry point, from a clean checkout of the
+# reviewed revision. The guard validates both inputs without printing them,
+# builds the enabled flag, confirmation and revision itself and fixes the
+# inventory, --limit and ansible settings. Direct ansible-playbook runs are
+# unsupported; the role refuses one that lacks the guard's marker, which is an
+# accident guard only (see infra/docs/coding-hosted-postgres-v2.md).
+#
+#   export DITTO_CODING_PG_PASSWORD=…   # from platform-db-password, not echoed
+#   export DITTO_CODING_PG_HOST=…       # coding_hosted_postgres_access output
+#   GCP_OSLOGIN_USER=… uv run --locked --script infra/scripts/coding-hosted-guarded-run.py \
+#     postgres-environment-materialize <reviewed 40-hex revision>
+#   unset DITTO_CODING_PG_PASSWORD DITTO_CODING_PG_HOST
 - name: Materialize native Coding PostgreSQL environment copies without starting a service
   hosts: role_coding_hosted
   become: true
