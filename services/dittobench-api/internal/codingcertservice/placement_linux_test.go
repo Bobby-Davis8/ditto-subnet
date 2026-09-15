@@ -91,7 +91,11 @@ func TestPlacementRefusesEachUnprovenStepInOrder(t *testing.T) {
 			mutate: func(p *Placement, _ *fakeControl) { p.euid = 0 },
 		},
 		"another user": {
-			mutate: func(p *Placement, _ *fakeControl) { p.euid = testUID + 1 },
+			// Every injected probe accepts, so only the service-user guard refuses.
+			mutate: func(p *Placement, _ *fakeControl) {
+				p.euid = testUID + 1
+				p.verifyDockerSocket = func(string, int) error { return nil }
+			},
 		},
 		"docker socket owner, mode or link": {
 			mutate: func(p *Placement, _ *fakeControl) {

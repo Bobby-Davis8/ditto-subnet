@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // privateTempDir is a short private test directory: its mode passes the
@@ -407,5 +409,52 @@ func TestTrustedExecutableMustBeRootOwnedUnwritableAndPinned(t *testing.T) {
 		if VerifyTrustedExecutable(path, "") == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+func TestTrustedExecutableStatRequiresRootOwnedUnwritableExecutable(t *testing.T) {
+	valid := unix.Stat_t{Mode: unix.S_IFREG | 0o755, Uid: 0, Size: 4096}
+	if !trustedExecutableStat(valid) {
+		t.Fatal("root-owned 0755 executable refused")
+	}
+	for name, mutate := range map[string]func(*unix.Stat_t){
+		"service-user owned": func(stat *unix.Stat_t) { stat.Uid = 1000 },
+		"group writable":     func(stat *unix.Stat_t) { stat.Mode = unix.S_IFREG | 0o775 },
+		"world writable":     func(stat *unix.Stat_t) { stat.Mode = unix.S_IFREG | 0o757 },
+		"not executable":     func(stat *unix.Stat_t) { stat.Mode = unix.S_IFREG | 0o644 },
+		"not regular":        func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o755 },
+		"empty":              func(stat *unix.Stat_t) { stat.Size = 0 },
+		"oversized":          func(stat *unix.Stat_t) { stat.Size = 256<<20 + 1 },
+	} {
+		stat := valid
+		mutate(&stat)
+		if trustedExecutableStat(stat) {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+// An ancestor owned by neither root nor the expected owner is refused even when
+// it is not group or other writable: its owner could rename or replace it.
+func TestSecureDirectoryRefusesAnAncestorOwnedByAnotherUser(t *testing.T) {
+	euid := os.Geteuid()
+	if euid == 0 {
+		t.Skip("ownership of the test directory is meaningless for root")
+	}
+	child := filepath.Join(privateTempDir(t), "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	accept := func(unix.Stat_t) bool { return true }
+	fd, _, err := openSecureDirectory(child, euid, accept)
+	if err != nil {
+		t.Fatalf("own ancestors refused: %v", err)
+	}
+	_ = unix.Close(fd)
+	// With root as the only acceptable owner, the test user's directory above
+	// child is a foreign ancestor.
+	if fd, _, err := openSecureDirectory(child, 0, accept); err == nil {
+		_ = unix.Close(fd)
+		t.Fatal("ancestor owned by another user accepted")
 	}
 }

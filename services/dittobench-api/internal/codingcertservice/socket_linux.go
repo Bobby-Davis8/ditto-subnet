@@ -209,6 +209,13 @@ func (control *ControlSocket) Close() error {
 	return err
 }
 
+// trustedExecutableStat accepts a regular, executable, root-owned file that no
+// one else can write, of a bounded non-zero size.
+func trustedExecutableStat(stat unix.Stat_t) bool {
+	return stat.Mode&unix.S_IFMT == unix.S_IFREG && stat.Uid == 0 && stat.Mode&0o022 == 0 &&
+		stat.Mode&0o111 != 0 && stat.Size > 0 && stat.Size <= 256<<20
+}
+
 // ErrExecutable refuses an untrusted helper executable. It never names the path.
 var ErrExecutable = errors.New("coding certification executable refused")
 
@@ -235,8 +242,7 @@ func VerifyTrustedExecutable(path string, want string) error {
 	file := os.NewFile(uintptr(fd), "trusted-executable")
 	defer file.Close()
 	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != 0 ||
-		stat.Mode&0o022 != 0 || stat.Mode&0o111 == 0 || stat.Size <= 0 || stat.Size > 256<<20 {
+	if unix.Fstat(fd, &stat) != nil || !trustedExecutableStat(stat) {
 		return ErrExecutable
 	}
 	if want == "" {
