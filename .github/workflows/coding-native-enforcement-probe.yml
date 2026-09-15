@@ -189,6 +189,8 @@ jobs:
             --executor-repository "$repository" --image "python=$digest" \
             > "$out/requested-config-report.json"
           test -z "$("$dir/docker" ps -aq --filter label=io.heyditto.dittobench.coding-executor)"
+          # The digest of the binary that ran, measured independently of its report.
+          sha256sum "$out/dittobench-coding-enforcement-probe" | cut -d' ' -f1 > "$out/probe-runner.sha256"
 
       - name: Offline verifier compares the report with the approved profile
         env:
@@ -196,6 +198,7 @@ jobs:
           DITTOBENCH_REQUIRE_LIVE_PROBE_REPORT: "1"
         run: |
           set -euo pipefail
+          DITTOBENCH_NATIVE_PROBE_BINARY_SHA256="$(cat "$RUNNER_TEMP/native-probe/probe-runner.sha256")" \
           DITTOBENCH_NATIVE_PROBE_REPORT="$RUNNER_TEMP/native-probe/requested-config-report.json" \
             uv run --frozen pytest -q ditto/tests/test_coding_native_probe_runner.py \
             ditto/tests/test_coding_native_enforcement_probe_workflow.py

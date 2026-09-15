@@ -11,6 +11,7 @@ credential is touched.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -135,6 +136,14 @@ def test_live_requested_config_equals_the_approved_profile():
     report = _live_report()
     assert report["schema"] == REPORT_SCHEMA
     assert report["enforcement_measured"] is False
+    # The runner reports the digest of its own running image (/proc/self/exe);
+    # the job measures the built binary independently.
+    measured = os.environ.get("DITTOBENCH_NATIVE_PROBE_BINARY_SHA256")
+    if os.environ.get(REQUIRE_LIVE) == "1":
+        assert measured and re.fullmatch(r"[0-9a-f]{64}", measured)
+    if measured:
+        assert report["probe_runner_binary_sha256"] == measured
+    assert re.fullmatch(r"[0-9a-f]{64}", report["probe_runner_binary_sha256"])
     assert report["entries"]
     for entry in report["entries"]:
         assert entry["container_class"] == "executor_grading"
