@@ -2644,18 +2644,36 @@ def approval_value(review_value: dict, **overrides) -> dict:
     return value
 
 
+def pin_native_key(checkout: Path, key_sha256: str) -> str:
+    """The checkout's native.py pinning a synthetic curator key; its digest."""
+
+    native = checkout / EVIDENCE.NATIVE_BINDING_FILE
+    source, count = re.subn(
+        r'(CURATOR_SIGNING_KEY_SHA256 = \(\n    ")[0-9a-f]{64}(")',
+        rf"\g<1>{key_sha256}\g<2>",
+        native.read_text(),
+    )
+    assert count == 1
+    native.write_text(source)
+    return hashlib.sha256(native.read_bytes()).hexdigest()
+
+
 class Approval:
     def __init__(self, world: World) -> None:
         self.world = world
         self.directory = world.tmp / "curator"
         self.curator = Curator(self.directory, "curator")
+        # The host accepts only the key its reviewed native.py pins.
+        self.binding_sha256 = pin_native_key(world.checkout, self.curator.key_sha256)
         review_value, ok = world.review()
         assert ok
         self.review_value = review_value
         self.review = self.directory / "review.json"
         self.review.write_bytes(canonical(review_value))
         self.value = approval_value(
-            review_value, curator_signing_key_sha256=self.curator.key_sha256
+            review_value,
+            curator_signing_key_sha256=self.curator.key_sha256,
+            binding_sha256=self.binding_sha256,
         )
 
     def write(self, value=None, *, signer=None) -> tuple[Path, Path]:
@@ -3035,6 +3053,24 @@ def test_check_approval_ignores_a_planted_native_pyc(signed, monkeypatch):
     assert planted.policy(value) is value  # a loader would run the planted pyc
     with pytest.raises(EVIDENCE.Refusal, match="rejected by native.policy"):
         signed.check(approval=approval, signature=signature)
+
+
+@needs_openssl
+def test_check_approval_refuses_a_key_the_reviewed_native_py_does_not_pin(signed):
+    # Validly signed and self-consistent, but the reviewed native.py pins
+    # Peyton's key, so the host would refuse it: the offline check must too.
+    native = signed.world.checkout / EVIDENCE.NATIVE_BINDING_FILE
+    native.write_bytes((ROOT / EVIDENCE.NATIVE_BINDING_FILE).read_bytes())
+    value = {
+        **signed.value,
+        "binding_sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+    }
+    approval, signature = signed.write(value)
+    with pytest.raises(EVIDENCE.Refusal, match="pins another curator signing key"):
+        signed.check(approval=approval, signature=signature)
+    pin_native_key(signed.world.checkout, signed.curator.key_sha256)
+    approval, signature = signed.write()
+    assert signed.check(approval=approval, signature=signature)["consistent"] is True
 
 
 @needs_openssl
@@ -3615,6 +3651,7 @@ def approval_for(world: World, issued: int) -> tuple["Approval", Path, Path]:
         issued_at_unix=issued,
         expires_at_unix=issued + 3600,
         curator_signing_key_sha256=signer.curator.key_sha256,
+        binding_sha256=signer.binding_sha256,
     )
     approval, signature = signer.write(value)
     return signer, approval, signature

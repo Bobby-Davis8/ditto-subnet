@@ -2440,8 +2440,14 @@ def verify_ed25519(openssl: Path, key: bytes, message: bytes, signature: bytes) 
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def load_native_policy(checkout: Checkout, expected_sha256: object) -> Callable:
-    """native.py compiled from exactly the hashed bytes; no loader or pyc cache."""
+def load_native_policy(
+    checkout: Checkout, expected_sha256: object
+) -> tuple[Callable, object]:
+    """native.py compiled from exactly the hashed bytes; no loader or pyc cache.
+
+    Returns its ``policy`` and the curator key identity it pins in source, the
+    only key the host accepts.
+    """
 
     source = checkout.read(NATIVE_BINDING_FILE)
     require(
@@ -2458,7 +2464,7 @@ def load_native_policy(checkout: Checkout, expected_sha256: object) -> Callable:
     policy = namespace.get("policy")
     require(callable(policy), "native.py has no policy")
     assert callable(policy)
-    return policy
+    return policy, namespace.get("CURATOR_SIGNING_KEY_SHA256")
 
 
 def parse_review(raw: bytes) -> dict[str, Any]:
@@ -2545,7 +2551,15 @@ def check_approval(
         same(approval.get("runner_sha256"), checkout.file_sha256(NATIVE_RUNNER_FILE)),
         "approval runner hash differs from the reviewed run.py",
     )
-    policy = load_native_policy(checkout, approval.get("binding_sha256"))
+    policy, host_key_sha256 = load_native_policy(
+        checkout, approval.get("binding_sha256")
+    )
+    # The host verifies with the key its reviewed native.py pins, so an approval
+    # checked here against any other key would only ever be refused on-host.
+    require(
+        same(host_key_sha256, curator_signing_key_sha256),
+        "the reviewed native.py pins another curator signing key",
+    )
     issued = approval.get("issued_at_unix")
     try:
         policy(

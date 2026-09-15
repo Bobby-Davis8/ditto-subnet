@@ -260,7 +260,10 @@ A record is refused unless all of these hold:
 
 - a 64-byte detached Ed25519 signature over the exact approval bytes;
 - a PEM Ed25519 curator public key whose raw-key sha256 equals
-  `--curator-signing-key-sha256`.
+  `--curator-signing-key-sha256`;
+- that same key identity pinned as `CURATOR_SIGNING_KEY_SHA256` in the reviewed
+  `native.py` the approval binds, the only key the host accepts. An approval
+  checked against any other key would pass here and still be refused on-host.
 
 This is the algorithm and key identity that the profile approval and the
 curator key loader use. The infra Python environment has neither `cryptography`
