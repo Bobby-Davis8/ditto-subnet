@@ -494,6 +494,11 @@ def test_docs_describe_every_forgery_guard() -> None:
         "`maintenance`",
         "re-checked",
         "mid-rotation",
+        "`is sameas true`",
+        "deprecation warning",
+        "`exception`",
+        "imported statically",
+        "SHA-1, MD5 and SHA-256",
         f"`{REHEARSAL_GATE}=1`",
     ):
         assert phrase in section, phrase

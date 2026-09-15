@@ -131,23 +131,30 @@ This is a separate protected convergence. It uses the same pattern as the first
 provisioning of `gcp-platform-pg.yml`: an operator who already holds
 `platform-db-password` exports it, runs
 `playbooks/gcp-coding-hosted-postgres-environment.yml` with the exact
-confirmation `MATERIALIZE NATIVE CODING POSTGRES ENVIRONMENT`, and unsets it. No
-workflow identity gets Secret Manager access.
+confirmation `MATERIALIZE NATIVE CODING POSTGRES ENVIRONMENT`, passing booleans
+as JSON extra vars (`-e '{"coding_hosted_postgres_environment_enabled": true, …}'`),
+and unsets it. No workflow identity gets Secret Manager access.
 
 The role behaves as follows:
-- The `enabled` gate is decided exactly once. `tasks/main.yml` hands the work to
-  a dynamic `include_tasks`, whose `when:` is evaluated a single time with no
-  loop item in scope, and guards the flag with `default(false, true)`. A lazily
-  templated flag such as `{{ item is defined }}` is therefore false here and
-  cannot flip to true inside a later loop; `--start-at-task` cannot jump into
-  the not-yet-included file to skip the guards and reach the write; and a flag
-  whose template errors while reading a secret resolves to false without
-  surfacing the value.
+- The `enabled` gate is decided exactly once. `tasks/main.yml` captures the
+  flag a single time, with no loop item in scope, into a `no_log` fact guarded
+  by `default(false, true)`, and hands the work to a dynamic `include_tasks`
+  gated on that fact. A lazily templated flag such as `{{ item is defined }}` is
+  therefore false and cannot flip to true inside a later loop; `--start-at-task`
+  cannot jump into the not-yet-included file to skip the guards and reach the
+  write, and starting at the include itself fails on the missing captured fact;
+  and a flag whose template renders undefined while reading a secret resolves to
+  false without surfacing the value.
+- The gate opens only for a real boolean true (`is sameas true`); a string such
+  as `"true"` leaves it closed. The `bool` filter is avoided: on ansible-core
+  2.21 it prints any non-boolean string it coerces, such as a flag templated to
+  the password, in a deprecation warning that `no_log` does not suppress.
 - Before it inspects anything, it refuses a password variable and any other
   variable named `coding_hosted_postgres_environment_*` except the `enabled`,
-  `confirmation`, `source_revision` and `host` inputs, whether set by extra
-  vars, inventory or vars files. Extra vars outrank registered results and
-  set_facts. Without this check, a preset result such as
+  `confirmation`, `source_revision` and `host` inputs and the captured gate,
+  whether set by extra vars, inventory or vars files. Presetting the captured
+  gate only enables materialization, which every guard still decides. Extra vars
+  outrank registered results and set_facts. Without this check, a preset result such as
   `coding_hosted_postgres_environment_units` would disable the live-unit guard,
   and a preset `coding_hosted_postgres_environment_document` would replace both
   the file and the digest used to verify it. The separate removal role's
@@ -191,25 +198,36 @@ Two residual limitations are accepted, not closed, by design:
   operator stops every unit first (the pre-write listing must be `inactive` or
   `failed`); the re-checks catch a unit that starts during the write or verify.
 - **Operator-supplied Jinja.** ansible-core renders a trusted `-e`/inventory
-  string on any reference, offers no way to read a variable's raw text without
-  rendering it, and does not suppress a fatal templating-error message even
-  under `no_log`. Capturing each input once behind `default(..., true)` turns a
-  crafted error into an empty string and confines every input to a single
-  render, but an operator who pastes hostile Jinja into their own command still
-  holds the exported password directly. Moving `host` to a controller-only
-  environment input, like the password, would remove the last rendered input;
-  that is a larger interface change left for review.
+  string on any reference and offers no way to read a variable's raw text
+  without rendering it. Capturing each input once behind `default(..., true)`
+  confines every input to a single render and turns a template that renders
+  undefined, such as `{{ {}[lookup('env', …)] }}`, into an empty value. It does
+  not neutralise a template that raises: for example
+  `{{ lookup('file', lookup('env', 'DITTO_CODING_PG_PASSWORD')) }}` as `enabled`
+  or `host` fails the run closed at the capture, writing nothing, but
+  ansible-core 2.21.2 prints the raised message, including the value, through
+  the task result's `exception` field, which `no_log` deliberately preserves, on
+  the console and in any `ANSIBLE_LOG_PATH` log. Core Jinja offers no construct
+  that swallows such an error. An operator who pastes hostile Jinja into their
+  own command still holds the exported password directly. Moving `host` to a
+  controller-only environment input, like the password, would remove the last
+  rendered input; that is a larger interface change left for review.
 
 Root tests check the guard structure. With `DITTO_ANSIBLE_REHEARSAL=1` they also
 run the real, restructured role through ansible-core 2.21.2 against a temporary
-tree, under the repo's yaml callback and `-v --diff`, with a stand-in password.
-That rehearsal proves that a lazily templated gate and `--start-at-task` write
+tree, imported statically as the playbook does, under the repo's `ansible.cfg`
+and `-v --diff`, with a stand-in password. That rehearsal proves that a lazily
+templated gate, a gate templated to the password, a string `"true"` and
+`--start-at-task` at the write, the render, a guard or the include write
 nothing; that a lazily templated `host` writes the safe captured address rather
 than the loop-time one; that preset results and document variables, forged
 `ansible_facts`, `refreshing`, `maintenance` and unknown unit states, and
 trailing-newline inputs are refused before anything is written; and that no
-password form or document digest reaches the output even when the owner/mode
-check fails. The infra CI Ansible job runs it.
+password form reaches the console or log even when the owner/mode check fails.
+It searches for the stand-in in raw, JSON-, YAML- and repr-escaped forms, for a
+canary no escaping changes, and for the SHA-1, MD5 and SHA-256 digests of the
+password and of the document, and it pins the raising-template residual above
+exactly. The infra CI Ansible job runs it.
 
 The `role_coding_hosted` group connects through IAP only
 (`group_vars/role_coding_hosted.yml`). Every native host role therefore reaches
