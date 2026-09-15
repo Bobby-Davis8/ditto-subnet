@@ -1,0 +1,164 @@
+name: Native Coding enforcement probe runner
+
+# Proves, on a real rootless Docker daemon with delegated cgroups, that the
+# native enforcement probe runner measures resource enforcement through the
+# production coding executor launch code, and that the offline evidence
+# verifier accepts the runner's records and refuses a weakened one. It covers
+# only probes that need no nft or host firewall; network collection is a later
+# PR. No secrets, cloud identity, registry pull, host or production is involved.
+
+on:
+  pull_request:
+    paths:
+      - services/dittobench-api/internal/codingenforcement/**
+      - services/dittobench-api/cmd/dittobench-coding-enforcement-probe/**
+      # The integration test and the runner import these packages directly.
+      - services/dittobench-api/internal/codingexecutor/**
+      - services/dittobench-api/internal/codinggrader/**
+      - services/dittobench-api/internal/codingrunner/**
+      - services/dittobench-api/internal/sandbox/**
+      - services/dittobench-api/go.mod
+      - services/dittobench-api/go.sum
+      - infra/scripts/coding-native-evidence.py
+      - ditto/tests/test_coding_native_probe_runner.py
+      - ditto/tests/test_coding_native_enforcement_evidence.py
+      - .github/workflows/coding-native-enforcement-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coding-native-enforcement-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The reviewed native host runs Docker 29.1.3.
+  DOCKER_VERSION: "29.1.3"
+  DOCKER_SHA256: c019c608ba2bb009dd673f3230e4d743f36a78d36166c6c2444c05d0aa9ff0d9
+  DOCKER_ROOTLESS_EXTRAS_SHA256: 32dc3dd0d8b512ccf30a7efe84d360b5ade65ac4fec92a2a5ad0fe791da6ab0d
+
+jobs:
+  non-network-probes:
+    name: probe runner measures non-network enforcement under rootless Docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+          cache-dependency-path: services/dittobench-api/go.sum
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Unit tests for the runner and the reused launch code
+        working-directory: services/dittobench-api
+        run: |
+          set -euo pipefail
+          go vet ./internal/codingenforcement/... ./cmd/dittobench-coding-enforcement-probe/
+          go test -p 2 ./internal/codingenforcement/... ./internal/codingexecutor/ ./internal/sandbox/
+          out="$RUNNER_TEMP/native-probe"
+          mkdir -p "$out"
+          go test -c -tags native_probe_integration -o "$out/integration.test" ./internal/codingenforcement/probe/
+
+      - name: Install rootless prerequisites and pinned Docker static binaries
+        run: |
+          set -euo pipefail
+          # Only Ubuntu packages; unrelated third-party runner sources are ignored.
+          sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            update
+          sudo apt-get install -y --no-install-recommends uidmap slirp4netns dbus-user-session
+          dir="$RUNNER_TEMP/docker-rootless"
+          mkdir -p "$dir"
+          base="https://download.docker.com/linux/static/stable/x86_64"
+          curl -fsSL --retry 3 -o "$dir/docker.tgz" "$base/docker-$DOCKER_VERSION.tgz"
+          curl -fsSL --retry 3 -o "$dir/extras.tgz" "$base/docker-rootless-extras-$DOCKER_VERSION.tgz"
+          printf '%s  %s\n' \
+            "$DOCKER_SHA256" "$dir/docker.tgz" \
+            "$DOCKER_ROOTLESS_EXTRAS_SHA256" "$dir/extras.tgz" | sha256sum --check --strict
+          tar -xzf "$dir/docker.tgz" -C "$dir" --strip-components=1
+          tar -xzf "$dir/extras.tgz" -C "$dir" --strip-components=1
+          test -x "$dir/dockerd-rootless.sh" && test -x "$dir/rootlesskit"
+
+      - name: Start a cgroup-delegated rootless daemon (throwaway CI VM only)
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor.
+          # This changes only this disposable runner. Resource limits need the
+          # systemd user manager to delegate cpu, memory and pids.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo modprobe br_netfilter
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' |
+            sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+          sudo systemctl daemon-reload
+          user="$(id -un)"
+          uid="$(id -u)"
+          grep -q "^$user:" /etc/subuid || echo "$user:231072:65536" | sudo tee -a /etc/subuid
+          grep -q "^$user:" /etc/subgid || echo "$user:231072:65536" | sudo tee -a /etc/subgid
+          sudo loginctl enable-linger "$user"
+          sudo systemctl restart "user@$uid.service"
+          for _ in $(seq 1 30); do test -S "/run/user/$uid/bus" && break; sleep 1; done
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus"
+          dir="$RUNNER_TEMP/docker-rootless"
+          install -d -m 0700 "$RUNNER_TEMP/rootless-socket" "$RUNNER_TEMP/rootless-data"
+          systemd-run --user --unit ci-native-probe-docker -p Delegate=yes \
+            --setenv=PATH="$dir:/usr/sbin:/usr/bin:/sbin:/bin" \
+            --setenv=HOME="$HOME" --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            "$dir/dockerd-rootless.sh" \
+            --host="unix://$RUNNER_TEMP/rootless-socket/docker.sock" \
+            --data-root="$RUNNER_TEMP/rootless-data" \
+            --exec-opt native.cgroupdriver=systemd \
+            --label io.heyditto.dittobench.isolated=true
+          export DOCKER_HOST="unix://$RUNNER_TEMP/rootless-socket/docker.sock"
+          for _ in $(seq 1 90); do "$dir/docker" info >/dev/null 2>&1 && break; sleep 1; done
+          "$dir/docker" info --format '{{json .SecurityOptions}}' | grep -q 'name=rootless'
+          test "$("$dir/docker" info --format '{{.CgroupDriver}} {{.MemoryLimit}} {{.PidsLimit}}')" = "systemd true true"
+          "$dir/docker" info --format '{{json .Labels}}' | grep -q 'io.heyditto.dittobench.isolated=true'
+
+      - name: Measure executor resource enforcement through the production launch
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/docker-rootless"
+          out="$RUNNER_TEMP/native-probe"
+          export DOCKER_HOST="unix://$RUNNER_TEMP/rootless-socket/docker.sock"
+          # A synthetic approved supervisor image. The resource probe only creates,
+          # inspects and removes the container, so no binary is needed inside. A
+          # local tag gives it a repository digest without any registry pull.
+          mkdir -p "$out/fixture"
+          printf 'native enforcement probe fixture\n' > "$out/fixture/marker"
+          tar -C "$out/fixture" -cf "$out/fixture.tar" .
+          id="$("$dir/docker" import \
+            --change 'LABEL io.heyditto.dittobench.coding-supervisor-contract=1' \
+            --change 'LABEL io.heyditto.dittobench.coding-supervisor-fixture=true' \
+            "$out/fixture.tar")"
+          "$dir/docker" tag "$id" dittobench-native-probe-fixture:ci
+          image="$("$dir/docker" image inspect dittobench-native-probe-fixture:ci --format '{{index .RepoDigests 0}}')"
+          env -i PATH="$dir:/usr/sbin:/usr/bin:/sbin:/bin" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+            DOCKER_HOST="$DOCKER_HOST" \
+            DITTOBENCH_NATIVE_PROBE_IMAGE="$image" \
+            DITTOBENCH_NATIVE_PROBE_OUTPUT="$out/live-observations.json" \
+            timeout 300 "$out/integration.test" \
+            -test.run '^TestExecutorResourceEnforcementIsMeasuredThroughTheProductionLaunch$' -test.count=1 -test.v
+          test -z "$("$dir/docker" ps -aq --filter label=io.heyditto.dittobench.coding-executor)"
+
+      - name: Offline verifier accepts runner records and refuses weakened ones
+        run: |
+          set -euo pipefail
+          DITTOBENCH_NATIVE_PROBE_OUTPUT="$RUNNER_TEMP/native-probe/live-observations.json" \
+            uv run --frozen pytest -q ditto/tests/test_coding_native_probe_runner.py
+          uv run --frozen ruff check ditto/tests/test_coding_native_probe_runner.py
+          uv run --frozen ruff format --check ditto/tests/test_coding_native_probe_runner.py
+
+      - name: Show the rootless daemon log on failure
+        if: failure()
+        run: journalctl --user -u ci-native-probe-docker --no-pager | tail -n 200 || true

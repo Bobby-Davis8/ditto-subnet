@@ -3050,19 +3050,25 @@ def test_collectors_never_enter_the_operate_workflow():
         for path in workflows.glob("*.y*ml")
         if any(name in path.read_text() for name in TOOL_NAMES)
     )
-    # Only the offline regression job may name the tool, and it has no host,
-    # secret or deployment authority.
-    assert referencing == ["coding-native-release.yml"]
-    ci = (workflows / "coding-native-release.yml").read_text()
-    for forbidden in (
-        "secrets.",
-        "environment:",
-        "id-token",
-        "ssh",
-        "gcloud",
-        "collect-coding-native-enforcement",
-    ):
-        assert forbidden not in ci
+    # Only the offline regression job and the disposable rootless probe-runner
+    # job may name the tools, and neither has host, secret or deployment
+    # authority.
+    assert referencing == [
+        "coding-native-enforcement-probe.yml",
+        "coding-native-release.yml",
+    ]
+    for name in referencing:
+        ci = (workflows / name).read_text()
+        for forbidden in (
+            "secrets.",
+            "environment:",
+            "id-token",
+            "ssh",
+            "gcloud",
+            "self-hosted",
+            "collect-coding-native-enforcement",
+        ):
+            assert forbidden not in ci, (name, forbidden)
 
 
 def test_script_runs_isolated_from_the_checkout(world):
