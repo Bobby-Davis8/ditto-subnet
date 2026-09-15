@@ -209,6 +209,11 @@ services:
       DITTOBENCH_CODING_SOURCE_PORT: "11438"
       DITTOBENCH_CODING_SOURCE_PUBLIC_BASE_URL: http://host.docker.internal:11438
       DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY: ${DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY:-}
+      # The dedicated rootless coding daemon's local socket. Empty refuses every
+      # coding gate: coding harnesses and executors never use DOCKER_HOST above,
+      # the privileged rootful sandbox daemon that ordinary scoring uses. This
+      # file mounts no such socket yet; that daemon is a separate reviewed change.
+      DITTOBENCH_CODING_DOCKER_HOST: ${DITTOBENCH_CODING_DOCKER_HOST:-}
       # Authorizes the validator's session prepare/activate/cancel calls. Same
       # anchor as VALIDATOR_DITTOBENCH_CONTROL_TOKEN on the validator.
       DITTOBENCH_BROKER_CONTROL_TOKEN: *broker-control-token
@@ -299,6 +304,9 @@ services:
       VALIDATOR_CODING_EXECUTOR_TIMEOUT_SECONDS: ${VALIDATOR_CODING_EXECUTOR_TIMEOUT_SECONDS:-}
       VALIDATOR_CODING_CANARY_ENABLED: ${VALIDATOR_CODING_CANARY_ENABLED:-false}
       VALIDATOR_CODING_CANARY_POLL_SECONDS: ${VALIDATOR_CODING_CANARY_POLL_SECONDS:-10}
+      # Exact certification canary targets; empty refuses every lease.
+      VALIDATOR_CODING_CANARY_AGENT_IDS: ${VALIDATOR_CODING_CANARY_AGENT_IDS:-}
+      VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY: ${VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY:-}
       # The PINNED scorer revision links its identity into the binary, so the
       # only acceptable answer from /v1/capabilities is a binary-derived
       # revision. An environment-asserted revision from this pin means the

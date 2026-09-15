@@ -200,6 +200,13 @@ def test_shadow_coding_worker_is_present_but_default_off_on_both_sides() -> None
         "/opt/ditto/coding/certification-root"
     )
     assert _compose_default(scorer["DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST"]) == ""
+    # No dedicated rootless coding daemon by default: every coding gate refuses,
+    # and the coding host never falls back to the rootful sandbox DOCKER_HOST.
+    assert _compose_default(scorer["DITTOBENCH_CODING_DOCKER_HOST"]) == ""
+    assert scorer["DOCKER_HOST"] == "tcp://127.0.0.1:2375"
+    assert _compose_default(validator["VALIDATOR_CODING_CANARY_ENABLED"]) == "false"
+    assert _compose_default(validator["VALIDATOR_CODING_CANARY_AGENT_IDS"]) == ""
+    assert _compose_default(validator["VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY"]) == ""
     assert _compose_default(validator["VALIDATOR_CODING_SHADOW_ENABLED"]) == "false"
     assert _compose_default(validator["VALIDATOR_CODING_SHADOW_RUN_ID"]) == ""
     assert (

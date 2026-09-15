@@ -15,6 +15,11 @@
     canary_template: ../roles/validator_stack/templates/validator.env.j2
     valid_digest: "sha256:{{ '1' * 64 }}"
     valid_repository: registry.invalid/ditto/coding-runtime
+    valid_docker_host: unix:///run/ditto-coding-executor/docker.sock
+    valid_agent_ids:
+      - aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+    # Synthetic SS58 test hotkey; production takes it from validated config.
+    valid_hotkey: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
   tasks:
     - name: Accept the shipped defaults
       ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
@@ -28,28 +33,41 @@
           - not validator_stack_dittobench_coding_canary_enabled
           - validator_stack_coding_runtime_image_repository == ''
           - validator_stack_coding_runtime_image_digest == ''
+          - validator_stack_coding_docker_host == ''
+          - validator_stack_coding_canary_agent_ids == []
+          - validator_stack_coding_canary_validator_hotkey == ''
           - "'VALIDATOR_CODING_CANARY_ENABLED=false' in rendered"
           - "'VALIDATOR_CODING_CANARY_POLL_SECONDS=10' in rendered"
+          - "'VALIDATOR_CODING_CANARY_AGENT_IDS=' in rendered"
+          - "'VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY=' in rendered"
           - "'DITTOBENCH_CODING_CANARY_ENABLED=false' in rendered"
           - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' in rendered"
           - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' in rendered"
+          - "'DITTOBENCH_CODING_DOCKER_HOST=' in rendered"
           - rendered | select('match', 'DITTOBENCH_CODING_CERTIFICATION_ROOT') | list == []
 
-    - name: Keep runtime image identity out of a disabled scorer
+    - name: Keep runtime identity, daemon endpoint, and targets out of disabled gates
       vars:
         validator_stack_coding_runtime_image_repository: "{{ valid_repository }}"
         validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+        validator_stack_coding_docker_host: "{{ valid_docker_host }}"
+        validator_stack_coding_canary_agent_ids: "{{ valid_agent_ids }}"
+        validator_stack_coding_canary_validator_hotkey: "{{ valid_hotkey }}"
         rendered: "{{ lookup('template', canary_template).splitlines() }}"
       ansible.builtin.assert:
         that:
           - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' in rendered"
           - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' in rendered"
+          - "'DITTOBENCH_CODING_DOCKER_HOST=' in rendered"
+          - "'VALIDATOR_CODING_CANARY_AGENT_IDS=' in rendered"
+          - "'VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY=' in rendered"
 
     - name: Accept and render a staged scorer-only profile
       vars:
         validator_stack_dittobench_coding_canary_enabled: true
         validator_stack_coding_runtime_image_repository: "{{ valid_repository }}"
         validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+        validator_stack_coding_docker_host: "{{ valid_docker_host }}"
       block:
         - name: Validate the staged scorer-only profile
           ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
@@ -60,9 +78,11 @@
           ansible.builtin.assert:
             that:
               - "'VALIDATOR_CODING_CANARY_ENABLED=false' in rendered"
+              - "'VALIDATOR_CODING_CANARY_AGENT_IDS=' in rendered"
               - "'DITTOBENCH_CODING_CANARY_ENABLED=true' in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' + valid_repository in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' + valid_digest in rendered"
+              - "'DITTOBENCH_CODING_DOCKER_HOST=' + valid_docker_host in rendered"
 
     - name: Accept and render the complete canary profile
       vars:
@@ -71,6 +91,12 @@
         validator_stack_coding_canary_poll_seconds: 30
         validator_stack_coding_runtime_image_repository: "{{ valid_repository }}"
         validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+        validator_stack_coding_docker_host: "{{ valid_docker_host }}"
+        validator_stack_coding_canary_agent_ids:
+          - aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+          - bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+        validator_stack_coding_canary_validator_hotkey: "{{ valid_hotkey }}"
+        validator_stack_hotkey: "{{ valid_hotkey }}"
       block:
         - name: Validate the complete canary profile
           ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
@@ -82,9 +108,28 @@
             that:
               - "'VALIDATOR_CODING_CANARY_ENABLED=true' in rendered"
               - "'VALIDATOR_CODING_CANARY_POLL_SECONDS=30' in rendered"
+              - "'VALIDATOR_CODING_CANARY_AGENT_IDS=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' in rendered"
+              - "'VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY=' + valid_hotkey in rendered"
               - "'DITTOBENCH_CODING_CANARY_ENABLED=true' in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' + valid_repository in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' + valid_digest in rendered"
+              - "'DITTOBENCH_CODING_DOCKER_HOST=' + valid_docker_host in rendered"
+
+    - name: Accept other Docker-grammar runtime repositories
+      vars:
+        validator_stack_dittobench_coding_canary_enabled: true
+        validator_stack_coding_runtime_image_digest: "{{ valid_digest }}"
+        validator_stack_coding_docker_host: "{{ valid_docker_host }}"
+        validator_stack_coding_runtime_image_repository: "{{ repository }}"
+      ansible.builtin.include_tasks: ../roles/validator_stack/tasks/validate_coding_canary.yml
+      loop_control:
+        loop_var: repository
+      loop:
+        - registry.invalid:5000/ditto/coding-runtime
+        - ghcr.io/ditto-assistant/dittobench-coding-runtime
+        - runtime
+        - ditto/coding__runtime
+        - ditto/coding--runtime
 
     - name: Reject every incomplete or unsafe profile
       ansible.builtin.include_tasks: validator-stack-coding-canary-reject.yml
@@ -107,3 +152,34 @@
         - {name: repository with a parent segment, repository: registry.invalid/../runtime}
         - {name: repository with uppercase, repository: Registry.invalid/runtime}
         - {name: repository with whitespace, repository: "registry.invalid/run time"}
+        - {name: repository with an empty path component, repository: "registry.invalid//runtime"}
+        - {name: repository with a colon inside the path, repository: "registry.invalid/a:b/c"}
+        - {name: repository with a tag, repository: "registry.invalid/runtime:latest"}
+        - {name: repository with a leading separator, repository: "registry.invalid/-runtime"}
+        - {name: repository with a triple underscore, repository: "registry.invalid/run___time"}
+        - {name: repository with a trailing newline, repository: "registry.invalid/runtime\n"}
+        - {name: repository longer than 255 bytes, repository: "a/{{ 'b' * 254 }}"}
+        - {name: scorer without a coding daemon, docker_host: ""}
+        - {name: validator worker without a coding daemon, validator: true, docker_host: ""}
+        - {name: scorer on the rootful sandbox daemon, docker_host: "tcp://127.0.0.1:2375"}
+        - {name: validator worker on the rootful sandbox daemon, validator: true, docker_host: "tcp://127.0.0.1:2375"}
+        - {name: coding daemon on the sandbox service port, docker_host: "tcp://sandbox-docker:2375"}
+        - {name: coding daemon on the host rootful socket, docker_host: "unix:///var/run/docker.sock"}
+        - {name: coding daemon on the run rootful socket, docker_host: "unix:///run/docker.sock"}
+        - {name: coding daemon on a relative socket, docker_host: "unix://run/coding/docker.sock"}
+        - {name: coding daemon with a parent segment, docker_host: "unix:///run/coding/../docker.sock"}
+        - {name: coding daemon with an empty segment, docker_host: "unix:///run//coding/docker.sock"}
+        - {name: coding daemon that is not a socket, docker_host: "unix:///run/coding/docker"}
+        - {name: coding daemon over ssh, docker_host: "ssh://coding@host.invalid"}
+        - {name: validator worker without targets, validator: true, agent_ids: []}
+        - {name: validator worker with a target string, validator: true, agent_ids: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+        - {name: validator worker with an uppercase target, validator: true, agent_ids: [AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA]}
+        - {name: validator worker with a malformed target, validator: true, agent_ids: [not-a-uuid]}
+        - {name: validator worker with a nil target, validator: true, agent_ids: ["00000000-0000-0000-0000-000000000000"]}
+        - {name: validator worker with duplicate targets, validator: true, agent_ids: [aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]}
+        - name: validator worker with seventeen targets
+          validator: true
+          agent_ids: "{{ query('ansible.builtin.sequence', 'start=1 end=17 format=aaaaaaaa-aaaa-4aaa-8aaa-%012x') }}"
+        - {name: validator worker without a target hotkey, validator: true, canary_hotkey: ""}
+        - {name: validator worker bound to another validator hotkey, validator: true, canary_hotkey: 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty}
+        - {name: validator worker with a malformed target hotkey, validator: true, canary_hotkey: not-a-hotkey, hotkey: not-a-hotkey}

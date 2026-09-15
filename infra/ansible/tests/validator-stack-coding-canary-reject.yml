@@ -8,6 +8,10 @@
     validator_stack_coding_canary_poll_seconds: "{{ case.poll | default(10) }}"
     validator_stack_coding_runtime_image_repository: "{{ case.repository | default(valid_repository) }}"
     validator_stack_coding_runtime_image_digest: "{{ case.digest | default(valid_digest) }}"
+    validator_stack_coding_docker_host: "{{ case.docker_host | default(valid_docker_host) }}"
+    validator_stack_coding_canary_agent_ids: "{{ case.agent_ids | default(valid_agent_ids) }}"
+    validator_stack_coding_canary_validator_hotkey: "{{ case.canary_hotkey | default(valid_hotkey) }}"
+    validator_stack_hotkey: "{{ case.hotkey | default(valid_hotkey) }}"
     validator_stack_coding_executor_connectivity_canary_enabled: "{{ case.connectivity | default(false) }}"
     validator_stack_coding_executor_connectivity_canary_run_enabled: "{{ case.connectivity_run | default(false) }}"
   block:

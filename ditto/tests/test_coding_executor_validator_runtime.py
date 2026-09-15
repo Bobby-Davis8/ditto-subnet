@@ -77,20 +77,41 @@ def test_validator_certification_canary_is_double_gated_default_off() -> None:
     assert DEFAULTS["validator_stack_coding_canary_poll_seconds"] == 10
     assert DEFAULTS["validator_stack_coding_runtime_image_repository"] == ""
     assert DEFAULTS["validator_stack_coding_runtime_image_digest"] == ""
+    # The dedicated rootless coding daemon and exact targets default to empty,
+    # which refuses both canary switches and every lease.
+    assert DEFAULTS["validator_stack_coding_docker_host"] == ""
+    assert DEFAULTS["validator_stack_coding_canary_agent_ids"] == []
+    assert DEFAULTS["validator_stack_coding_canary_validator_hotkey"] == ""
     # Validation runs before the first host mutation in the role.
     include = "ansible.builtin.include_tasks: validate_coding_canary.yml"
     assert TASKS.index(include) < TASKS.index("ansible.builtin.command")
     assert "validator_stack_dittobench_coding_canary_enabled | bool" in (
         CANARY_VALIDATION
     )
-    assert "'^sha256:[0-9a-f]{64}$'" in CANARY_VALIDATION
+    assert "'^sha256:[0-9a-f]{64}\\Z'" in CANARY_VALIDATION
+    assert "canary_docker_host is match('^unix:///[A-Za-z0-9._/-]+\\.sock\\Z')" in (
+        CANARY_VALIDATION
+    )
+    assert (
+        "validator_stack_coding_canary_validator_hotkey == validator_stack_hotkey"
+        in CANARY_VALIDATION
+    )
     for line in (
         "VALIDATOR_CODING_CANARY_ENABLED={{ 'true' if "
-        "validator_stack_coding_canary_enabled | bool else 'false' }}",
+        "coding_canary_enabled else 'false' }}",
+        "VALIDATOR_CODING_CANARY_AGENT_IDS={{ "
+        "validator_stack_coding_canary_agent_ids | join(',') if "
+        "coding_canary_enabled else '' }}",
+        "VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY={{ "
+        "validator_stack_coding_canary_validator_hotkey if "
+        "coding_canary_enabled else '' }}",
         "DITTOBENCH_CODING_CANARY_ENABLED={{ 'true' if "
         "dittobench_coding_canary_enabled else 'false' }}",
         "DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST={{ "
         "validator_stack_coding_runtime_image_digest if "
+        "dittobench_coding_canary_enabled else '' }}",
+        "DITTOBENCH_CODING_DOCKER_HOST={{ "
+        "validator_stack_coding_docker_host if "
         "dittobench_coding_canary_enabled else '' }}",
     ):
         assert line in ENVIRONMENT
