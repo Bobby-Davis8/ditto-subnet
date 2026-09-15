@@ -41,11 +41,13 @@ set it. Direct ansible-playbook invocation is unsupported.
 # ruff: noqa: E402
 import sys
 
-# Python puts this script's directory first on sys.path, ahead of the standard
-# library, so an untracked json.py or ansible/ beside the script would be
-# imported before the checkout is verified. Drop it before any other import.
-_SCRIPT_DIRECTORY = __file__.rpartition("/")[0]
-sys.path[:] = [entry for entry in sys.path if entry not in ("", _SCRIPT_DIRECTORY)]
+# Run as a script, Python puts the script's directory (symlinks resolved) first
+# on sys.path, ahead of the standard library, so an untracked json.py or
+# ansible/ beside the script would be imported before the checkout is verified.
+# Drop that entry, whatever path spelling it has, before any other import.
+if __name__ == "__main__" and not sys.flags.safe_path and sys.path:
+    del sys.path[0]
+sys.path[:] = [entry for entry in sys.path if entry not in ("", ".")]
 
 import hashlib
 import json
