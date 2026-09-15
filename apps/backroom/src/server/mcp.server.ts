@@ -157,10 +157,10 @@ import {
   fetchLeaseRevocations,
   batchRetryValidation,
   fetchAgentScoringReadiness,
-  fetchAgentCodingCertifications,
+  fetchAgentCodingCertificationsWithLeases,
   fetchCodingCatalogReleases,
   fetchCodingPrivateV2Releases,
-  fetchCodingControlPlane,
+  fetchCodingControlPlaneWithCertification,
   registerCodingPrivateV2Release,
   quarantineCodingPrivateV2Release,
   retireCodingPrivateV2Release,
@@ -1450,11 +1450,11 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Inspect agent coding certifications',
       description:
-        'Shadow coding-capability receipts for one agent UUID, plus certification_leases: that agent\'s newest certification lease rows (status issued | claimed | completed | aborted | expired, where completed means the receipt was accepted and is terminal; deadline, receipt_window_ends_at, deadline_passed on the Platform clock, claim_allowlist_revision, aborted_allowlist_revision, grant and receipt status; never grant ids, bearer digests, broker keys, or image locators). An overdue lease keeps its stored status until Platform next touches it. weight_eligible is always false; never feeds ranking or Tool+Memory scores. Requires backroom:read.',
+        'Shadow coding-capability receipts for one agent UUID, plus certification_leases: that agent\'s newest 10 certification lease rows, or {available:false,error} when that audit is unavailable (status issued | claimed | completed | aborted | expired, where completed means the receipt was accepted and is terminal; deadline, receipt_window_ends_at, deadline_passed on the Platform clock, claim_allowlist_revision, aborted_allowlist_revision, grant and receipt status; never grant ids, bearer digests, broker keys, or image locators). An overdue lease keeps its stored status until Platform next touches it. weight_eligible is always false; never feeds ranking or Tool+Memory scores. Requires backroom:read.',
       inputSchema: agentCodingCertificationInputSchema,
       annotations: toolAnnotations('read'),
     },
-    async (input) => result(await fetchAgentCodingCertifications(input)),
+    async (input) => result(await fetchAgentCodingCertificationsWithLeases(input)),
   )
 
   registerTool(
@@ -1486,11 +1486,11 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get unified Coding control-plane state',
       description:
-        'Read the contract-v1 catalog and distinct native private-v2 registry in one bounded snapshot, plus the strict contract-v1 certification allowlist (certification_allowlist: enabled, effective refuse_all | exact_tuples, integrity valid | invalid, current revision where 0 is the built-in refuse-all default, and newest-first history up to limit) and the newest certification lease rows across agents (certification_leases). Reports permanent shadow and weight-zero flags. It does not establish fresh provider access, key custody, host qualification, canary completion or rollout approval and performs no mutation.',
+        'Read the contract-v1 catalog and distinct native private-v2 registry in one bounded snapshot, plus the strict contract-v1 certification canary state: certification_allowlist (enabled, effective refuse_all | exact_tuples, integrity valid | invalid, and the current revision, where 0 is the built-in refuse-all default; no history) and certification_leases (the newest 10 lease rows across agents). Each is {available:false,error} instead when Platform cannot serve it; the rest of the snapshot is unaffected. Reports permanent shadow and weight-zero flags. It does not establish fresh provider access, key custody, host qualification, canary completion or rollout approval and performs no mutation.',
       inputSchema: getCodingCatalogInputSchema,
       annotations: toolAnnotations('read'),
     },
-    async (input) => result(await fetchCodingControlPlane(input)),
+    async (input) => result(await fetchCodingControlPlaneWithCertification(input)),
   )
 
   registerTool(

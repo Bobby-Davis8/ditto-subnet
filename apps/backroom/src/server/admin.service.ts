@@ -2185,16 +2185,22 @@ export async function fetchAgentScoringReadiness(rawInput: unknown) {
 
 export async function fetchAgentCodingCertifications(rawInput: unknown) {
   const input = agentCodingCertificationInputSchema.parse(rawInput)
-  const [payload, certificationLeases] = await Promise.all([
-    platformAdminRequest(
-      `/api/v1/admin/agents/${encodeURIComponent(input.agentId)}/coding-certifications?limit=${input.limit}`,
-    ),
-    fetchCodingCertificationLeases({ agentId: input.agentId, limit: input.limit }),
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/agents/${encodeURIComponent(input.agentId)}/coding-certifications?limit=${input.limit}`,
+  )
+  return agentCodingCertificationStatusSchema.parse(payload)
+}
+
+// The MCP certification read also carries that agent's newest lease rows. They
+// are a bounded, non-fatal addition: a missing or failing lease audit never
+// hides the receipts.
+export async function fetchAgentCodingCertificationsWithLeases(rawInput: unknown) {
+  const input = agentCodingCertificationInputSchema.parse(rawInput)
+  const [certifications, certificationLeases] = await Promise.all([
+    fetchAgentCodingCertifications(input),
+    fetchCodingCertificationLeaseSummary({ agentId: input.agentId }),
   ])
-  return {
-    ...agentCodingCertificationStatusSchema.parse(payload),
-    certification_leases: certificationLeases,
-  }
+  return { ...certifications, certification_leases: certificationLeases }
 }
 
 export async function fetchCodingCatalogReleases(rawInput: unknown) {
@@ -2217,23 +2223,38 @@ export async function fetchCodingPrivateV2Releases(rawInput: unknown) {
 export async function fetchCodingControlPlane(rawInput: unknown) {
   const input = getCodingCatalogInputSchema.parse(rawInput)
   type NativeControl = PlatformOperations['get_coding_control_plane_api_v1_admin_coding_control_plane_get']['responses'][200]['content']['application/json']
-  const [catalog, privateV2, native, certificationAllowlist, certificationLeases] =
-    await Promise.all([
-      fetchCodingCatalogReleases(input),
-      fetchCodingPrivateV2Releases(input),
-      platformAdminRequest(`/api/v1/admin/coding-control-plane?limit=${input.limit}`)
-        .then((payload) => codingNativeControlStatusSchema.parse(payload) satisfies NativeControl),
-      fetchCodingCertificationAllowlist(input.limit),
-      fetchCodingCertificationLeases({ limit: input.limit }),
-    ])
+  const [catalog, privateV2, native] = await Promise.all([
+    fetchCodingCatalogReleases(input),
+    fetchCodingPrivateV2Releases(input),
+    platformAdminRequest(`/api/v1/admin/coding-control-plane?limit=${input.limit}`)
+      .then((payload) => codingNativeControlStatusSchema.parse(payload) satisfies NativeControl),
+  ])
   return {
     catalog,
     private_v2: privateV2,
     native,
-    certification_allowlist: certificationAllowlist,
-    certification_leases: certificationLeases,
     shadow_only: true as const,
     weight_eligible: false as const,
+  }
+}
+
+// The MCP control-plane read also carries the certification canary state: the
+// current allowlist revision (no history) and the newest lease rows. Both are
+// bounded and non-fatal, so a Platform without these endpoints, or one that
+// fails them, still returns the Coding control plane.
+export async function fetchCodingControlPlaneWithCertification(rawInput: unknown) {
+  const [control, certificationAllowlist, certificationLeases] = await Promise.all([
+    fetchCodingControlPlane(rawInput),
+    fetchCodingCertificationAllowlistSummary(),
+    fetchCodingCertificationLeaseSummary({}),
+  ])
+  const { shadow_only: shadowOnly, weight_eligible: weightEligible, ...rest } = control
+  return {
+    ...rest,
+    certification_allowlist: certificationAllowlist,
+    certification_leases: certificationLeases,
+    shadow_only: shadowOnly,
+    weight_eligible: weightEligible,
   }
 }
 
@@ -2402,11 +2423,32 @@ export async function setCoreQualificationPolicy(rawInput: unknown, actor: strin
 
 const CODING_CERTIFICATION_ALLOWLIST_PATH = '/api/v1/admin/coding-certification-allowlist'
 
-async function fetchCodingCertificationAllowlist(historyLimit: number) {
-  const payload = await platformAdminRequest(
-    `${CODING_CERTIFICATION_ALLOWLIST_PATH}?history_limit=${historyLimit}`,
-  )
-  return codingCertificationAllowlistControlSchema.parse(payload)
+export const CODING_CERTIFICATION_EMBEDDED_LEASE_LIMIT = 10
+
+type CodingCertificationUnavailable = { available: false; error: string }
+
+async function codingCertificationSection<T extends Record<string, unknown>>(
+  read: () => Promise<T>,
+): Promise<({ available: true } & T) | CodingCertificationUnavailable> {
+  try {
+    return { available: true, ...(await read()) }
+  } catch (cause) {
+    return {
+      available: false,
+      error: cause instanceof Error ? cause.message : 'unavailable',
+    }
+  }
+}
+
+function fetchCodingCertificationAllowlistSummary() {
+  return codingCertificationSection(async () => {
+    const payload = await platformAdminRequest(
+      `${CODING_CERTIFICATION_ALLOWLIST_PATH}?history_limit=0`,
+    )
+    const { history: _history, ...current } =
+      codingCertificationAllowlistControlSchema.parse(payload)
+    return current
+  })
 }
 
 export async function setCodingCertificationAllowlist(rawInput: unknown, actor: string) {
@@ -2426,16 +2468,18 @@ export async function setCodingCertificationAllowlist(rawInput: unknown, actor: 
   return codingCertificationAllowlistApplySchema.parse(payload)
 }
 
-// Newest-first certification lease audit rows, read inside the existing Coding
+// The newest certification lease audit rows, read inside the existing Coding
 // reads rather than through their own catalog tools.
-async function fetchCodingCertificationLeases(input: { agentId?: string; limit: number }) {
-  const query = new URLSearchParams()
-  if (input.agentId) query.set('agent_id', input.agentId)
-  query.set('limit', String(input.limit))
-  const payload = await platformAdminRequest(
-    `/api/v1/admin/coding-certification-leases?${query}`,
-  )
-  return codingCertificationLeaseListSchema.parse(payload)
+function fetchCodingCertificationLeaseSummary(input: { agentId?: string }) {
+  return codingCertificationSection(async () => {
+    const query = new URLSearchParams()
+    if (input.agentId) query.set('agent_id', input.agentId)
+    query.set('limit', String(CODING_CERTIFICATION_EMBEDDED_LEASE_LIMIT))
+    const payload = await platformAdminRequest(
+      `/api/v1/admin/coding-certification-leases?${query}`,
+    )
+    return codingCertificationLeaseListSchema.parse(payload)
+  })
 }
 
 export async function fetchAgentCoreQualification(rawInput: unknown) {
