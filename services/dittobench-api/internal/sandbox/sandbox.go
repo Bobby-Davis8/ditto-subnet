@@ -592,6 +592,16 @@ func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 	return d.runArgsForNetwork(image, env, d.EgressNetwork, "")
 }
 
+// ProbeRunArgs returns the exact `docker run` argument vector the production
+// harness launch uses for image and env, naming and labelling the container
+// with identity so a caller can reclaim exactly it. It exists so the
+// native-enforcement probe runner reuses this spec (65532:65532, read-only,
+// --pids-limit, --ulimit nofile, 8 MiB local log) rather than reimplementing
+// it; the returned vector is the same one Run passes to docker.
+func (d *LocalDocker) ProbeRunArgs(image string, env map[string]string, identity string) []string {
+	return d.runArgsForNetwork(image, env, d.EgressNetwork, identity)
+}
+
 func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, network string, identity string) []string {
 	args := []string{
 		// Do not use --rm: Docker would erase an OOM-killed container before the
