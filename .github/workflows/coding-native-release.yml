@@ -7,6 +7,11 @@ on:
       - infra/scripts/inspect-coding-native-host.py
       - infra/scripts/coding-native-evidence.py
       - services/dittobench-api/internal/codingenforcement/**
+      - services/dittobench-api/internal/sandbox/sandbox.go
+      - services/dittobench-api/internal/codingexecutor/**
+      - services/dittobench-api/internal/codinggrader/types.go
+      - services/dittobench-api/internal/codinghostedworker/grading.go
+      - infra/ansible/roles/coding_hosted_connectivity/files/connectivity-policy.py
       - infra/scripts/build-coding-hosted-runtime.py
       - infra/ansible/roles/coding_hosted_image/files/image-bundle.py
       - infra/ansible/roles/coding_hosted_runtime/files/runtime-bundle.py
