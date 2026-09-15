@@ -28,8 +28,13 @@ func TestEnforcementImagesVectorAgreesWithPython(t *testing.T) {
 		t.Fatalf("digest = %s", images.SHA256)
 	}
 	rust := images.Images["rust"]
-	if !slices.Contains(rust.TestArgv["hidden"], "--crate") || slices.Equal(rust.BuildArgv, images.Images["go"].BuildArgv) {
+	if !slices.Contains(rust.TestArgv["hidden"], "--authority") || slices.Equal(rust.BuildArgv, images.Images["go"].BuildArgv) {
 		t.Fatalf("per-language commands were not kept: %+v", rust)
+	}
+	for group, argv := range vector["rust_test_argv"].(map[string]any) {
+		if !slices.Equal(rust.TestArgv[group], vectorArgv(argv)) || !RustTestArgv(vectorArgv(argv), group) {
+			t.Errorf("rust %s vector command = %v", group, rust.TestArgv[group])
+		}
 	}
 	if _, err := ParseEnforcementImages([]byte(vector["noncanonical"].(string))); err == nil {
 		t.Error("non-canonical document accepted")
@@ -43,4 +48,13 @@ func TestEnforcementImagesVectorAgreesWithPython(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
+}
+
+func vectorArgv(value any) []string {
+	items := value.([]any)
+	result := make([]string, len(items))
+	for index, item := range items {
+		result[index] = item.(string)
+	}
+	return result
 }

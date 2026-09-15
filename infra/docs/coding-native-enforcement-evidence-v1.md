@@ -94,7 +94,13 @@ keys:
   `test_argv` for `hidden` and `visible`.
   - Every argv is 1 to 64 printable arguments with a bare non-shell executable.
   - Test commands must use `dittobench-test-driver`.
-  - Rust-specific arguments are allowed only because they are recorded here.
+  - Rust-specific arguments are allowed only because they are recorded here,
+    and they are verified: each Rust test command must be the Rust driver's
+    authority command, `dittobench-test-driver --group <its own group>
+    --authority <relative .json path> --authority-sha256 <hex>`. This mirrors
+    `codingexecutor.rustCommand`, which refuses any other Rust test command,
+    so a Rust entry the executor could never run is refused offline. A Go test
+    checks the offline check against `rustCommand` on the shared vector.
 
 Resource and pre-exec records carry the set's digest as
 `inputs.enforcement_images_sha256`. The verifier requires:

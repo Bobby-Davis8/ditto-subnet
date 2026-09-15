@@ -88,8 +88,8 @@ func TestEnforcementProbeManifestUsesTheHostedConversion(t *testing.T) {
 		ImageDigest: "sha256:" + strings.Repeat("d", 64),
 		BuildArgv:   []string{"cargo", "build", "--offline"},
 		TestArgv: map[string][]string{
-			"hidden":  {"dittobench-test-driver", "--group", "hidden", "--crate", "subject"},
-			"visible": {"dittobench-test-driver", "--group", "visible", "--crate", "subject"},
+			"hidden":  {"dittobench-test-driver", "--group", "hidden", "--authority", "rust/hidden.json", "--authority-sha256", strings.Repeat("a", 64)},
+			"visible": {"dittobench-test-driver", "--group", "visible", "--authority", "rust/visible.json", "--authority-sha256", strings.Repeat("b", 64)},
 		},
 	}
 	manifest, err := profile.EnforcementProbeManifest(image, time.Now().Add(30*time.Minute))

@@ -246,6 +246,20 @@ CONNECTIVITY_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 
+def rust_test_argv(group: str, authority: str = "") -> list[str]:
+    """The Rust driver's authority command (codingexecutor.rustCommand)."""
+
+    return [
+        "dittobench-test-driver",
+        "--group",
+        group,
+        "--authority",
+        authority or f"rust/{group}-authority.json",
+        "--authority-sha256",
+        digest(f"rust {group} authority"),
+    ]
+
+
 def enforcement_images_value() -> dict:
     """Every released image; python is the profile's own, with its commands."""
 
@@ -255,14 +269,18 @@ def enforcement_images_value() -> dict:
             ["--package-path", "example.invalid/subject"],
         ),
         "node": (["node", "--check", "subject.js"], ["--module", "subject.js"]),
-        "rust": (["cargo", "build", "--offline"], ["--crate", "subject"]),
+        "rust": (["cargo", "build", "--offline"], None),
     }
     images = {
         language: {
             "image_digest": "sha256:" + digest(language + "-manifest"),
             "build_argv": build,
             "test_argv": {
-                group: ["dittobench-test-driver", "--group", group, *extra]
+                group: (
+                    rust_test_argv(group)
+                    if extra is None
+                    else ["dittobench-test-driver", "--group", group, *extra]
+                )
                 for group in ("hidden", "visible")
             },
         }
@@ -2449,7 +2467,7 @@ def test_enforcement_images_vector_agrees_with_go():
     valid = ENFORCEMENT_VECTOR["valid"].encode()
     parsed = EVIDENCE.parse_enforcement_images(valid)
     assert parsed["sha256"] == ENFORCEMENT_VECTOR["valid_sha256"]
-    assert "--crate" in parsed["images"]["rust"]["test_argv"]["hidden"]
+    assert parsed["images"]["rust"]["test_argv"] == ENFORCEMENT_VECTOR["rust_test_argv"]
     with pytest.raises(EVIDENCE.Refusal, match="not canonical"):
         EVIDENCE.parse_enforcement_images(ENFORCEMENT_VECTOR["noncanonical"].encode())
     assert len(ENFORCEMENT_VECTOR["refused"]) >= 10
@@ -2477,9 +2495,51 @@ def test_each_language_keeps_its_own_recorded_commands(world):
     argvs = [tuple(image["test_argv"]["hidden"]) for image in value["images"].values()]
     assert len(set(argvs)) == len(argvs), "no argv is forced to be common"
     assert write_images(world, value) is None
-    # Rust-specific arguments are fine when they are pinned in the image set.
-    value["images"]["rust"]["test_argv"]["visible"] += ["--out-dir", "/out"]
+    # Rust-specific arguments are fine when they are pinned in the image set
+    # and are the Rust driver's own authority command.
+    value["images"]["rust"]["test_argv"]["visible"] = rust_test_argv(
+        "visible", "rust/fixtures/visible-authority.json"
+    )
     assert write_images(world, value) is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # A command the production Rust executor refuses is never what ran.
+        ["dittobench-test-driver", "--group", "visible", "--crate", "subject"],
+        ["dittobench-test-driver", "visible"],
+        [*rust_test_argv("visible"), "--out-dir", "/out"],
+        rust_test_argv("hidden"),
+        rust_test_argv("visible", "/rust/visible-authority.json"),
+        rust_test_argv("visible", "rust/../visible-authority.json"),
+        rust_test_argv("visible", ".rust/visible-authority.json"),
+        rust_test_argv("visible", "rust/visible-authority.txt"),
+        rust_test_argv("visible", "/".join(["d"] * 8) + "/a.json"),
+        [*rust_test_argv("visible")[:3], "--group", *rust_test_argv("visible")[4:]],
+        [*rust_test_argv("visible")[:6], digest("x").upper()],
+    ],
+)
+def test_rust_test_commands_must_be_the_driver_authority_command(argv):
+    value = enforcement_images_value()
+    EVIDENCE.parse_enforcement_images(EVIDENCE.canonical_bytes(value))
+    value["images"]["rust"]["test_argv"]["visible"] = argv
+    with pytest.raises(EVIDENCE.Refusal, match="not the Rust driver authority command"):
+        EVIDENCE.parse_enforcement_images(EVIDENCE.canonical_bytes(value))
+
+
+def test_rust_test_command_vector_agrees_with_go():
+    for group, argv in ENFORCEMENT_VECTOR["rust_test_argv"].items():
+        EVIDENCE._rust_test_argv(argv, group, "vector")
+    for name, document in ENFORCEMENT_VECTOR["refused"].items():
+        if name.startswith("rust "):
+            with pytest.raises(EVIDENCE.Refusal, match="Rust driver authority"):
+                EVIDENCE.parse_enforcement_images(document.encode())
+    go_test = (
+        ROOT / "services/dittobench-api/internal/codingexecutor/"
+        "rust_enforcement_vector_test.go"
+    ).read_text()
+    assert "rustCommand" in go_test and "RustTestArgv" in go_test
 
 
 @pytest.mark.parametrize(
@@ -2505,6 +2565,7 @@ def test_each_language_keeps_its_own_recorded_commands(world):
         ),
         (
             # Identical argv passes only because each language records it.
+            # Rust is excluded: its driver runs only its authority command.
             lambda v: (
                 [
                     image.update(
@@ -2513,7 +2574,8 @@ def test_each_language_keeps_its_own_recorded_commands(world):
                             for group in ("hidden", "visible")
                         }
                     )
-                    for image in v["images"].values()
+                    for language, image in v["images"].items()
+                    if language != "rust"
                 ]
                 and None
             ),

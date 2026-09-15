@@ -92,6 +92,9 @@ func ParseEnforcementImages(raw []byte) (EnforcementImages, error) {
 			if parsed.TestArgv[group], ok = argv(tests[group], true); !ok {
 				return EnforcementImages{}, errEnforcement
 			}
+			if language == "rust" && !RustTestArgv(parsed.TestArgv[group], group) {
+				return EnforcementImages{}, errEnforcement
+			}
 		}
 		result.Images[language] = parsed
 	}
@@ -118,4 +121,36 @@ func argv(value any, test bool) ([]string, bool) {
 		return nil, false
 	}
 	return result, true
+}
+
+var rustAuthorityPart = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+
+// RustTestArgv reports whether argv is the production Rust driver's authority
+// command for group: `dittobench-test-driver` with exactly --group,
+// --authority (a bounded relative .json path) and --authority-sha256. It
+// mirrors codingexecutor's rustCommand, which refuses any other Rust test
+// command, and additionally requires --group to name the slot it is pinned in.
+func RustTestArgv(argv []string, group string) bool {
+	if len(argv) != 7 || argv[0] != TrustedTestDriver {
+		return false
+	}
+	fields := map[string]string{}
+	for index := 1; index < len(argv); index += 2 {
+		if _, repeated := fields[argv[index]]; repeated {
+			return false
+		}
+		fields[argv[index]] = argv[index+1]
+	}
+	authority, digest := fields["--authority"], fields["--authority-sha256"]
+	parts := strings.Split(authority, "/")
+	if len(fields) != 3 || fields["--group"] != group || authority == "" || len(authority) > 240 ||
+		!strings.HasSuffix(authority, ".json") || len(parts) > 8 || !sha256Hex.MatchString(digest) {
+		return false
+	}
+	for _, part := range parts {
+		if !rustAuthorityPart.MatchString(part) {
+			return false
+		}
+	}
+	return true
 }

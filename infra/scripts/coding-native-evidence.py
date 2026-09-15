@@ -87,6 +87,9 @@ GENERAL_SHELLS = (
     "zsh",
 )
 TRUSTED_TEST_DRIVER = "dittobench-test-driver"
+# codingexecutor.rustCommand: the Rust driver runs only this exact authority argv.
+RUST_TEST_FLAGS = ("--authority", "--authority-sha256", "--group")
+RUST_AUTHORITY_PART = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 # Peyton, 2026-09-15: every collection record falls within six hours of the
 # approval's issued_at, on one machine and one boot.
 FRESHNESS_SECONDS = 21600
@@ -1091,6 +1094,31 @@ def _argv(value: object, label: str, *, test: bool) -> list[str]:
     return value
 
 
+def _rust_test_argv(argv: list[str], group: str, label: str) -> list[str]:
+    """The production Rust driver's authority argv, naming its own test group.
+
+    Mirrors ``codingexecutor.rustCommand``: the Rust executor refuses any other
+    test command, so a Rust entry that differs is never the command that ran.
+    """
+
+    flags, values = argv[1::2], argv[2::2]
+    fields = dict(zip(flags, values, strict=False))
+    authority = fields.get("--authority", "")
+    parts = authority.split("/")
+    require(
+        len(argv) == 7
+        and sorted(flags) == list(RUST_TEST_FLAGS)
+        and fields["--group"] == group
+        and 0 < len(authority) <= 240
+        and authority.endswith(".json")
+        and len(parts) <= 8
+        and all(RUST_AUTHORITY_PART.fullmatch(part) for part in parts)
+        and SHA256.fullmatch(fields["--authority-sha256"]) is not None,
+        f"{label} argv is not the Rust driver authority command",
+    )
+    return argv
+
+
 def parse_enforcement_images(raw: bytes) -> dict[str, Any]:
     """The pinned per-language probe image set; Go parses the same vector."""
 
@@ -1126,13 +1154,17 @@ def parse_enforcement_images(raw: bytes) -> dict[str, Any]:
         tests = closed(
             entry["test_argv"], set(HOSTED_TEST_GROUPS), f"{language} test commands"
         )
+        test_argv = {
+            group: _argv(tests[group], f"{language} {group} test", test=True)
+            for group in HOSTED_TEST_GROUPS
+        }
+        if language == "rust":
+            for group, argv in test_argv.items():
+                _rust_test_argv(argv, group, f"rust {group} test")
         parsed[language] = {
             "image_digest": digest,
             "build_argv": _argv(entry["build_argv"], f"{language} build", test=False),
-            "test_argv": {
-                group: _argv(tests[group], f"{language} {group} test", test=True)
-                for group in HOSTED_TEST_GROUPS
-            },
+            "test_argv": test_argv,
         }
     digests = [item["image_digest"] for item in parsed.values()]
     require(
