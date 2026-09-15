@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from ditto.validator import coding_certification_socket
 from ditto.validator.coding_canary_runtime import CodingCanaryRuntime
 from ditto.validator.coding_certification_socket import (
     CERTIFICATION_ORIGIN,
@@ -22,6 +23,7 @@ from ditto.validator.coding_certification_socket import (
     CertificationSocketError,
     CertificationSocketIdentity,
     CertificationSocketTransport,
+    _safe_ancestor,
     _VerifiedUnixBackend,
     verify_certification_socket,
 )
@@ -231,6 +233,63 @@ async def test_socket_swapped_during_connect_is_refused_before_any_byte(
         finally:
             other.close()
     assert server.received == [b""]
+
+
+async def test_unexpected_walk_failure_is_a_refused_socket(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failure of the walk other than CertificationSocketError (for example
+    # fstat) must still surface as a refused connection, never an unmapped error.
+    def failing_walk(_identity: CertificationSocketIdentity) -> tuple[int, int]:
+        raise OSError(5, "Input/output error")
+
+    async with _serve(short_root) as server:
+        monkeypatch.setattr(
+            coding_certification_socket, "verify_certification_socket", failing_walk
+        )
+        with pytest.raises(httpx.ConnectError, match="socket refused"):
+            await _get(CertificationSocketTransport(server.identity()))
+    assert server.connections == 0
+
+
+def _stat(uid: int, mode: int) -> os.stat_result:
+    return os.stat_result((mode, 1, 1, 2, uid, 0, 0, 0, 0, 0))
+
+
+def test_ancestor_must_be_owned_by_root_or_the_pinned_uid() -> None:
+    directory = 0o040755
+    assert _safe_ancestor(_stat(0, directory), _UID)
+    assert _safe_ancestor(_stat(_UID, directory), _UID)
+    # Another user's directory, even when not group or other writable, could be
+    # renamed or replaced by that user.
+    assert not _safe_ancestor(_stat(_UID + 1, directory), _UID)
+    assert not _safe_ancestor(_stat(_UID, 0o040775), _UID)
+    assert _safe_ancestor(_stat(0, 0o041777), _UID)
+    assert not _safe_ancestor(_stat(_UID, 0o041777), _UID)
+    assert not _safe_ancestor(_stat(0, 0o100755), _UID)
+
+
+async def test_socket_directory_group_is_pinned_independently(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _serve(short_root) as server:
+        target = server.directory.stat().st_ino
+        real_fstat = os.fstat
+
+        def other_group_directory(fd: int) -> os.stat_result:
+            value = real_fstat(fd)
+            if value.st_ino != target:
+                return value
+            fields = list(value[:10])
+            fields[5] = _GID + 1
+            return os.stat_result(fields)
+
+        # Only the directory's group differs; the socket entry still matches.
+        monkeypatch.setattr(os, "fstat", other_group_directory)
+        with pytest.raises(CertificationSocketError):
+            verify_certification_socket(server.identity())
+        monkeypatch.undo()
+        verify_certification_socket(server.identity())
 
 
 async def test_backend_never_dials_tcp_or_another_path(short_root: Path) -> None:
