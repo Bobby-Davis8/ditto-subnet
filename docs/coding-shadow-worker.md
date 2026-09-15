@@ -250,7 +250,9 @@ false, and every target list ships empty.
     poll interval, `validator_stack_coding_canary_agent_ids`, and
     `validator_stack_coding_canary_validator_hotkey`. It requires the scorer
     switch, the dedicated daemon endpoint, and 1 to 16 exact targets bound to
-    `validator_stack_hotkey`.
+    `validator_stack_hotkey`. With the host certification service, the role
+    refuses this switch outright until it renders the certification socket
+    route (`infra/docs/coding-certification-service.md`).
 
   Validation runs before any host mutation. Stage the scorer switch first. Then
   confirm two things before turning on the validator switch: the scorer stays

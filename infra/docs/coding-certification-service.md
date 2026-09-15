@@ -176,8 +176,10 @@ uvx --from ansible-core==2.21.2 ansible-playbook --check -i localhost, tests/cod
 - Materializing the control token on the host or in the validator environment.
 - Mounting `/run/ditto-coding-certification` into the validator container and
   rendering the new `VALIDATOR_CODING_CERTIFICATION_*` variables in
-  `validator_stack`. Enabling the validator canary without them fails closed at
-  configuration.
+  `validator_stack`. Until then `validator_stack` refuses
+  `validator_stack_coding_canary_enabled: true` during input validation,
+  before any host change. Without that refusal the validator would exit at
+  startup and stop ordinary scoring too.
 - Preloading the reviewed runtime image, and stale-resource cleanup on the
   dedicated daemon.
 - A time-bounded authority window on the router listener: unlike the one-shot
