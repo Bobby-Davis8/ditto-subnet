@@ -10,10 +10,20 @@ Default-off safety changes for the shadow contract-v1 certification path.
    ``expired`` while keeping its ``claimed_at`` audit timestamp, so one
    post-claim failure no longer holds the in-flight unique slot for that exact
    agent, artifact, image, and benchmark forever. A lease whose receipt was
-   accepted becomes ``completed``, which is terminal and never expires. Existing
-   claimed leases that already carry a receipt are backfilled to ``completed``.
-   An allowlist revision may abort an in-flight lease, including a claimed one,
+   accepted becomes ``completed``, which is terminal and never expires. An
+   allowlist revision may abort an in-flight lease, including a claimed one,
    and records itself in ``aborted_allowlist_revision``.
+
+   Renewal. Issue refuses an identity only while one of its accepted receipts
+   (``coding_capability_certifications.expires_at``) is still valid on the
+   database clock, not forever. The check reads receipts by identity, so legacy
+   receipts need no new linkage: a pre-lease receipt (``lease_id IS NULL``) and
+   a receipt whose lease is not ``claimed`` block exactly while they are valid.
+
+   Legacy normalization (deterministic, no row deleted): every lease that
+   carries a receipt and was left ``claimed`` (or, after a downgrade of this
+   revision, ``expired`` with ``claimed_at``) becomes ``completed``. The upgrade
+   logs an audit of the legacy receipt rows it found.
 
 2. ``coding_certification_allowlist_revisions`` is an append-only, strict
    operator setting. No row refuses every certification lease, claim, harness,
@@ -26,6 +36,7 @@ Default-off safety changes for the shadow contract-v1 certification path.
 The table is small, is not a hot table, and no trigger on it changes.
 """
 
+import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -168,13 +179,17 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
 
+    _audit_legacy_receipts()
     # A lease whose receipt Platform already accepted is terminal. Before this
-    # revision such a lease simply stayed ``claimed``.
+    # revision such a lease simply stayed ``claimed``; a downgrade of this
+    # revision may also have left one ``expired`` with its ``claimed_at``. An
+    # unclaimed lease cannot carry an accepted receipt, and is left untouched.
     op.execute(
         """
         UPDATE coding_certification_leases AS lease
         SET status = 'completed'
-        WHERE lease.status = 'claimed'
+        WHERE lease.status IN ('claimed', 'expired')
+          AND lease.claimed_at IS NOT NULL
           AND EXISTS (
               SELECT 1 FROM coding_capability_certifications AS receipt
               WHERE receipt.lease_id = lease.lease_id
@@ -192,6 +207,56 @@ def upgrade() -> None:
     )
 
 
+def _audit_legacy_receipts() -> None:
+    """Log, before normalizing, the receipt rows the renewal rule reads.
+
+    Read-only and deterministic apart from ``valid_now``, which uses the
+    database clock exactly as issue does. Identifiers and digests are never
+    logged, only counts.
+    """
+
+    row = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                """
+                SELECT
+                    count(*) FILTER (WHERE receipt.lease_id IS NULL)
+                        AS without_lease,
+                    count(*) FILTER (
+                        WHERE receipt.lease_id IS NULL
+                          AND receipt.expires_at > clock_timestamp()
+                    ) AS without_lease_valid_now,
+                    count(*) FILTER (
+                        WHERE lease.status = 'claimed'
+                    ) AS claimed_lease_to_complete,
+                    count(*) FILTER (
+                        WHERE receipt.lease_id IS NOT NULL
+                          AND lease.status <> 'claimed'
+                    ) AS lease_not_claimed,
+                    count(*) FILTER (
+                        WHERE receipt.expires_at > clock_timestamp()
+                    ) AS valid_now
+                FROM coding_capability_certifications AS receipt
+                LEFT JOIN coding_certification_leases AS lease
+                    ON lease.lease_id = receipt.lease_id
+                """
+            )
+        )
+        .one()
+    )
+    logging.getLogger("alembic.runtime.migration").info(
+        "coding certification receipt audit: %d without a lease (%d still "
+        "valid), %d claimed leases normalized to completed, %d on a lease that "
+        "is not claimed, %d still blocking renewal",
+        row.without_lease,
+        row.without_lease_valid_now,
+        row.claimed_lease_to_complete,
+        row.lease_not_claimed,
+        row.valid_now,
+    )
+
+
 def downgrade() -> None:
     """Restore the prior schema. This is not a safe rollback for a live canary.
 
@@ -203,9 +268,45 @@ def downgrade() -> None:
     op.drop_constraint(_CLAIM_ALLOWLIST, _TABLE, type_="check")
     op.drop_constraint(_LIFECYCLE, _TABLE, type_="check")
     op.drop_constraint(_STATUS, _TABLE, type_="check")
-    # The prior schema represented a receipted lease as ``claimed``.
+    # The prior schema represented a receipted lease as ``claimed``, but its
+    # in-flight unique index admits one ``issued`` or ``claimed`` lease per
+    # identity, and renewal can leave several completed leases, or a completed
+    # lease beside a new in-flight one. Restore ``claimed`` for the newest
+    # completed lease of an identity with nothing in flight; every other
+    # completed lease becomes ``expired`` keeping ``claimed_at`` (the restored
+    # lifecycle CHECK is NOT VALID). The prior code still refuses the identity
+    # from its receipt rows, and a later upgrade maps both back to ``completed``.
     op.execute(
-        "UPDATE coding_certification_leases SET status = 'claimed' "
+        """
+        UPDATE coding_certification_leases
+        SET status = 'claimed'
+        WHERE lease_id IN (
+            SELECT DISTINCT ON (
+                lease.agent_id, lease.artifact_sha256,
+                lease.screened_image_sha256, lease.bench_version,
+                lease.coding_contract_version
+            ) lease.lease_id
+            FROM coding_certification_leases AS lease
+            WHERE lease.status = 'completed'
+              AND NOT EXISTS (
+                  SELECT 1 FROM coding_certification_leases AS other
+                  WHERE other.agent_id = lease.agent_id
+                    AND other.artifact_sha256 = lease.artifact_sha256
+                    AND other.screened_image_sha256 = lease.screened_image_sha256
+                    AND other.bench_version = lease.bench_version
+                    AND other.coding_contract_version
+                        = lease.coding_contract_version
+                    AND other.status IN ('issued', 'claimed')
+              )
+            ORDER BY lease.agent_id, lease.artifact_sha256,
+                lease.screened_image_sha256, lease.bench_version,
+                lease.coding_contract_version,
+                lease.claimed_at DESC, lease.lease_id DESC
+        )
+        """
+    )
+    op.execute(
+        "UPDATE coding_certification_leases SET status = 'expired' "
         "WHERE status = 'completed'"
     )
     # The prior schema cannot represent a claimed lease aborted by an allowlist
