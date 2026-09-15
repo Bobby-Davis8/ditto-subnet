@@ -634,8 +634,12 @@ def test_golden_record_is_pinned_in_both_languages():
     assert canonical(golden_record()) == raw
     assert hashlib.sha256(raw).hexdigest() == GOLDEN_RECORD_SHA256
     assert EVIDENCE.parse_record_envelope(raw)["kind"] == "cleanup_recovery"
-    go_test = (CATALOG_DIR / "canonical_test.go").read_text()
-    assert re.search(rf'goldenRecordSHA256\s*=\s*"{GOLDEN_RECORD_SHA256}"', go_test)
+    for go_test in (
+        CATALOG_DIR / "canonical_test.go",
+        CATALOG_DIR.parent / "probe/record_test.go",
+    ):
+        pinned = rf'goldenRecordSHA256\s*=\s*"{GOLDEN_RECORD_SHA256}"'
+        assert re.search(pinned, go_test.read_text()), go_test
 
 
 def test_canonical_vector_is_pinned_in_both_languages():
