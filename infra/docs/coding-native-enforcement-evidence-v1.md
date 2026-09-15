@@ -15,7 +15,8 @@ that no workflow except the offline regression job names these tools.
 
 `native.py` still checks the six evidence values only as nonzero digests. Their
 content is guaranteed only by this verifier plus Peyton's own review and
-signature.
+signature. The curator signature is checked here, offline. The host does not
+check it: see the host-side follow-up below.
 
 ## Record
 
@@ -30,7 +31,7 @@ there is no approval or readiness key. One record covers one `kind`:
 | `release` | `source_revision`, `release_manifest_sha256`, `runtime_archive_sha256`, `image_approval_sha256` for go, node, python and rust |
 | `pre_collection_preflight_sha256` | The preflight stdout taken before collection, retained in the store |
 | `inputs` | Per kind: the connectivity profile digest (network) or the execution/grading profile digests. Each must equal the document supplied to the verifier |
-| `endpoints` | Network only. Roles `router` and `refusing_proxy` (one each), `trusted` (1 to 32) and `trusted_dns` (0 to 2), each as `endpoint_sha256`. The set must equal the hashes derived from the connectivity profile |
+| `endpoints` | Network only. Roles `router` and `refusing_proxy` (one each, distinct), `trusted` (1 to 32) and `trusted_dns` (0 to 2), each as `endpoint_sha256`. The set must equal the hashes derived from the connectivity profile |
 | `tools` | `catalog_sha256`, `collector_sha256`, `evidence_tool_sha256`, `fixtures_sha256` |
 | `preconditions`, `residue` | Worker and custody inactive, no custody socket, zero containers, job networks, volumes and processes |
 | `phases` | Catalog phases in order, each with timestamps and its probes |
@@ -38,15 +39,34 @@ there is no approval or readiness key. One record covers one `kind`:
 | `tolerances_version`, `started_at_unix`, `completed_at_unix` | |
 
 A probe entry is `id`, `language` (or null), `endpoint_sha256` (or null),
-`expect` (copied from the catalog), `observed` and `matched`.
+`expect` (copied from the catalog), `observed` and `matched`. Trusted-endpoint
+probes carry one trusted hash each. Every `candidate.router.*` probe carries the
+router hash, and every `candidate.proxy.*` probe the proxy hash.
 
 Records never hold a raw address, credential or private input. Observed values
 are only integers, booleans, catalog outcome names and short lowercase names
 such as `lo`. An endpoint is identified only by
-`sha256("dittobench-coding-native-endpoint-v1\0" + connectivity_profile_sha256 + "\0" + list + "\0" + "address:port")`,
-where `list` is `trusted_tcp`, `trusted_dns` or `candidate_tcp`. The connectivity
-profile digest is the native canonical sha256 already used for rollout
-connectivity profiles; the profile itself never leaves the verifier.
+`sha256("dittobench-coding-native-endpoint-v1\0" + endpoint_set_sha256 + "\0" + list + "\0" + "address:port")`,
+where `list` is `trusted_tcp`, `trusted_dns` or `candidate_tcp`. The profile
+itself never leaves the verifier.
+
+Two connectivity digests are used:
+
+- `connectivity_profile_sha256`, in the record's `inputs`, is the native
+  canonical sha256 of the whole probe profile, the digest rollout connectivity
+  profiles already use.
+- `endpoint_set_sha256` is the canonical sha256 of
+  `{"schema": "dittobench-coding-native-endpoint-set-v1", "trusted_tcp",
+  "trusted_dns", "candidate_tcp", "trusted_loopback_tcp"}`, with each list
+  sorted by address and port. It drops the per-issue fields (`issued_at_unix`,
+  `expires_at_unix`) and the fields that do not change network authority
+  (`schema` v2/v3, `shadow_only`, `weight_eligible`).
+
+The probe profile must expire during collection, so it can never be the
+canary's own profile. A reissued canary profile with the same endpoints
+reproduces the endpoint-set digest, and the approval review pins that digest.
+`endpoint-set --connectivity-profile FILE` prints both digests and the endpoint
+counts for any profile, never its addresses.
 
 ## Approved profiles
 
@@ -56,9 +76,21 @@ connectivity profiles; the profile itself never leaves the verifier.
 - The execution and grading profiles must be their exact Go canonical bytes
   (sorted, compact, newline), and their sha256 must equal the record's
   `inputs`. Grading test groups are `hidden` then `visible`.
-- The connectivity profile's `candidate_tcp` must list exactly the router and
-  the refusing proxy. The record's router and proxy hashes must be those two,
-  and its trusted and DNS hashes must equal the profile's entries.
+- The connectivity profile is parsed with the deployer's exact rules from
+  `connectivity-policy.py`, tested against it:
+  - candidates are in 10/8, 172.16/12 or 192.168/16 on ports from 1024, at most
+    2 (v2) or 8 (v3);
+  - addresses are canonical IPv4, never multicast, unspecified, link-local or
+    reserved;
+  - DNS uses port 53;
+  - `expires_at_unix` is below 2^32 and at most 24 hours after issuance.
+- For evidence, `candidate_tcp` must hold exactly the router and the refusing
+  proxy. The record's router and proxy hashes must be those two, and its
+  trusted and DNS hashes must equal the profile's entries.
+- The network record must fall inside the probe profile's window. The profile
+  is issued no later than the record start. The `active` and `stop_rollback`
+  phases end strictly before `expires_at_unix`, and the `expiry` phase ends at
+  or after it.
 
 Resource limits come only from these documents, never from the record:
 
@@ -71,10 +103,12 @@ Resource limits come only from these documents, never from the record:
 Memory, CPU quota (millis) and pids come from the container's profile
 `resource_policy`. A resource probe's `profile`, `limit` or `deadline_ms` must
 equal that value, so related probes (for example `memory_oom.limit` and
-`memory_max.profile`) agree by construction. Only `executor_grading` has a
-`supervisor_timeout` probe: its deadline is the approved timeout of the grading
-test group it names. Authoring command timeouts come from the private task
-runtime policy, which the verifier never reads.
+`memory_max.profile`) agree by construction. Only `executor_grading` has
+supervisor timeout probes, one per grading test group
+(`executor_grading.supervisor_timeout.hidden` and `.visible`). Each deadline is
+that group's approved command timeout, and the observed `test_group` must name
+the same group. Authoring command timeouts come from the private task runtime
+policy, which the verifier never reads.
 
 ## Catalog
 
@@ -84,8 +118,8 @@ It is the single source of truth: the Go package embeds it and the Python tool
 reads the same file. It defines:
 
 - the probe IDs for each kind and phase;
-- each probe's scope: once per record, once per language image, or once per
-  trusted endpoint;
+- each probe's scope: once per record, once per language image, once per trusted
+  endpoint, or bound to the router or proxy endpoint;
 - the accepted outcomes and tolerances;
 - where each resource limit comes from.
 
@@ -101,17 +135,26 @@ Expectation types:
 | `outcome_in` | The observed outcome is in the accepted list. `probe_error` is never accepted, so a broken probe cannot count as a deny |
 | `exact` | The observed object equals the catalog value |
 | `profile_equal` | The cgroup value equals the profile value, and the profile value is at least 1 |
-| `bounded` | Enforcement was seen, `limit` and `measured` are at least 1, and `measured * 1000 <= limit * permille` |
+| `bounded` | Enforcement was seen, `limit` and `measured` are at least 1, and `limit * floor <= measured * 1000 <= limit * ceiling` |
 | `supervisor_timeout` | Exit 124, no live processes, and elapsed time between the deadline and the tolerance, for a named `hidden` or `visible` test group |
 | `control` | `all_pass`: at least two tests, all passed. `some_fail`: at least two tests, at least one passed and one failed. `timeout`: the run timed out. Pass, wrong and hang controls per language must share one `suite_sha256`, and pass and wrong must have the same total |
 | `subordinate_ids` | Host uid and gid equal subordinate start `+ id - 1` for the catalog candidate ids |
 
 Tolerances are versioned integer constants
 (`dittobench-coding-native-enforcement-tolerances-v1`), repeated in the catalog,
-the Go package and the verifier. CPU usage may reach 1150 per mille of quota.
-Supervisor elapsed time may reach 1100 per mille of the deadline. Memory peak,
-pids, nofile, scratch and log bytes must stay within 1000 per mille of their
-limits.
+the Go package and the verifier. Every limit event must happen at or near its
+limit, so an idle or crashed burner fails:
+
+| Probe | Floor (per mille of limit) | Ceiling |
+|---|---|---|
+| `cpu_throttle` (usage against quota) | 750 | 1150 |
+| `memory_oom` (peak before the kill) | 900 | 1000 |
+| `pids_cap` (pids when fork fails) | 1000 | 1000 |
+| `scratch_enospc` (bytes written at ENOSPC) | 950 | 1000 |
+| `nofile_cap` (fds open at EMFILE; 1014 of 1024 leaves a 10 fd baseline) | 990 | 1000 |
+| `log_bound` (bytes retained) | 500 | 1000 |
+
+Supervisor elapsed time must fall between the deadline and 1100 per mille of it.
 
 ## Canonical encoding
 
@@ -147,9 +190,14 @@ in both the Go and Python tests.
   - The review has per-item verification, a consistency result and
     `approval_generated: false`.
   - The six-digest map, host, release, profile `inputs`, `endpoints`,
-    `endpoint_counts` and time window appear only if every item verified. A
-    failed review prints no digests.
+    `endpoint_counts`, `endpoint_set_sha256` and time window appear only if
+    every item verified. A failed review prints no digests.
 - `check-approval` checks Peyton's signed approval against a verified review.
+- `endpoint-set --connectivity-profile FILE` prints a profile's full and
+  endpoint-set digests.
+
+`verify`, `review` and `check-approval` refuse to run unless the running
+script's own bytes hash to the reviewed checkout's `evidence_tool_sha256`.
 
 Every JSON comparison uses exact types, so `false` never equals `0`. Integers
 longer than int64 are refused before conversion. Objects are renamed into place
@@ -169,14 +217,17 @@ A record is refused unless all of these hold:
    items.
 3. Every required probe appears exactly once, in the right phase and sorted
    order, with no extra IDs. Every language image and every trusted endpoint is
-   covered, and the refusing proxy is listed.
+   covered, router and proxy probes carry their own distinct endpoint, and the
+   refusing proxy is listed.
 4. Each `expect` equals the catalog, each `observed` has the closed shape for
    its type, and `matched` equals the recomputed value. Every probe must match.
 5. The tool, collector, catalog and fixture hashes equal the reviewed checkout.
    The preflight's own tool hashes must also match.
 6. Preconditions held and the residue is empty.
-7. Profile inputs, resource limits, deadlines and endpoints match the supplied
-   profile documents, and controls come from one suite per language.
+7. Profile inputs, resource limits and floors, every grading test group's
+   deadline, and endpoints match the supplied profile documents. The network
+   record falls inside the probe profile's window, and controls come from one
+   suite per language.
 8. The pre-collection preflight and the post-collection `host_preflight` are
    separate objects. Both match the record's machine, boot, kernel, daemon and
    release, and they have the same nft snapshot and config digests.
@@ -211,12 +262,14 @@ tool never handles a private key. It then checks:
   must hash to the approval's `binding_sha256`, and exactly those bytes are
   compiled and run. No import loader or `__pycache__` file is used.
 - The approval's `runner_sha256` matches the checkout's `run.py`.
-- The review's profile digests equal independently reviewed pins
+- The review's digests equal independently reviewed pins
   (`--execution-profile-sha256`, `--grading-profile-sha256`,
-  `--connectivity-profile-sha256`), for example from the signed profile
-  approval. `native.policy`'s closed approval shape cannot carry profile
-  digests; the approval binds them through the record digests it names, and
-  these pins make that binding visible.
+  `--connectivity-endpoint-set-sha256`), for example from the signed profile
+  approval and the canary's own connectivity profile.
+  - `native.policy`'s closed approval shape cannot carry these digests. The
+    approval binds them through the record digests it names, and the pins
+    make that binding visible.
+  - The probe profile's full digest stays in the review; it is not a pin.
 - The approval's `evidence_sha256`, machine, boot, source revision, release
   manifest and image approvals equal the review.
 - `issued_at_unix` is no earlier than every record end, the post-collection
@@ -239,7 +292,8 @@ approval's `private_input_custody` digest is the digest of that object.
   `issued_at`. `host_preflight` is a post-collection preflight, kept verbatim
   and taken after the last record.
 - **Resources:** every language image the approval names.
-- **Endpoints:** hashed endpoints plus the connectivity-profile digest only.
+- **Endpoints:** hashed endpoints plus the connectivity-profile digest only
+  (hashes are now salted with the endpoint-set digest; see the questions).
 - **Custody:** its digest is cross-bound to machine and boot.
 - **Proxy:** the refusing proxy is part of network collection and must be
   running and listed.
@@ -251,6 +305,32 @@ approval's `private_input_custody` digest is the digest of that object.
 - **Signature:** a detached curator signature over the final approval is
   required.
 - **Workflow:** collectors are never added to `coding-hosted-operate`.
+
+## Questions for Peyton
+
+- **Endpoint-set digest.** This refines "hashed labels plus the profile digest".
+  Endpoint hashes are salted with the endpoint-set digest rather than the full
+  profile digest, so the expired probe profile and the canary's later profile
+  share them. The approval review pins the endpoint set. Is dropping `schema`,
+  the issue/expiry times and the shadow flags from that set right?
+- **Floors.** Are the lower bounds above right? The log floor of 500 is the
+  least certain, because Docker's local log driver with `max-file=1` may keep
+  any amount under 8 MiB after rotation.
+- **Custody binding and the other tolerances** from the first round remain
+  open.
+
+## Host-side enforcement follow-up (B5 later PR)
+
+This PR does not change runtime code. The native consumer still has three gaps:
+
+- `native.py` and `run.py` take `--native-approval-sha256` on the command line
+  and never check the curator signature on the host. The signature is checked
+  offline by `check-approval`, but the host run is authorized by the operator
+  supplying the approval digest.
+- `native.policy`'s closed approval shape has no `daemon_identity_sha256`, so a
+  run cannot be tied to the daemon the evidence named.
+- `expires_at_unix` may be up to 24 hours after `issued_at_unix`, although the
+  evidence is only fresh for six hours at issuance.
 
 ## Not covered
 
