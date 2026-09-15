@@ -8,10 +8,12 @@ network, resource, pre-exec and cleanup. This layer has three parts:
 - the probe catalog;
 - an offline tool, `infra/scripts/coding-native-evidence.py`.
 
-Nothing here runs a probe, reaches a host or daemon, reads a custody path, or
-creates approval. The probe runner, bundle shipping and collection come in
-later PRs. Collectors never run from `coding-hosted-operate`, and a test checks
-that no workflow except the offline regression job names these tools.
+The verifier runs no probe, reaches no host or daemon, reads no custody path
+and creates no approval. The probe runner (below) measures enforcement through
+the production launch code but is default-off; bundle shipping and host
+collection come in later PRs. Collectors never run from `coding-hosted-operate`,
+and a test checks that only the offline regression job and the disposable
+rootless probe-runner CI job name these tools.
 
 `native.py` still checks the six evidence values only as nonzero digests. Their
 content is guaranteed only by this verifier plus Peyton's own review and
@@ -288,6 +290,131 @@ tool never handles a private key. It then checks:
   record start and the custody binding.
 
 It prints a consistency result, never an approval.
+
+## Probe runner (B5 PR2)
+
+`services/dittobench-api/internal/codingenforcement/probe` and
+`cmd/dittobench-coding-enforcement-probe` measure enforcement through the
+production coding executor and sandbox launch code and assemble records the
+verifier above recomputes. Nothing invokes the runner from a host workflow.
+
+### What it proves
+
+- **Record form.** `AssembleRecord` copies each `expect` from the embedded
+  catalog, requires exactly the catalog's instances, recomputes `matched` with
+  `catalog.Evaluate` and canonically encodes. A Go test reassembles the pinned
+  golden record byte for byte. The Python end-to-end test
+  (`ditto/tests/test_coding_native_probe_runner.py`) runs the built binary for
+  every non-network kind. Its output equals the verified synthetic record, the
+  verifier accepts it, and a weakened observation is refused.
+- **No pulls.** `resolve-images` / `ResolveApprovedImage` pin an approved
+  `repository@sha256` image to its local content id. The image's `RepoDigests`
+  must carry the approved digest, and a missing image is refused rather than
+  pulled. This closes the risk that the sandbox run omits `--pull never`.
+- **Live resource enforcement.** The `native_probe_integration` test runs on a
+  rootless daemon with the isolated label and delegated cgroups. It creates,
+  inspects and removes an executor grading container through
+  `Executor.ObserveResourceContainer`, which is the production `createArgs`,
+  policy inspection and exact-id cleanup path. Every `executor_grading` cgroup,
+  swap and read-only rootfs observation must match. The CI job hands those live
+  observations to the verifier test, which accepts them under the profile the
+  run enforced. It refuses them once the pids cap is doubled against the
+  approved profile.
+- **Test mode** (`assemble --test`) prints only `passed` and `total`.
+
+### Production code reused
+
+| Reuse | Where |
+|---|---|
+| Executor container spec | `codingexecutor/executor.go` `createArgs` |
+| Executor create + policy inspect + exact-id cleanup | `codingexecutor/executor.go` `withProbeContainer` (shared with preflight `probeContainerPolicy`), `codingexecutor/docker.go` `inspectContainerPolicy` |
+| Applied policy read-back | `codingexecutor/resource_probe.go` `ObserveResourceContainer` |
+| Harness run spec | `sandbox/sandbox.go` `ProbeRunArgs` → `runArgsForNetwork` (the vector `Run` uses) |
+| Matched semantics and encoding | `codingenforcement/catalog` `Evaluate`, `Canonical`, `RequiredInstances` |
+
+### Coverage by catalog probe
+
+| Probe | Status |
+|---|---|
+| `executor_grading.{memory_max,memory_swap_max,cpu_quota,pids_max,rootfs_read_only}` | Implemented, measured live in CI through the production launch |
+| `executor_authoring.*` (same five) | Collector supports them. There is no live observer yet: `ObserveResourceContainer` refuses authoring-only executors. Deferred to PR5 |
+| `harness.*` cgroup probes | Spec reused through `ProbeRunArgs`, but not measured. Approved images' supervisor entrypoint exits, so there is no running harness container to read without the helper. Deferred to PR3 (helper in bundle) and PR5 |
+| `*.memory_oom`, `cpu_throttle`, `pids_cap`, `scratch_enospc`, `nofile_cap`, `log_bound`, `executor_grading.supervisor_timeout.*` | Not measured. These need the in-container workload helper and a host cgroup sampler. Deferred to PR3 and PR5 |
+| `preexec_confinement` (controls, identity, hostile) | Assembly and verification only. Per-language hostile fixtures run through `NewHostedGrading().Test` do not exist yet. Deferred to PR5 |
+| `cleanup_recovery` | Assembly and verification only. Live stop, timeout, OOM, SIGTERM/SIGKILL, intent journal, sentinel network and consumed marker need the orchestrator. Deferred to PR5 |
+| `network_enforcement` | `NetworkCollector` returns `ErrDeferredPR4`; needs nft and the worker cgroup. Deferred to PR4 |
+
+A partial collection cannot become a record: `AssembleRecord` refuses a
+missing or extra instance.
+
+### CI job
+
+`.github/workflows/coding-native-enforcement-probe.yml` is path filtered on
+every monorepo package the runner and integration test import. It runs on
+`ubuntu-24.04` with pinned actions and a 20-minute limit. There are no secrets,
+environment or id-token.
+
+1. Go vet and unit tests for the runner, executor and sandbox.
+2. Install pinned Docker 29.1.3 static binaries (sha256 checked).
+3. Start a rootless daemon as a systemd user unit, with `Delegate=cpu cpuset io
+   memory pids`, the systemd cgroup driver and the isolated label. It fails
+   unless memory and pids limits are supported.
+4. Import a synthetic supervisor-labelled image and tag it locally to get a
+   repository digest (no registry pull).
+5. Run the integration test, then confirm no executor container remains.
+6. Run the verifier end-to-end test on the live observations.
+
+The job was reproduced locally on a disposable rootless Docker 29.1.3 daemon.
+
+### Findings
+
+- **Fixed: Docker 29 capability names.** Docker 29 reports `HostConfig.CapAdd`
+  as `CAP_CHOWN`. The executor compared against `CHOWN`, so on a real Docker 29
+  rootless daemon its policy inspection refused its own container, and hosted
+  preflight could never pass. The comparison now drops the `CAP_` prefix. An
+  extra capability is still refused.
+- **Harness swap.** Confirmed live: the sandbox passes `--memory` without
+  `--memory-swap`, so the harness cgroup's `memory.swap.max` equals the memory
+  limit. `harness.memory_swap_max` will fail until the runtime sets it. The
+  runner does not change the shared v8 sandbox, because that would change
+  validator scoring.
+- **`executor_grading.log_bound` cannot match.** Grading containers use
+  `--log-driver none`, the supervisor discards candidate output, and a receipt
+  with output is refused. Retained output is therefore 0, while `bounded`
+  requires `measured >= 1` and a 500 per mille floor.
+- **Grading profiles are language specific.** The Rust driver requires
+  `--group/--authority/--authority-sha256` argv, so one grading profile's test
+  commands cannot run on all four images. Per-language collection must take
+  resource limits and group timeouts from the approved profile, but test argv
+  from each language's fixture.
+- **Repository digests.** A bare `docker import` has no `RepoDigests` on the
+  rootless daemon. Approved images must be loaded or tagged, as the image
+  bundle does, before the executor or resolver will accept them.
+
+### Residuals
+
+- Executor cgroup values are read from `docker container inspect` HostConfig,
+  on a created but not started container. That is the applied request, not the
+  kernel's `memory.max` file. Reading the live cgroup needs a running workload
+  (PR3/PR5).
+- CI uses a synthetic supervisor-labelled fixture image, not the approved
+  language images. The limits come from the executor spec, not from image
+  contents, but approved-image coverage is collection work.
+- The local reproduction gave RootlessKit ambient `CAP_SYS_ADMIN` inside a
+  disposable container, because the dev kernel restricts unprivileged user
+  namespaces. The CI VM relaxes the sysctl instead.
+
+### Questions for Peyton
+
+1. `executor_grading.log_bound`: change it to `exact {"retained_output_bytes": 0}`,
+   with grading `log_limit_bytes` set to 0 in the catalog, Go and Python?
+2. Harness swap: add `--memory-swap` equal to memory only for the hosted-v2
+   harness constructor (not the shared v8 sandbox), so
+   `harness.memory_swap_max` can pass?
+3. Should the hosted harness probe launch add `--pull never`, beyond the
+   runner's RepoDigest pre-check?
+4. Is the per-language grading manifest (approved limits and timeouts,
+   fixture argv) the intended reading of "every language image"?
 
 ## Custody binding
 
