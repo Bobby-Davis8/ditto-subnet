@@ -6,9 +6,15 @@
 # It needs no secret: do not export DITTO_CODING_PG_PASSWORD for it.
 # It stops nothing, so stop the worker and every custody instance first.
 #
-#   GCP_OSLOGIN_USER=… ansible-playbook -i infra/ansible/inventory/gcp.yml \
-#     infra/ansible/playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml \
-#     --limit ditto-coding-hosted-v2 -e '{"coding_hosted_postgres_environment_cleanup_enabled": true, …}'
+# Run it only through the guarded entry point, from a clean checkout of the
+# reviewed revision, with DITTO_CODING_PG_PASSWORD unset (the guard refuses it).
+# The guard builds the enabled flag, confirmation and revision itself and fixes
+# the inventory, --limit and ansible settings. Direct ansible-playbook runs are
+# unsupported; the role refuses one that lacks the guard's marker, which is an
+# accident guard only (see infra/docs/coding-hosted-postgres-v2.md).
+#
+#   GCP_OSLOGIN_USER=… uv run --locked --script infra/scripts/coding-hosted-guarded-run.py \
+#     postgres-environment-remove <reviewed 40-hex revision>
 - name: Remove native Coding PostgreSQL environment copies without stopping a service
   hosts: role_coding_hosted
   become: true

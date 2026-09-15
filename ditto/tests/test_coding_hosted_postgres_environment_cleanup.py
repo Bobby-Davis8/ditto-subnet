@@ -74,6 +74,10 @@ FREEZE_GATE = "Freeze the removal gate once, neutralising templates and loops"
 INCLUDE = "Remove the native PostgreSQL environment copies only when explicitly enabled"
 EXPLAIN = "Explain dormant native PostgreSQL environment removal"
 RAW_GATE = "Require the raw enabled flag to be a boolean true inside the include"
+GUARD_MARKER = "Require the guarded entry point marker, an accident guard only"
+OPERATION = "postgres-environment-remove"
+MARKER_ENV = "DITTO_CODING_HOSTED_GUARDED_RUN"
+SPEC_PATH = ROOT / f"infra/ansible/guarded-runs/{OPERATION}.json"
 PRESET = "Refuse preset registered results and undocumented role inputs"
 FREEZE_INPUTS = "Freeze the removal inputs once, neutralising templates and loops"
 IDENTITY = "Probe this machine's identity into a result extra vars cannot preset"
@@ -232,7 +236,7 @@ def test_preset_refusal_runs_first_and_is_the_single_source_of_truth() -> None:
     tasks = _remove()
     # The raw-gate refusal leads; the preset guard is next, still before any
     # register or set_fact.
-    assert [t["name"] for t in tasks[:2]] == [RAW_GATE, PRESET]
+    assert [t["name"] for t in tasks[:3]] == [RAW_GATE, GUARD_MARKER, PRESET]
     raw = _task(RAW_GATE)
     assert raw["no_log"] is True
     assert raw["ansible.builtin.assert"]["that"] == [
@@ -309,8 +313,9 @@ def test_inputs_are_frozen_once_and_never_rendered_into_messages() -> None:
         FROZEN_REVISION: f"{{{{ {PREFIX}source_revision | default('', true) }}}}",
     }
     tasks = _remove()
-    assert [task["name"] for task in tasks[:5]] == [
+    assert [task["name"] for task in tasks[:6]] == [
         RAW_GATE,
+        GUARD_MARKER,
         PRESET,
         FREEZE_INPUTS,
         IDENTITY,
@@ -433,7 +438,7 @@ REFUSED_UNIT_LINES = [
 
 def test_live_unit_refusal_is_an_allow_list_over_the_materialization_listing() -> None:
     names = [task["name"] for task in _remove()]
-    assert names[5:7] == [LISTING, LIVE]
+    assert names[6:8] == [LISTING, LIVE]
     listing = _task(LISTING)
     original = _task(LISTING, MATERIALIZE)
     assert listing["ansible.builtin.command"] == original["ansible.builtin.command"]
@@ -569,6 +574,7 @@ def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
 def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
     assert [task["name"] for task in _remove()] == [
         RAW_GATE,
+        GUARD_MARKER,
         PRESET,
         FREEZE_INPUTS,
         IDENTITY,
@@ -624,8 +630,11 @@ def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
         "set -x",
     ):
         assert forbidden not in PARSED + PARSED_MAIN, forbidden
-    # The only lookups list variable names; nothing reads env, files or pipes.
-    assert PARSED.count("lookup(") == 2
+    # The only lookups list variable names, plus the guard marker's single
+    # environment read; nothing reads a secret, a file or a pipe.
+    assert PARSED.count("lookup(") == 3
+    assert PARSED.count("lookup('ansible.builtin.env', ") == 1
+    assert f"lookup('ansible.builtin.env', '{MARKER_ENV}')" in PARSED
     assert PARSED.count("lookup('ansible.builtin.varnames'") == 2
     assert "lookup(" not in PARSED_MAIN
 
@@ -794,6 +803,39 @@ def test_playbook_fixture_ci_and_docs_registration() -> None:
     assert "extra vars" in section
 
 
+def test_guarded_entry_point_spec_and_marker() -> None:
+    # The supported entry point is infra/scripts/coding-hosted-guarded-run.py
+    # with this spec; the marker is an accident guard inside the dynamic include.
+    marker = _task(GUARD_MARKER)
+    assert marker["ansible.builtin.assert"]["that"] == [
+        f"lookup('ansible.builtin.env', '{MARKER_ENV}') == '{OPERATION}'"
+    ]
+    assert marker["ansible.builtin.assert"]["quiet"] is True
+    assert "Nothing was removed" in marker["ansible.builtin.assert"]["fail_msg"]
+    assert "{{" not in marker["ansible.builtin.assert"]["fail_msg"]
+    assert MARKER_ENV not in MAIN
+    assert json.loads(SPEC_PATH.read_text()) == {
+        "schema": "ditto-coding-hosted-guarded-run/v1",
+        "operation": OPERATION,
+        "playbook": "playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml",
+        "limit": "ditto-coding-hosted-v2",
+        "enabled_var": f"{PREFIX}enabled",
+        "confirmation_var": f"{PREFIX}confirmation",
+        "confirmation": CONFIRMATION,
+        "revision_var": f"{PREFIX}source_revision",
+        "nonsecret_env_vars": [],
+        "secret_env": [],
+        "distinct_secret_values": False,
+        # Removal needs no secret: an exported password or host is refused.
+        "forbidden_env": ["DITTO_CODING_PG_PASSWORD", "DITTO_CODING_PG_HOST"],
+        "forbidden_env_prefixes": [],
+    }
+    playbook = PLAYBOOK.read_text()
+    assert "infra/scripts/coding-hosted-guarded-run.py" in playbook
+    assert OPERATION in playbook
+    assert "-e '" not in playbook
+
+
 def _removal_docs() -> str:
     docs = (ROOT / "infra/docs/coding-hosted-postgres-v2.md").read_text()
     return _flat(docs.split("## Removal and rotation", 1)[1])
@@ -826,6 +868,10 @@ def test_docs_describe_every_removal_bypass_guard_and_residual() -> None:
         "lookup('file', lookup('env', 'DITTO_CODING_PG_PASSWORD'))",
         "`DITTO_ANSIBLE_REHEARSAL=1`",
         "SHA-1, MD5 and SHA-256",
+        "infra/scripts/coding-hosted-guarded-run.py",
+        OPERATION,
+        "accident guard only",
+        "unsupported",
     ):
         assert phrase in section, phrase
 
@@ -1409,6 +1455,7 @@ def _run(
     outside: dict[str, dict] | None = None,
     host_name: str | None = None,
     serial: int | None = None,
+    marker: str | None = OPERATION,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
@@ -1453,6 +1500,8 @@ def _run(
         # lookup cases have a real value to try to exfiltrate.
         "DITTO_CODING_PG_PASSWORD": REHEARSAL_PASSWORD,
     }
+    if marker is not None:
+        environment[MARKER_ENV] = marker
     completed = subprocess.run(
         [
             "uvx",
@@ -1884,6 +1933,20 @@ def test_rehearsal_extra_vars_cannot_preset_forge_or_lazily_open_the_gate(
     )
     _assert_refused(root, HOST)
     assert _kept(pair)
+
+
+@rehearsal
+def test_rehearsal_a_run_without_the_guard_marker_removes_nothing(tmp_path) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    owners = _local_owners()
+    for name, marker in {"no_marker": None, "wrong_marker": "other-op"}.items():
+        root = tmp_path / "hosts" / name
+        hosts = _hosts({name: root}, owners)
+        pair = _tree(root)
+        _run(tmp_path, name, hosts, marker=marker)
+        _assert_refused(root, GUARD_MARKER)
+        assert _kept(pair), name
 
 
 @rehearsal
