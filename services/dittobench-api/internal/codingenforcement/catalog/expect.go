@@ -27,7 +27,7 @@ var expectKeys = map[string][]string{
 	ExpectOutcomeIn:         {"accept", "type"},
 	ExpectExact:             {"type", "value"},
 	ExpectProfileEqual:      {"type"},
-	ExpectBounded:           {"tolerance", "type"},
+	ExpectBounded:           {"floor", "tolerance", "type"},
 	ExpectSupervisorTimeout: {"tolerance", "type"},
 	ExpectControl:           {"result", "type"},
 	ExpectSubordinateIDs:    {"gid", "type", "uid"},
@@ -47,6 +47,7 @@ type Expectation struct {
 	Accept    []string
 	Value     map[string]any
 	Tolerance string
+	Floor     string
 	Result    string
 	UID       int64
 	GID       int64
@@ -113,6 +114,11 @@ func (e *Expectation) UnmarshalJSON(raw []byte) error {
 		if e.Tolerance, ok = object["tolerance"].(string); !ok {
 			return errors.New("tolerance is malformed")
 		}
+		if kind == ExpectBounded {
+			if e.Floor, ok = object["floor"].(string); !ok {
+				return errors.New("floor is malformed")
+			}
+		}
 	case ExpectControl:
 		if e.Result, ok = object["result"].(string); !ok {
 			return errors.New("result is malformed")
@@ -136,7 +142,9 @@ func (e Expectation) MarshalJSON() ([]byte, error) {
 		object["accept"] = e.Accept
 	case ExpectExact:
 		object["value"] = e.Value
-	case ExpectBounded, ExpectSupervisorTimeout:
+	case ExpectBounded:
+		object["tolerance"], object["floor"] = e.Tolerance, e.Floor
+	case ExpectSupervisorTimeout:
 		object["tolerance"] = e.Tolerance
 	case ExpectControl:
 		object["result"] = e.Result
@@ -167,8 +175,14 @@ func (e Expectation) validate(outcomes map[string]bool) error {
 			}
 		}
 	case ExpectBounded:
-		if _, ok := VersionedTolerances.Permille(e.Tolerance); !ok {
+		ceiling, ceilingOK := VersionedTolerances.Permille(e.Tolerance)
+		floor, floorOK := VersionedTolerances.Permille(e.Floor)
+		if !ceilingOK || !floorOK || !strings.Contains(e.Tolerance, "_max_permille_of_") ||
+			e.Floor != strings.Replace(e.Tolerance, "_max_", "_min_", 1) {
 			return errors.New("tolerance is unknown")
+		}
+		if floor < 1 || floor > ceiling {
+			return errors.New("tolerance floor exceeds its ceiling")
 		}
 	case ExpectSupervisorTimeout:
 		if e.Tolerance != "timeout_elapsed_max_permille_of_deadline" {
@@ -247,6 +261,13 @@ func integers(object map[string]any, keys ...string) ([]int64, error) {
 		values[index] = value
 	}
 	return values, nil
+}
+
+// atLeastPermille reports measured*1000 >= limit*permille without overflow.
+func atLeastPermille(measured, limit, permille int64) bool {
+	left := new(big.Int).Mul(big.NewInt(measured), big.NewInt(1000))
+	right := new(big.Int).Mul(big.NewInt(limit), big.NewInt(permille))
+	return left.Cmp(right) >= 0
 }
 
 // withinPermille reports measured*1000 <= limit*permille without overflow.
@@ -331,11 +352,13 @@ func Evaluate(expect Expectation, observed any, subordinate SubordinateIDs, outc
 			return false, err
 		}
 		permille, ok := tolerances.Permille(expect.Tolerance)
-		if !ok {
+		floor, floorOK := tolerances.Permille(expect.Floor)
+		if !ok || !floorOK {
 			return false, errors.New("tolerance is unknown")
 		}
 		limit, measured := values[0], values[1]
-		return enforced && limit >= 1 && measured >= 1 && withinPermille(measured, limit, permille), nil
+		return enforced && limit >= 1 && measured >= 1 && withinPermille(measured, limit, permille) &&
+			atLeastPermille(measured, limit, floor), nil
 	case ExpectSupervisorTimeout:
 		object, err := observedObject(observed, "deadline_ms", "elapsed_ms", "exit_code", "live_processes", "test_group")
 		if err != nil {

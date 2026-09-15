@@ -338,6 +338,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -351,6 +352,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -364,6 +366,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -377,6 +380,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -390,6 +394,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -403,6 +408,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -416,6 +422,7 @@
     },
     {
       "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
         "tolerance": "cpu_usage_max_permille_of_quota",
         "type": "bounded"
       },
@@ -429,6 +436,7 @@
     },
     {
       "expect": {
+        "floor": "pids_min_permille_of_limit",
         "tolerance": "pids_max_permille_of_limit",
         "type": "bounded"
       },
@@ -442,6 +450,7 @@
     },
     {
       "expect": {
+        "floor": "pids_min_permille_of_limit",
         "tolerance": "pids_max_permille_of_limit",
         "type": "bounded"
       },
@@ -885,6 +894,216 @@
         "host_uid": 165531
       },
       "result": "invalid"
+    },
+    {
+      "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "idle cpu burner",
+      "observed": {
+        "enforced": true,
+        "limit": 2000,
+        "measured": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu at floor",
+      "observed": {
+        "enforced": true,
+        "limit": 2000,
+        "measured": 1500
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "floor": "cpu_usage_min_permille_of_quota",
+        "tolerance": "cpu_usage_max_permille_of_quota",
+        "type": "bounded"
+      },
+      "name": "cpu just below floor",
+      "observed": {
+        "enforced": true,
+        "limit": 2000,
+        "measured": 1499
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "memory_peak_min_permille_of_limit",
+        "tolerance": "memory_peak_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "crashed memory burner",
+      "observed": {
+        "enforced": true,
+        "limit": 1073741824,
+        "measured": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "memory_peak_min_permille_of_limit",
+        "tolerance": "memory_peak_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "memory peak at floor",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 900
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "floor": "memory_peak_min_permille_of_limit",
+        "tolerance": "memory_peak_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "memory peak below floor",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 899
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "pids_min_permille_of_limit",
+        "tolerance": "pids_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "pids one below cap",
+      "observed": {
+        "enforced": true,
+        "limit": 64,
+        "measured": 63
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "pids_min_permille_of_limit",
+        "tolerance": "pids_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "pids single process",
+      "observed": {
+        "enforced": true,
+        "limit": 64,
+        "measured": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "scratch_min_permille_of_limit",
+        "tolerance": "scratch_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "scratch enospc early",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 949
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "scratch_min_permille_of_limit",
+        "tolerance": "scratch_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "scratch enospc at floor",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 950
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "floor": "nofile_min_permille_of_limit",
+        "tolerance": "nofile_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "nofile after stdio only",
+      "observed": {
+        "enforced": true,
+        "limit": 1024,
+        "measured": 3
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "nofile_min_permille_of_limit",
+        "tolerance": "nofile_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "nofile at limit minus baseline",
+      "observed": {
+        "enforced": true,
+        "limit": 1024,
+        "measured": 1014
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "floor": "nofile_min_permille_of_limit",
+        "tolerance": "nofile_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "nofile one below baseline",
+      "observed": {
+        "enforced": true,
+        "limit": 1024,
+        "measured": 1013
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "floor": "log_min_permille_of_limit",
+        "tolerance": "log_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "log retained at floor",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 500
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "floor": "log_min_permille_of_limit",
+        "tolerance": "log_max_permille_of_limit",
+        "type": "bounded"
+      },
+      "name": "log retained below floor",
+      "observed": {
+        "enforced": true,
+        "limit": 1000,
+        "measured": 499
+      },
+      "result": "unmatched"
     }
   ]
 }

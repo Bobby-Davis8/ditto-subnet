@@ -81,7 +81,7 @@ func TestGoldenRecordMatchesPythonBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	required, err := loaded.RequiredInstances("cleanup_recovery", nil)
+	required, err := loaded.RequiredInstances("cleanup_recovery", Endpoints{})
 	if err != nil {
 		t.Fatal(err)
 	}

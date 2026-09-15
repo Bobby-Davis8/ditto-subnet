@@ -49,6 +49,14 @@ const (
 	ScratchMaxPermilleOfLimit           = 1000
 	LogMaxPermilleOfLimit               = 1000
 	TimeoutElapsedMaxPermilleOfDeadline = 1100
+	// Lower bounds: the limit event must happen at or near the limit, so an
+	// idle or crashed burner never counts as enforcement.
+	CPUUsageMinPermilleOfQuota   = 750
+	MemoryPeakMinPermilleOfLimit = 900
+	PidsMinPermilleOfLimit       = 1000
+	NofileMinPermilleOfLimit     = 990
+	ScratchMinPermilleOfLimit    = 950
+	LogMinPermilleOfLimit        = 500
 )
 
 // Fixed catalog vocabularies.
@@ -59,7 +67,13 @@ var (
 	// Kinds is also the fixed collection order; records never overlap.
 	Kinds         = []string{"network_enforcement", "resource_enforcement", "preexec_confinement", "cleanup_recovery"}
 	ProfileInputs = []string{"connectivity_profile_sha256", "execution_profile_sha256", "grading_profile_sha256"}
-	BindSources   = []string{"memory_limit_bytes", "cpu_quota_millis", "pids_limit", "scratch_limit_bytes", "nofile_limit", "log_limit_bytes", "command_timeout_ms"}
+	BindSources   = []string{"memory_limit_bytes", "cpu_quota_millis", "pids_limit", "scratch_limit_bytes", "nofile_limit", "log_limit_bytes", "hidden_command_timeout_ms", "visible_command_timeout_ms"}
+	// CommandTimeoutSources evidences every hosted grading test group timeout.
+	CommandTimeoutSources = map[string]string{"hidden_command_timeout_ms": "hidden", "visible_command_timeout_ms": "visible"}
+	// Network phases observed before the connectivity profile expires, and the
+	// phase that reaches its expiry.
+	NetworkPreExpiryPhases = []string{"active", "stop_rollback"}
+	NetworkExpiryPhase     = "expiry"
 )
 
 // ResourceContainer names where a resource container's limits come from.
@@ -86,6 +100,8 @@ const (
 	ScopeHost            = "host"
 	ScopeLanguage        = "language"
 	ScopeTrustedEndpoint = "trusted_endpoint"
+	ScopeRouterEndpoint  = "router_endpoint"
+	ScopeProxyEndpoint   = "proxy_endpoint"
 )
 
 var (
@@ -104,6 +120,12 @@ type Tolerances struct {
 	ScratchMaxPermilleOfLimit           int64  `json:"scratch_max_permille_of_limit"`
 	LogMaxPermilleOfLimit               int64  `json:"log_max_permille_of_limit"`
 	TimeoutElapsedMaxPermilleOfDeadline int64  `json:"timeout_elapsed_max_permille_of_deadline"`
+	CPUUsageMinPermilleOfQuota          int64  `json:"cpu_usage_min_permille_of_quota"`
+	MemoryPeakMinPermilleOfLimit        int64  `json:"memory_peak_min_permille_of_limit"`
+	PidsMinPermilleOfLimit              int64  `json:"pids_min_permille_of_limit"`
+	NofileMinPermilleOfLimit            int64  `json:"nofile_min_permille_of_limit"`
+	ScratchMinPermilleOfLimit           int64  `json:"scratch_min_permille_of_limit"`
+	LogMinPermilleOfLimit               int64  `json:"log_min_permille_of_limit"`
 }
 
 // Permille returns the named tolerance.
@@ -123,6 +145,18 @@ func (t Tolerances) Permille(tolerance string) (int64, bool) {
 		return t.LogMaxPermilleOfLimit, true
 	case "timeout_elapsed_max_permille_of_deadline":
 		return t.TimeoutElapsedMaxPermilleOfDeadline, true
+	case "cpu_usage_min_permille_of_quota":
+		return t.CPUUsageMinPermilleOfQuota, true
+	case "memory_peak_min_permille_of_limit":
+		return t.MemoryPeakMinPermilleOfLimit, true
+	case "pids_min_permille_of_limit":
+		return t.PidsMinPermilleOfLimit, true
+	case "nofile_min_permille_of_limit":
+		return t.NofileMinPermilleOfLimit, true
+	case "scratch_min_permille_of_limit":
+		return t.ScratchMinPermilleOfLimit, true
+	case "log_min_permille_of_limit":
+		return t.LogMinPermilleOfLimit, true
 	}
 	return 0, false
 }
@@ -137,6 +171,22 @@ var VersionedTolerances = Tolerances{
 	ScratchMaxPermilleOfLimit:           ScratchMaxPermilleOfLimit,
 	LogMaxPermilleOfLimit:               LogMaxPermilleOfLimit,
 	TimeoutElapsedMaxPermilleOfDeadline: TimeoutElapsedMaxPermilleOfDeadline,
+	CPUUsageMinPermilleOfQuota:          CPUUsageMinPermilleOfQuota,
+	MemoryPeakMinPermilleOfLimit:        MemoryPeakMinPermilleOfLimit,
+	PidsMinPermilleOfLimit:              PidsMinPermilleOfLimit,
+	NofileMinPermilleOfLimit:            NofileMinPermilleOfLimit,
+	ScratchMinPermilleOfLimit:           ScratchMinPermilleOfLimit,
+	LogMinPermilleOfLimit:               LogMinPermilleOfLimit,
+}
+
+// scopeRoles names the endpoint role each endpoint-bound scope expands over.
+var scopeRoles = map[string]string{ScopeTrustedEndpoint: "trusted", ScopeRouterEndpoint: "router", ScopeProxyEndpoint: "refusing_proxy"}
+
+// Endpoints are a network record's endpoint hashes by role.
+type Endpoints struct {
+	Trusted []string
+	Router  string
+	Proxy   string
 }
 
 // Bounds limits how many endpoints of one role a record lists.
@@ -269,6 +319,23 @@ func (c *Catalog) validate() error {
 			return fmt.Errorf("%s: %w", kindName, err)
 		}
 	}
+	network := c.Kinds["network_enforcement"].Phases
+	for _, phase := range append(slices.Clone(NetworkPreExpiryPhases), NetworkExpiryPhase) {
+		if !slices.Contains(network, phase) {
+			return errors.New("network phases lack the expiry window")
+		}
+	}
+	timeouts := map[string]bool{}
+	for _, probe := range c.Kinds["resource_enforcement"].Probes {
+		if probe.Expect.Type == ExpectSupervisorTimeout {
+			timeouts[probe.Bind["deadline_ms"]] = true
+		}
+	}
+	for source := range CommandTimeoutSources {
+		if !timeouts[source] {
+			return errors.New("not every grading test group timeout is evidenced")
+		}
+	}
 	return nil
 }
 
@@ -314,9 +381,9 @@ func (k Kind) validate(kindName string, outcomes map[string]bool) error {
 		phases[probe.Phase] = true
 		switch probe.Scope {
 		case ScopeHost, ScopeLanguage:
-		case ScopeTrustedEndpoint:
-			if _, ok := k.EndpointRoles["trusted"]; !ok {
-				return fmt.Errorf("%s: needs trusted endpoints", probe.ID)
+		case ScopeTrustedEndpoint, ScopeRouterEndpoint, ScopeProxyEndpoint:
+			if _, ok := k.EndpointRoles[scopeRoles[probe.Scope]]; !ok {
+				return fmt.Errorf("%s: needs %s endpoints", probe.ID, scopeRoles[probe.Scope])
 			}
 		default:
 			return fmt.Errorf("%s: scope is unknown", probe.ID)
@@ -358,11 +425,15 @@ func (probe Probe) validateBind(kindName string) error {
 	if len(probe.Bind) != 1 || !ok || !slices.Contains(BindSources, source) {
 		return errors.New("bind is malformed")
 	}
-	if (source == "command_timeout_ms") != (probe.Expect.Type == ExpectSupervisorTimeout) {
+	group, timeout := CommandTimeoutSources[source]
+	if timeout != (probe.Expect.Type == ExpectSupervisorTimeout) {
 		return errors.New("bind source does not fit its type")
 	}
-	if source == "command_timeout_ms" && spec.Profile != "grading_profile_sha256" {
+	if timeout && spec.Profile != "grading_profile_sha256" {
 		return errors.New("no approved command timeout")
+	}
+	if timeout && probe.ID != container+".supervisor_timeout."+group {
+		return errors.New("names another test group")
 	}
 	return nil
 }
@@ -379,25 +450,34 @@ func (c *Catalog) OutcomeSet() map[string]bool {
 // RequiredInstances expands one kind's probes over every language image and
 // every trusted endpoint hash, in record order: catalog phase order, then id,
 // language and endpoint hash within a phase.
-func (c *Catalog) RequiredInstances(kindName string, trustedEndpoints []string) ([]Instance, error) {
+func (c *Catalog) RequiredInstances(kindName string, endpoints Endpoints) ([]Instance, error) {
 	kind, ok := c.Kinds[kindName]
 	if !ok {
 		return nil, errors.New("catalog: kind is unknown")
 	}
 	if bounds, trusted := kind.EndpointRoles["trusted"]; trusted {
-		if len(trustedEndpoints) < max(1, bounds.Min) || len(trustedEndpoints) > bounds.Max {
+		if len(endpoints.Trusted) < max(1, bounds.Min) || len(endpoints.Trusted) > bounds.Max {
 			return nil, errors.New("catalog: trusted endpoint count is outside its bounds")
 		}
-	} else if len(trustedEndpoints) != 0 {
+	} else if len(endpoints.Trusted) != 0 {
 		return nil, errors.New("catalog: kind has no trusted endpoints")
 	}
+	_, router := kind.EndpointRoles["router"]
+	_, proxy := kind.EndpointRoles["refusing_proxy"]
+	if router != (endpoints.Router != "") || proxy != (endpoints.Proxy != "") {
+		return nil, errors.New("catalog: router or proxy endpoint does not fit the kind")
+	}
 	seen := map[string]bool{}
-	for _, endpoint := range trustedEndpoints {
+	for _, endpoint := range append(slices.Clone(endpoints.Trusted), endpoints.Router, endpoints.Proxy) {
+		if endpoint == "" {
+			continue
+		}
 		if !sha256Hex.MatchString(endpoint) || seen[endpoint] {
-			return nil, errors.New("catalog: trusted endpoint hash is malformed or repeated")
+			return nil, errors.New("catalog: endpoint hash is malformed or repeated")
 		}
 		seen[endpoint] = true
 	}
+	byRole := map[string][]string{"trusted": endpoints.Trusted, "router": {endpoints.Router}, "refusing_proxy": {endpoints.Proxy}}
 	var result []Instance
 	for _, probe := range kind.Probes {
 		base := Instance{ID: probe.ID, Phase: probe.Phase, Expect: probe.Expect}
@@ -410,8 +490,8 @@ func (c *Catalog) RequiredInstances(kindName string, trustedEndpoints []string) 
 				instance.Language = language
 				result = append(result, instance)
 			}
-		case ScopeTrustedEndpoint:
-			for _, endpoint := range trustedEndpoints {
+		case ScopeTrustedEndpoint, ScopeRouterEndpoint, ScopeProxyEndpoint:
+			for _, endpoint := range byRole[scopeRoles[probe.Scope]] {
 				instance := base
 				instance.EndpointSHA256 = endpoint
 				result = append(result, instance)
@@ -429,7 +509,7 @@ func (c *Catalog) RequiredInstances(kindName string, trustedEndpoints []string) 
 
 var (
 	catalogKeys   = []string{"coverage", "freshness_max_seconds", "kinds", "languages", "not_covered", "outcomes", "pre_collection_preflight_max_age_seconds", "record_schema", "resource_containers", "review_schema", "router_namespaces", "schema", "tolerances"}
-	toleranceKeys = []string{"cpu_usage_max_permille_of_quota", "log_max_permille_of_limit", "memory_peak_max_permille_of_limit", "nofile_max_permille_of_limit", "pids_max_permille_of_limit", "scratch_max_permille_of_limit", "timeout_elapsed_max_permille_of_deadline", "version"}
+	toleranceKeys = []string{"cpu_usage_max_permille_of_quota", "cpu_usage_min_permille_of_quota", "log_max_permille_of_limit", "log_min_permille_of_limit", "memory_peak_max_permille_of_limit", "memory_peak_min_permille_of_limit", "nofile_max_permille_of_limit", "nofile_min_permille_of_limit", "pids_max_permille_of_limit", "pids_min_permille_of_limit", "scratch_max_permille_of_limit", "scratch_min_permille_of_limit", "timeout_elapsed_max_permille_of_deadline", "version"}
 	containerKeys = []string{"log_limit_bytes", "nofile_limit", "profile", "scratch"}
 	kindKeys      = []string{"endpoint_roles", "inputs", "phases", "probes"}
 	boundsKeys    = []string{"max", "min"}
