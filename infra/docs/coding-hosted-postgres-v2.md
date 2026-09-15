@@ -135,21 +135,36 @@ confirmation `MATERIALIZE NATIVE CODING POSTGRES ENVIRONMENT`, and unsets it. No
 workflow identity gets Secret Manager access.
 
 The role behaves as follows:
+- The `enabled` gate is decided exactly once. `tasks/main.yml` hands the work to
+  a dynamic `include_tasks`, whose `when:` is evaluated a single time with no
+  loop item in scope, and guards the flag with `default(false, true)`. A lazily
+  templated flag such as `{{ item is defined }}` is therefore false here and
+  cannot flip to true inside a later loop; `--start-at-task` cannot jump into
+  the not-yet-included file to skip the guards and reach the write; and a flag
+  whose template errors while reading a secret resolves to false without
+  surfacing the value.
 - Before it inspects anything, it refuses a password variable and any other
   variable named `coding_hosted_postgres_environment_*` except the `enabled`,
   `confirmation`, `source_revision` and `host` inputs, whether set by extra
   vars, inventory or vars files. Extra vars outrank registered results and
-  block variables. Without this check, a preset result such as
+  set_facts. Without this check, a preset result such as
   `coding_hosted_postgres_environment_units` would disable the live-unit guard,
   and a preset `coding_hosted_postgres_environment_document` would replace both
-  the file and the digest used to verify it. The check runs outside the block
-  that defines the document variables.
-- The playbook gathers no facts. Host identity and the worker and custodian
-  accounts come from registered `setup` and `getent` probes, because an
-  `ansible_facts` extra var replaces gathered facts.
+  the file and the digest used to verify it. The separate removal role's
+  `_cleanup_` variables are excluded so its presence never produces a misleading
+  refusal here.
+- It gathers no facts. Host identity and the worker and custodian accounts come
+  from registered `setup` and `getent` probes, because an `ansible_facts` extra
+  var replaces gathered facts but not a registered result.
+- Every operator input is captured once, with no loop item in scope and with a
+  `default(..., true)` guard, so a lazily templated value cannot render one
+  thing for a guard and another inside a loop, and a template that errors while
+  reading the password becomes an empty string that fails validation instead of
+  surfacing the value in a fatal error message. Every later task, and the
+  document, use only the captured values.
 - It requires a source revision of exactly 40 lowercase hex characters and a
-  host address that trimming leaves unchanged. A `$` anchor alone would accept
-  a trailing newline.
+  host address that trimming leaves unchanged. A `$` anchor alone would accept a
+  trailing newline.
 - It validates a bounded, single-line password without logging it.
 - It refuses unless every listed worker or custody unit is `inactive` or
   `failed`. This is an allow-list, so `active`, `activating`, `deactivating`,
@@ -157,18 +172,44 @@ The role behaves as follows:
   state or an unparseable line all refuse. An empty listing means no such unit
   is loaded and is allowed. The role stops nothing.
 - It writes each copy with `no_log` and without a diff.
+- The unit state is re-checked after the write and again after verification.
+  A unit could start between the pre-write listing and the write, so if any unit
+  is no longer `inactive` or `failed` the role fails loudly, warning that a copy
+  may have been read mid-rotation; it does not roll the copy back. This narrows,
+  but by itself does not eliminate, the check-then-act window (see below).
 - It verifies ownership, mode, single link and the SHA-256 of each copy against
-  the rendered document, with `no_log`. It never reads the bytes back to the
-  controller and never prints the values or the digest.
+  the rendered document, with `no_log`. The stat result carries the checksum, so
+  `no_log` on the reinspection and the owner/mode assert is what keeps the
+  document digest out of the `-v` output and failure lines. It never reads the
+  bytes back to the controller and never prints the values or the digest.
 - It starts nothing. Admission still depends on the separately reviewed HBA and
   firewall rules above.
 
-Root tests check the guard structure. With `DITTO_ANSIBLE_REHEARSAL=1` they
-also run the enabled tasks through ansible-core 2.21.2 against a temporary tree
-with a stand-in password. That rehearsal proves that preset results and document
-variables, forged `ansible_facts`, `refreshing`, `maintenance` and unknown unit
-states, and trailing-newline inputs are refused before anything is written. The
-infra CI Ansible job runs it.
+Two residual limitations are accepted, not closed, by design:
+- **Check-then-act.** The role stops nothing, so a worker or custody unit could
+  start after the final re-check but before a reader opens the copy. The
+  operator stops every unit first (the pre-write listing must be `inactive` or
+  `failed`); the re-checks catch a unit that starts during the write or verify.
+- **Operator-supplied Jinja.** ansible-core renders a trusted `-e`/inventory
+  string on any reference, offers no way to read a variable's raw text without
+  rendering it, and does not suppress a fatal templating-error message even
+  under `no_log`. Capturing each input once behind `default(..., true)` turns a
+  crafted error into an empty string and confines every input to a single
+  render, but an operator who pastes hostile Jinja into their own command still
+  holds the exported password directly. Moving `host` to a controller-only
+  environment input, like the password, would remove the last rendered input;
+  that is a larger interface change left for review.
+
+Root tests check the guard structure. With `DITTO_ANSIBLE_REHEARSAL=1` they also
+run the real, restructured role through ansible-core 2.21.2 against a temporary
+tree, under the repo's yaml callback and `-v --diff`, with a stand-in password.
+That rehearsal proves that a lazily templated gate and `--start-at-task` write
+nothing; that a lazily templated `host` writes the safe captured address rather
+than the loop-time one; that preset results and document variables, forged
+`ansible_facts`, `refreshing`, `maintenance` and unknown unit states, and
+trailing-newline inputs are refused before anything is written; and that no
+password form or document digest reaches the output even when the owner/mode
+check fails. The infra CI Ansible job runs it.
 
 The `role_coding_hosted` group connects through IAP only
 (`group_vars/role_coding_hosted.yml`). Every native host role therefore reaches
