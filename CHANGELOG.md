@@ -2,6 +2,43 @@
 
 <!-- version list -->
 
+## v0.268.1 (2026-09-15)
+
+### Bug Fixes
+
+- **backroom**: Accept policy v13 invariant assessments
+  ([#1931](https://github.com/ditto-assistant/ditto-subnet/pull/1931),
+  [`6f6e9e6`](https://github.com/ditto-assistant/ditto-subnet/commit/6f6e9e6f35e39082d3607ca7d79b2acca4452931))
+
+
+## v0.268.0 (2026-09-15)
+
+### Features
+
+- Make the SN118 router shadow track score LIVE end-to-end (replay default + offload seam, published
+  ledger, leaderboard shadow badge)
+  ([#1917](https://github.com/ditto-assistant/ditto-subnet/pull/1917),
+  [`f88f259`](https://github.com/ditto-assistant/ditto-subnet/commit/f88f259f3fcedad7a40c4b9c50922d4a64374c49))
+
+
+## v0.267.7 (2026-09-15)
+
+### Bug Fixes
+
+- **screener**: Communicate remaining shadow request deadline
+  ([#1922](https://github.com/ditto-assistant/ditto-subnet/pull/1922),
+  [`e5aad9f`](https://github.com/ditto-assistant/ditto-subnet/commit/e5aad9f233767f11849da8d351f6541b9adc9880))
+
+
+## v0.267.6 (2026-09-15)
+
+### Bug Fixes
+
+- **screener**: Tighten shadow fan-out discovery and adjudication
+  ([#1918](https://github.com/ditto-assistant/ditto-subnet/pull/1918),
+  [`ada9d60`](https://github.com/ditto-assistant/ditto-subnet/commit/ada9d604872a4492a16523b9efc94ee8e9fdfead))
+
+
 ## v0.267.5 (2026-09-14)
 
 ### Bug Fixes
