@@ -1,15 +1,23 @@
 ---
-# The enabled gate is decided exactly once, here, in a single top-level task
-# with no loop in scope, then the removal branch runs through a dynamic
-# include_tasks. This closes the lazy-template flip (a block-level `when` is
-# re-evaluated per child task, including inside loops where a loop variable is
-# defined) and `--start-at-task`, which cannot jump into a dynamically included
-# file and so cannot skip the guards.
+# Freeze the enabled gate exactly once, in a no_log task with no loop variable
+# in scope, then run the removal branch through a dynamic include_tasks. This
+# closes the lazy-template flip (a block-level `when` is re-evaluated per child
+# task, including inside loops) and --start-at-task, which cannot jump into a
+# dynamically included file. default(false, true) turns an undefined-class
+# template error into false; no_log censors the fatal result. Residual: a
+# lookup/filter plugin error in the enabled input still prints its own value in
+# ansible's finalization banner on 2.21.2 (see docs); the run removes nothing.
+- name: Freeze the enabled gate once
+  ansible.builtin.set_fact:
+    coding_hosted_worker_credentials_cleanup_gate: >-
+      {{ (coding_hosted_worker_credentials_cleanup_enabled | default(false, true)) | bool }}
+  no_log: true
+
 - name: Explain dormant native worker credential removal
   ansible.builtin.debug:
     msg: Native Coding worker credential removal is disabled; no credential file is removed.
-  when: not ((coding_hosted_worker_credentials_cleanup_enabled | default(false, true)) | bool)
+  when: not coding_hosted_worker_credentials_cleanup_gate
 
 - name: Remove the worker-owned credential files behind the enabled gate
   ansible.builtin.include_tasks: remove.yml
-  when: (coding_hosted_worker_credentials_cleanup_enabled | default(false, true)) | bool
+  when: coding_hosted_worker_credentials_cleanup_gate
