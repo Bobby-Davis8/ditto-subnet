@@ -145,16 +145,25 @@ source revision with no trailing newline, and the exact target host.
   excludes this one's, so neither matches the other's variables.
 - The run must target exactly the one dedicated host. `hosts: role_coding_hosted`
   makes an `inventory_hostname`/group check tautological, and a host reports its
-  own name, so the role asserts `ansible_play_batch == ['ditto-coding-hosted-v2']`
-  — a value computed from the run's targeting that `-e` cannot override — so a
-  role-labelled VM that merely reports this hostname is never reached without
+  own name, so the role asserts both `ansible_play_batch == ['ditto-coding-hosted-v2']`
+  and `ansible_play_hosts_all == ['ditto-coding-hosted-v2']` — values computed
+  from the run's targeting that `-e` cannot override. Requiring the whole host
+  set, not only the batch, means `serial: 1` on the group cannot pass either, so
+  a role-labelled VM that merely reports this hostname is never reached without
   `--limit ditto-coding-hosted-v2`.
 - The write module carries the credentials to the host, so before any
-  secret-carrying task the role refuses unless SSH pipelining is on
-  (`ansible_pipelining`) and `ANSIBLE_KEEP_REMOTE_FILES` is unset, so the
-  module is never left in the host's remote temp directory. The repo
-  `ansible.cfg` turns pipelining on. This is advisory (an operator can force
-  either), a defence against accidental misconfiguration.
+  secret-carrying task the role refuses unless SSH pipelining is on and
+  `ANSIBLE_KEEP_REMOTE_FILES` is unset, so the module is never left in the host's
+  remote temp directory. The materialize playbook sets `ansible_pipelining: true`
+  in its play vars: the SSH connection plugin reads pipelining from that var (a
+  `[ssh_connection] pipelining` ini setting in `ansible.cfg` turns pipelining on
+  but does **not** populate the var), so setting it there both turns pipelining
+  on and lets the guard confirm it. The guard requires `ansible_pipelining` true
+  and `ansible_ssh_pipelining` undefined or true, because on ansible-core 2.21.2
+  `ansible_ssh_pipelining` wins over `ansible_pipelining`, so
+  `-e ansible_ssh_pipelining=false` (or `-e ansible_pipelining=false`) turns
+  pipelining off and is refused. This is advisory against accidental
+  misconfiguration.
 - Every accepted input is captured once with `set_fact` and validated as a
   frozen literal. A `set_fact` result is a plain value, not a trusted template,
   so it never re-templates in a later scope. The confirmation and source
