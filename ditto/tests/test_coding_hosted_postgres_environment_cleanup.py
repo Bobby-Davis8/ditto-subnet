@@ -363,7 +363,9 @@ def test_probed_host_check_matches_the_materialization_literals() -> None:
     # Same literals as the materialization host check, both read from a
     # registered probe: a -e ansible_facts value replaces gathered facts.
     materialize_host = _task(MATERIALIZE_HOST, MATERIALIZE)
-    inventory, batch, *facts = materialize_host["ansible.builtin.assert"]["that"][:6]
+    inventory, hosts_all, batch, *facts = materialize_host["ansible.builtin.assert"][
+        "that"
+    ][:7]
     # inventory_hostname and group_names are host variables extra vars override;
     # groups, ansible_play_hosts_all and ansible_play_batch are magic variables
     # they cannot, so both roles pin the group and the exact reviewed host.
@@ -371,6 +373,9 @@ def test_probed_host_check_matches_the_materialization_literals() -> None:
         "ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) "
         "| length == 0"
     )
+    # Both roles pin the play and the batch: with serial: 1 the batch alone is
+    # the reviewed host while a rogue host is still in the play.
+    assert hosts_all == "ansible_play_hosts_all == ['ditto-coding-hosted-v2']"
     assert batch == "ansible_play_batch == ['ditto-coding-hosted-v2']"
     probed = []
     for line in facts:
@@ -385,6 +390,7 @@ def test_probed_host_check_matches_the_materialization_literals() -> None:
         )
     assert _task(HOST)["ansible.builtin.assert"]["that"] == [
         inventory,
+        hosts_all,
         batch,
         *probed,
         f"{FROZEN_REVISION} is string",
@@ -807,6 +813,8 @@ def test_docs_describe_every_removal_bypass_guard_and_residual() -> None:
         "`ansible_play_hosts_all`",
         "`ansible_inject_invocation`",
         "ansible_play_batch",
+        "`serial: 1`",
+        "~/.ansible/tmp",
         "raw inside the include",
         "returned state, never the pre-unlink stat",
         "`O_NOFOLLOW`",
@@ -1328,9 +1336,9 @@ def _record(outcome: str, content: str) -> dict:
     }
 
 
-def _play(rehearsal_pass: str) -> dict:
+def _play(rehearsal_pass: str, serial: int | None = None) -> dict:
     outcome = "{{ rehearsal_root }}/outcome-" + rehearsal_pass + ".json"
-    return {
+    play: dict[str, Any] = {
         "name": f"Rehearse cleanup ({rehearsal_pass})",
         "hosts": "all",
         "strategy": "free",
@@ -1382,6 +1390,9 @@ def _play(rehearsal_pass: str) -> dict:
             },
         ],
     }
+    if serial is not None:
+        play["serial"] = serial
+    return play
 
 
 REVIEWED_HOST = "ditto-coding-hosted-v2"
@@ -1397,6 +1408,7 @@ def _run(
     residual: str | None = None,
     outside: dict[str, dict] | None = None,
     host_name: str | None = None,
+    serial: int | None = None,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
@@ -1417,7 +1429,7 @@ def _run(
         inventory["all"]["hosts"] = outside
     (work / "inventory.yml").write_text(yaml.safe_dump(inventory))
     (work / "play.yml").write_text(
-        yaml.safe_dump([_play(rehearsal_pass)], sort_keys=False)
+        yaml.safe_dump([_play(rehearsal_pass, serial)], sort_keys=False)
     )
     # The repo's own ansible.cfg, verbatim: its default callback with yaml results,
     # and roles_path=roles resolved beside it, reach the temporary role.
@@ -1968,6 +1980,21 @@ def test_rehearsal_a_rogue_inventory_host_is_refused_without_limit(tmp_path) -> 
     _run(tmp_path, "rogue", {"rogue": hosts["rogue"]}, host_name="rogue-vm")
     _assert_refused(root, HOST)
     assert _kept(pair)
+    # With serial: 1 each batch holds one host, so the batch pin alone passes on
+    # the reviewed host while a rogue host is still in the play; the
+    # ansible_play_hosts_all pin refuses both.
+    roots = {name: tmp_path / "hosts" / f"serial_{name}" for name in ("named", "rogue")}
+    serial_hosts = _hosts(roots, _local_owners())
+    pairs = {name: _tree(root) for name, root in roots.items()}
+    _run(
+        tmp_path,
+        "serial",
+        {REVIEWED_HOST: serial_hosts["named"], "rogue-vm": serial_hosts["rogue"]},
+        serial=1,
+    )
+    for name, root in roots.items():
+        _assert_refused(root, HOST)
+        assert _kept(pairs[name]), name
 
 
 @rehearsal

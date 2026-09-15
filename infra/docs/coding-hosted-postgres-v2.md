@@ -346,11 +346,13 @@ Before removing anything it refuses when:
   or the play targets more than the reviewed host. The playbook gathers no
   facts: identity comes from a registered `setup` probe, because an
   `ansible_facts` extra var replaces gathered facts. Membership is read from
-  `groups` and `ansible_play_hosts_all`, and the target is pinned with
+  `groups` and `ansible_play_hosts_all`, and the target is pinned with both
+  `ansible_play_hosts_all == ['ditto-coding-hosted-v2']` and
   `ansible_play_batch == ['ditto-coding-hosted-v2']`, because
   `inventory_hostname` and `group_names` are host variables an extra var
-  replaces while the batch and group lists are not: a labelled rogue VM run
-  without `--limit` is refused;
+  replaces while the play, batch and group lists are not: a labelled rogue VM
+  run without `--limit` is refused, including under `serial: 1`, where the batch
+  alone would be the reviewed host;
 - the enabled flag, re-asserted raw inside the include, is not a boolean true.
   The frozen gate could be preset while `--start-at-task` skips the freeze, so
   the include re-checks the raw flag;
@@ -462,7 +464,14 @@ On the Coding host, the complete `POSTGRES_*` list, including
   neither finds nor removes them, and must not be extended to;
 - any other protected configuration whose `postgres_environment_file` names a
   separate copy, for example one written for the evidence recovery or canary
-  acceptance commands. This role does not find those either.
+  acceptance commands. This role does not find those either;
+- `~/.ansible/tmp/ansible-tmp-*` of the ssh user, only for a materialization
+  run made without pipelining or with `keep_remote_files` on, which uploads the
+  module and its password argument there and can leave it behind on an
+  interrupted connection. The materialization role now refuses both before the
+  password is read, and the playbook enables pipelining, so a current run writes
+  nothing there; check for leftovers from older or modified runs. This role does
+  not remove them.
 
 While services run, the Go worker also passes the entries to the Python start
 helper as process environment, and each running Platform process holds the

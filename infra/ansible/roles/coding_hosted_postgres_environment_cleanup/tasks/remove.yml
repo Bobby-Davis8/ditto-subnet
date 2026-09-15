@@ -65,8 +65,10 @@
 # inventory_hostname and group_names are host variables that extra vars
 # override, so group membership is proved from magic variables they cannot:
 # every host in this play must belong to role_coding_hosted, and the play must
-# target exactly the reviewed inventory host. ansible_play_batch carries real
-# inventory names, so a labelled rogue VM run without --limit cannot be removed.
+# target exactly the reviewed inventory host. ansible_play_hosts_all and
+# ansible_play_batch carry real inventory names, so a labelled rogue VM run
+# without --limit cannot be removed. Both are pinned: with serial: 1 the batch
+# alone would be the reviewed host while a rogue host is still in the play.
 # Every refusal message is fixed text. Only the final report and the
 # partial-removal failure render values, and only the frozen revision after this
 # check has proved it is exactly 40 lowercase hex characters, plus paths from
@@ -76,6 +78,7 @@
   ansible.builtin.assert:
     that:
       - ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) | length == 0
+      - ansible_play_hosts_all == ['ditto-coding-hosted-v2']
       - ansible_play_batch == ['ditto-coding-hosted-v2']
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_architecture == 'x86_64'
