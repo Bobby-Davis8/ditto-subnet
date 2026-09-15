@@ -40,7 +40,8 @@ INPUTS = {
 CONFIRMATION = "MATERIALIZE NATIVE CODING POSTGRES ENVIRONMENT"
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 DATABASE_HOST = "10.30.0.5"
-GATE = f"({PFX}enabled | default(false, true)) | bool"
+CAPTURED_GATE = f"{PFX}captured_enabled"
+GATE = f"{CAPTURED_GATE} is sameas true"
 REHEARSAL_GATE = "DITTO_ANSIBLE_REHEARSAL"
 
 CUSTODY = "/var/lib/ditto-coding-custody/private/postgres-environment.json"
@@ -60,6 +61,9 @@ ENTRIES = [
     "POSTGRES_POOL_MAX_SIZE=4",
 ]
 
+CAPTURE_GATE = "Capture the materialization gate once, neutralising templates and loops"
+INCLUDE = "Materialize the native PostgreSQL environment only when explicitly enabled"
+EXPLAIN = "Explain dormant native PostgreSQL environment materialization"
 PASSWORD_VARIABLE = "Refuse a password supplied as an Ansible variable"
 PRESET = "Refuse preset registered results and undocumented role inputs"
 IDENTITY = "Probe this machine's identity into a result extra vars cannot preset"
@@ -146,20 +150,33 @@ def test_default_off_gate_is_decided_once_behind_a_dynamic_include() -> None:
     defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
     assert defaults == INPUTS
     main = _main()
-    # Exactly two top-level tasks: a dynamic include gated once, and the dormant
-    # explanation for the negated gate. No block, no per-task gate to re-evaluate.
-    assert [t["name"] for t in main] == [
-        "Materialize the native PostgreSQL environment only when explicitly enabled",
-        "Explain dormant native PostgreSQL environment materialization",
-    ]
-    include, explain = main
+    # A no_log capture of the flag, a dynamic include gated on the captured fact,
+    # and the dormant explanation. No block, no per-task gate to re-evaluate.
+    assert [t["name"] for t in main] == [CAPTURE_GATE, INCLUDE, EXPLAIN]
+    capture, include, explain = main
+    assert capture["no_log"] is True
+    assert capture["ansible.builtin.set_fact"] == {
+        CAPTURED_GATE: f"{{{{ ({PFX}enabled | default(false, true)) is sameas true }}}}"
+    }
     assert include["ansible.builtin.include_tasks"] == "materialize.yml"
     assert _flat(include["when"]) == GATE
     assert _flat(explain["when"]) == f"not ({GATE})"
-    assert "import_tasks" not in MAIN  # a static import would defeat --start-at-task
-    assert "block" not in MAIN
+    parsed_main = yaml.safe_dump(main)
+    assert "import_tasks" not in parsed_main  # static would defeat --start-at-task
+    assert "block" not in parsed_main
+    # The raw flag is rendered only by the capture.
+    assert [t["name"] for t in main if f"{PFX}enabled" in json.dumps(t)] == [
+        CAPTURE_GATE
+    ]
     (play,) = yaml.safe_load(PLAYBOOK.read_text())
     assert play["gather_facts"] is False
+
+
+def test_no_bool_filter_can_print_a_coerced_value() -> None:
+    # ansible-core 2.21 prints any non-boolean string the bool filter coerces in
+    # a deprecation warning, even under no_log, so neither task file uses it.
+    for text in (yaml.safe_dump(_main()), PARSED):
+        assert not re.search(r"\|\s*bool\b", text)
 
 
 def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() -> None:
@@ -177,11 +194,17 @@ def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() ->
     # A single condition: the varnames equality is the one source of truth, with
     # no duplicate per-name "is not defined" lines.
     assert len(that) == 1
+    allowed = sorted([*INPUTS, CAPTURED_GATE])
     assert _flat(that[0]) == _flat(
         f"lookup('ansible.builtin.varnames', '^{PFX}', wantlist=True) "
         f"| reject('match', '^{PFX}cleanup_') "
-        "| sort == [" + ", ".join(f"'{name}'" for name in sorted(INPUTS)) + "]"
+        "| sort == [" + ", ".join(f"'{name}'" for name in allowed) + "]"
     )
+    # main.yml captures only the gate before this guard.
+    main_facts = [
+        name for task in _main() for name in task.get("ansible.builtin.set_fact", {})
+    ]
+    assert main_facts == [CAPTURED_GATE]
     # The _cleanup_ exclusion keeps the removal role's variables from producing a
     # misleading refusal here.
     assert f"reject('match', '^{PFX}cleanup_')" in _flat(that[0])
@@ -857,6 +880,8 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
         "lazy_host",
         "lazy_enabled",
         "leak_enabled",
+        "enabled_password",
+        "enabled_string_true",
         "leak_host_error",
         "leak_host_value",
         "revision_newline",
@@ -877,6 +902,12 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
     )
     # A lazily templated gate is false with no loop item and must not write.
     hosts["lazy_enabled"][f"{PFX}enabled"] = "{{ item is defined }}"
+    # A flag that renders to the password: the bool filter would print it in a
+    # deprecation warning; sameas refuses it silently. Only a boolean true opens.
+    hosts["enabled_password"][f"{PFX}enabled"] = (
+        '{{ lookup("env", "DITTO_CODING_PG_PASSWORD") }}'
+    )
+    hosts["enabled_string_true"][f"{PFX}enabled"] = "true"
     # A gate whose template errors while reading the password must resolve to
     # false (default guard) and write nothing, without leaking the value.
     hosts["leak_enabled"][f"{PFX}enabled"] = (
@@ -903,7 +934,12 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
     _materialized(roots["no_units"])
     _materialized(roots["lazy_host"])  # wrote the safe captured address, not 203.
     # A lazy gate and a gate whose template errors both wrote nothing.
-    for name in ("lazy_enabled", "leak_enabled"):
+    for name in (
+        "lazy_enabled",
+        "leak_enabled",
+        "enabled_password",
+        "enabled_string_true",
+    ):
         assert _written(roots[name], CUSTODY) is None
         assert not (roots[name] / "var").exists()
 

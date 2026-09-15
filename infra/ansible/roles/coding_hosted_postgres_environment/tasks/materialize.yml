@@ -5,11 +5,14 @@
 
 # Extra vars outrank role defaults, registered results and set_facts alike, so
 # the only defence against a preset internal name is to refuse it before that
-# name is created. varnames is checked here, before any register or set_fact,
-# so at this point only the four documented inputs may carry the role's prefix:
-# a preset registered result, captured value or document variable would show up
-# and is refused. The separate removal role's coding_hosted_postgres_environment_cleanup_*
-# names are excluded so its presence never produces a misleading refusal here.
+# name is created. varnames lists names without rendering any value and is
+# checked here, before any register or set_fact in this file, so at this point
+# only the four documented inputs and the gate main.yml captured may carry the
+# role's prefix: a preset registered result, captured input or document variable
+# would show up and is refused. Presetting the captured gate itself only enables
+# materialization, which every guard below still decides. The separate removal
+# role's coding_hosted_postgres_environment_cleanup_* names are excluded so its
+# presence never produces a misleading refusal here.
 - name: Refuse a password supplied as an Ansible variable
   ansible.builtin.assert:
     that:
@@ -25,7 +28,8 @@
       - >-
         lookup('ansible.builtin.varnames', '^coding_hosted_postgres_environment_', wantlist=True)
         | reject('match', '^coding_hosted_postgres_environment_cleanup_')
-        | sort == ['coding_hosted_postgres_environment_confirmation',
+        | sort == ['coding_hosted_postgres_environment_captured_enabled',
+        'coding_hosted_postgres_environment_confirmation',
         'coding_hosted_postgres_environment_enabled',
         'coding_hosted_postgres_environment_host',
         'coding_hosted_postgres_environment_source_revision']

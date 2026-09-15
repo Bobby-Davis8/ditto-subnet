@@ -1,18 +1,31 @@
 ---
-# The gate is decided exactly once, here, and never again. include_tasks is a
-# dynamic include, so its when: is evaluated a single time with no loop item in
-# scope. This closes three bypasses at once:
-#   * a lazily templated flag such as '{{ item is defined }}', which is false
-#     with no item here and could otherwise flip to true inside a later loop;
-#   * --start-at-task, which cannot jump into a file the runtime has not yet
-#     included and therefore cannot skip the guards to reach the write;
-#   * a flag whose template errors while reading a secret: default(false, true)
-#     turns any such error into false without surfacing the value.
+# The gate is decided exactly once, here, and never again. Operator inputs are
+# templates that ansible-core renders on every reference, so the flag is
+# captured a single time, with no loop item in scope, into a no_log fact:
+#   * a lazily templated flag such as '{{ item is defined }}' is false here and
+#     cannot flip to true inside a later loop;
+#   * default(false, true) turns an undefined result, including one produced
+#     while reading a secret, into false;
+#   * 'is sameas true' opens the gate only for a real boolean true. The bool
+#     filter is avoided deliberately: on ansible-core 2.21 it prints any
+#     non-boolean string it coerces, such as a flag templated to the password,
+#     in a deprecation warning that no_log does not suppress;
+#   * no_log keeps whatever the flag rendered to off the wire.
+- name: Capture the materialization gate once, neutralising templates and loops
+  ansible.builtin.set_fact:
+    coding_hosted_postgres_environment_captured_enabled: "{{ (coding_hosted_postgres_environment_enabled | default(false, true)) is sameas true }}"
+  no_log: true
+
+# include_tasks is a dynamic include, so its when: is evaluated a single time,
+# and --start-at-task cannot jump into materialize.yml, which the runtime has
+# not yet included, to skip the guards and reach the write. Starting at this
+# task skips the capture and fails on the undefined fact. The captured value is
+# compared with sameas, which always yields a plain boolean and prints nothing.
 - name: Materialize the native PostgreSQL environment only when explicitly enabled
   ansible.builtin.include_tasks: materialize.yml
-  when: (coding_hosted_postgres_environment_enabled | default(false, true)) | bool
+  when: coding_hosted_postgres_environment_captured_enabled is sameas true
 
 - name: Explain dormant native PostgreSQL environment materialization
   ansible.builtin.debug:
     msg: Native Coding PostgreSQL environment materialization is disabled; no credential file is written.
-  when: not ((coding_hosted_postgres_environment_enabled | default(false, true)) | bool)
+  when: not (coding_hosted_postgres_environment_captured_enabled is sameas true)
