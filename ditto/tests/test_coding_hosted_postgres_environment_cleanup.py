@@ -232,11 +232,14 @@ def test_preset_refusal_runs_first_and_is_the_single_source_of_truth() -> None:
         "register" in task or "ansible.builtin.set_fact" in task
         for task in _walk(tasks[:1])
     )
-    (that,) = _task(PRESET)["ansible.builtin.assert"]["that"]
+    that, item = _task(PRESET)["ansible.builtin.assert"]["that"]
     assert _flat(that) == _flat(
         f"lookup('ansible.builtin.varnames', '^{PREFIX}', wantlist=True) | sort == "
         "[" + ", ".join(f"'{name}'" for name in ALLOWED_AT_GUARD) + "]"
     )
+    # The loop item is refused by name; varnames never renders a value.
+    assert item == "lookup('ansible.builtin.varnames', '^item$', wantlist=True) == []"
+    assert "is defined" not in PARSED + PARSED_MAIN
     # Main freezes only the gate before the guard; everything remove.yml creates
     # is prefixed and absent from the allow-list, so presetting it is refused.
     assert _names(_main()) == {FROZEN_GATE}
@@ -273,9 +276,11 @@ def test_prefix_patterns_stay_distinct_from_the_materialization_role() -> None:
     cleanup_pattern = re.compile(f"^{PREFIX}")
     assert not any(cleanup_pattern.match(name) for name in materialize_names)
     assert all(cleanup_pattern.match(name) for name in cleanup_names)
-    (materialize_that,) = _task(MATERIALIZE_PRESET, MATERIALIZE)[
+    materialize_that, materialize_item = _task(MATERIALIZE_PRESET, MATERIALIZE)[
         "ansible.builtin.assert"
     ]["that"]
+    # Both roles refuse a preset loop item by name.
+    assert materialize_item == _task(PRESET)["ansible.builtin.assert"]["that"][1]
     lookup, exclusion = re.findall(r"'(\^[a-z_]+)'", _flat(materialize_that))[:2]
     assert lookup == f"^{MATERIALIZE_PREFIX}"
     assert exclusion == f"^{PREFIX}"
@@ -306,12 +311,21 @@ def test_inputs_are_frozen_once_and_never_rendered_into_messages() -> None:
             if re.search(rf"\b{raw}\b", json.dumps(task))
         ]
         assert offenders == [], (raw, offenders)
-    # No message renders anything until the host check has validated the frozen
-    # revision's exact shape; after that a message may name only that revision,
+    # Every refusal is fixed text. Only the partial-removal failure and the final
+    # report render values, and only the frozen revision the host check validated,
     # registered results and check mode.
     host_index = tasks.index(_task(HOST))
+    for task in _walk(tasks):
+        if "ansible.builtin.assert" in task:
+            message = task["ansible.builtin.assert"]["fail_msg"]
+            assert "{{" not in message, task["name"]
     for task in _walk(tasks[: host_index + 1]):
         assert all("{{" not in message for message in _messages(task)), task["name"]
+    assert [
+        task["name"]
+        for task in _walk(tasks)
+        if any("{{" in message for message in _messages(task))
+    ] == [PARTIAL, REPORT]
     allowed = {
         FROZEN_REVISION,
         f"{PREFIX}unlinked",
@@ -336,7 +350,12 @@ def test_probed_host_check_matches_the_materialization_literals() -> None:
     # registered probe: a -e ansible_facts value replaces gathered facts.
     materialize_host = _task(MATERIALIZE_HOST, MATERIALIZE)
     inventory, *facts = materialize_host["ansible.builtin.assert"]["that"][:5]
-    assert inventory == "inventory_hostname in groups.get('role_coding_hosted', [])"
+    # inventory_hostname and group_names are host variables extra vars override;
+    # groups and ansible_play_hosts_all are magic variables they cannot.
+    assert inventory == (
+        "ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) "
+        "| length == 0"
+    )
     probed = []
     for line in facts:
         match = re.fullmatch(
@@ -584,9 +603,9 @@ def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
         "set -x",
     ):
         assert forbidden not in PARSED + PARSED_MAIN, forbidden
-    # The only lookup lists variable names; nothing reads env, files or pipes.
-    assert PARSED.count("lookup(") == 1
-    assert PARSED.count("lookup('ansible.builtin.varnames'") == 1
+    # The only lookups list variable names; nothing reads env, files or pipes.
+    assert PARSED.count("lookup(") == 2
+    assert PARSED.count("lookup('ansible.builtin.varnames'") == 2
     assert "lookup(" not in PARSED_MAIN
 
 
@@ -613,13 +632,85 @@ def test_removal_failure_reports_partial_progress_and_still_fails() -> None:
     )
 
 
+_JINJA_WORDS = {"and", "or", "not", "in", "is", "if", "else", "true", "false", "none"}
+_JINJA_WORDS |= {"True", "False", "None"}
+# Magic variables extra vars cannot override on ansible-core 2.21.2, unlike host
+# variables such as inventory_hostname and group_names.
+NON_OVERRIDABLE_MAGIC = {"groups", "ansible_play_hosts_all", "ansible_check_mode"}
+
+
+def _jinja_roots(expression: str) -> set[str]:
+    """Top-level variable names an expression reads: no attributes, filters,
+    tests, keyword arguments, string literals or Jinja keywords."""
+    code = re.sub(r"'[^']*'|\"[^\"]*\"", "''", expression)
+    roots = set()
+    for match in re.finditer(r"[A-Za-z_]\w*", code):
+        before = code[: match.start()].rstrip()
+        after = code[match.end() :].lstrip()
+        name = match.group()
+        if name in _JINJA_WORDS or before.endswith((".", "|")):
+            continue
+        if re.search(r"\bis(\s+not)?$", before) or re.match(r"=(?!=)", after):
+            continue
+        roots.add(name)
+    return roots
+
+
+def _task_roots(task: dict) -> set[str]:
+    roots: set[str] = set()
+
+    def visit(value: object, expression: bool) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(item, key in ("when", "that", "changed_when", "failed_when"))
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, expression)
+        elif isinstance(value, str):
+            if expression:
+                roots.update(_jinja_roots(value))
+            for template in re.findall(r"{{(.*?)}}", value, re.S):
+                roots.update(_jinja_roots(template))
+
+    visit({k: v for k, v in task.items() if k != "name"}, False)
+    return roots
+
+
+def test_every_variable_read_is_an_input_a_refused_name_or_unforgeable() -> None:
+    # Extra vars override registered results, set_facts, include vars and host
+    # variables such as inventory_hostname. Every variable these tasks read must
+    # be a documented input, a prefixed name the preset guard refuses, the loop
+    # item it also refuses, or a magic variable extra vars cannot override.
+    tasks = _main() + _remove()
+    created = _names(_main()) | _names(_remove())
+    assert all(name.startswith(PREFIX) for name in created)
+    for task in _walk(tasks):
+        for root in _task_roots(task):
+            assert (
+                root in INPUTS
+                or root in created
+                or root in {"item", "lookup"}
+                or root in NON_OVERRIDABLE_MAGIC
+            ), (task["name"], root)
+    assert _jinja_roots("inventory_hostname in groups.get('x', [])") == {
+        "inventory_hostname",
+        "groups",
+    }
+    for forbidden in ("inventory_hostname", "group_names"):
+        assert forbidden not in PARSED + PARSED_MAIN, forbidden
+    # No task handles the password, so no module invocation can log it.
+    assert "DITTO_CODING_PG_PASSWORD" not in PARSED + PARSED_MAIN
+    assert "password" not in _flat(MODULE_PATH.read_text()).lower()
+
+
 def test_validated_revision_is_reported_after_the_host_check_only() -> None:
     for name in (PRESET, HOST):
         message = _flat(_task(name)["ansible.builtin.assert"]["fail_msg"])
         assert "source_revision=" not in message and "{{" not in message, name
     for name in (LIVE, PARENT_CHECK, COPY_CHECK, LIVE_AFTER, AFTER_CHECK):
         message = _flat(_task(name)["ansible.builtin.assert"]["fail_msg"])
-        assert message.endswith(REVISION_MESSAGE), name
+        assert "{{" not in message and message.endswith("."), name
+    assert REVISION_MESSAGE in _flat(_task(PARTIAL)["ansible.builtin.fail"]["msg"])
     report = _flat(_task(REPORT)["ansible.builtin.debug"]["msg"])
     assert report == _flat(
         "Native Coding PostgreSQL environment cleanup; "
@@ -674,6 +765,9 @@ def test_docs_describe_every_removal_bypass_guard_and_residual() -> None:
         "deprecation warning",
         "`default(..., true)`",
         "never renders an input",
+        "every refusal is fixed text",
+        "`ansible_play_hosts_all`",
+        "`ansible_inject_invocation`",
         "`O_NOFOLLOW`",
         "`unlinkat`",
         "owned by its reader",
@@ -1238,12 +1332,18 @@ def _run(
     rehearsal_pass: str = "first",
     local_identity: bool = True,
     residual: str | None = None,
+    outside: dict[str, dict] | None = None,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
     _build_role(work, local_identity=local_identity)
     # Every rehearsal host is in the real group, so only identity can refuse it.
-    inventory = {"all": {"children": {"role_coding_hosted": {"hosts": hosts}}}}
+    inventory: dict[str, Any] = {
+        "all": {"children": {"role_coding_hosted": {"hosts": hosts}}}
+    }
+    if outside:
+        # Hosts outside role_coding_hosted that the rehearsal play still targets.
+        inventory["all"]["hosts"] = outside
     (work / "inventory.yml").write_text(yaml.safe_dump(inventory))
     (work / "play.yml").write_text(
         yaml.safe_dump([_play(rehearsal_pass)], sort_keys=False)
@@ -1407,6 +1507,7 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
         "preset_frozen_input",
         "undocumented_input",
         "materialization_names",
+        "preset_item",
         "partial",
     ]
     roots = {name: tmp_path / "hosts" / name for name in names}
@@ -1425,6 +1526,10 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
     hosts["preset_result"][f"{PREFIX}copies"] = {"results": []}
     hosts["preset_frozen_input"][FROZEN_REVISION] = REVISION
     hosts["undocumented_input"][f"{PREFIX}paths"] = [str(tmp_path / "elsewhere")]
+    hosts["preset_item"]["item"] = {
+        "path": str(tmp_path / "elsewhere"),
+        "owner": "root",
+    }
     # The materialization role's inputs and result names never trip this guard.
     hosts["materialization_names"] |= {
         f"{MATERIALIZE_PREFIX}enabled": True,
@@ -1445,6 +1550,7 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
             "preset_result",
             "preset_frozen_input",
             "undocumented_input",
+            "preset_item",
         )
     }
     kept["shared_parent"][1].parent.chmod(0o770)
@@ -1519,6 +1625,7 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
         "preset_result": PRESET,
         "preset_frozen_input": PRESET,
         "undocumented_input": PRESET,
+        "preset_item": PRESET,
     }
     for name, task in refusals.items():
         _assert_refused(roots[name], task)
@@ -1723,6 +1830,54 @@ def test_rehearsal_start_at_task_cannot_skip_the_guards(tmp_path) -> None:
             # Tasks inside the dynamically included file are invisible to
             # --start-at-task, so nothing in the play ran at all.
             assert _outcome(root) is None, name
+
+
+@rehearsal
+def test_rehearsal_extra_vars_cannot_forge_group_membership(tmp_path) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    # inventory_hostname and group_names are host variables extra vars override.
+    # Forging both for a host outside role_coding_hosted must not pass the group
+    # check, which reads only groups and ansible_play_hosts_all.
+    owners = _local_owners()
+    roots = {name: tmp_path / "hosts" / name for name in ("inside", "outside")}
+    hosts = _hosts(roots, owners)
+    pairs = {name: _tree(root) for name, root in roots.items()}
+    _run(
+        tmp_path,
+        "forged_group",
+        {"inside": hosts["inside"]},
+        "-e",
+        json.dumps(
+            {"inventory_hostname": "inside", "group_names": ["role_coding_hosted"]}
+        ),
+        outside={"outside": hosts["outside"]},
+    )
+    for name, root in roots.items():
+        _assert_refused(root, HOST)
+        assert _kept(pairs[name]), name
+
+
+@rehearsal
+def test_rehearsal_injected_invocations_print_nothing_sensitive(tmp_path) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    # -e ansible_inject_invocation=true returns every module's arguments in its
+    # result and -vvv prints them; nothing the role passes carries the password,
+    # the planted document or a digest of either.
+    root = tmp_path / "hosts/invocation"
+    hosts = _hosts({"invocation": root}, _local_owners())
+    pair = _tree(root)
+    _run(
+        tmp_path,
+        "invocation",
+        hosts,
+        "-vvv",
+        "-e",
+        json.dumps({"ansible_inject_invocation": True}),
+    )
+    assert _outcome(root) == {"report": _report(root, "removed", COPIES, [])}
+    assert not any(path.exists() for path in pair)
 
 
 @rehearsal

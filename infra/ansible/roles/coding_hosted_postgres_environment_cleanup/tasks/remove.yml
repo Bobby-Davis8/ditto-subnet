@@ -10,7 +10,11 @@
 # the prefix; a preset registered result or frozen input is refused. Presetting
 # the frozen gate itself only enables removal, which every guard below still
 # decides. The materialization role's coding_hosted_postgres_environment_*
-# names never match this prefix, just as that role excludes these names.
+# names never match this prefix, just as that role excludes these names. The
+# loops' item is the only other name these tasks read that extra vars could
+# supply; loop values win over extra vars today, but a preset item is refused
+# rather than trusted. Every other variable read below is a non-overridable
+# magic variable (groups, ansible_play_hosts_all, ansible_check_mode).
 - name: Refuse preset registered results and undocumented role inputs
   ansible.builtin.assert:
     that:
@@ -20,9 +24,10 @@
         'coding_hosted_postgres_environment_cleanup_enabled',
         'coding_hosted_postgres_environment_cleanup_frozen_enabled',
         'coding_hosted_postgres_environment_cleanup_source_revision']
+      - lookup('ansible.builtin.varnames', '^item$', wantlist=True) == []
     fail_msg: >-
       Only the enabled, confirmation and source_revision inputs are accepted; a
-      registered result or frozen input name, or another
+      registered result or frozen input name, a loop item, or another
       coding_hosted_postgres_environment_cleanup_ variable, is preset. Nothing was removed.
     quiet: true
 
@@ -45,14 +50,18 @@
     gather_subset: ['!all', '!min', platform, distribution]
   register: coding_hosted_postgres_environment_cleanup_identity
 
-# The frozen values are inert strings, and this message names none of them: no
-# message renders the revision until this check has proved it is exactly 40
-# lowercase hex characters. A '$' anchor alone accepts a trailing newline, so
-# the exact length is required too.
+# inventory_hostname and group_names are host variables that extra vars
+# override, so group membership is proved from two magic variables they cannot:
+# every host in this play must belong to role_coding_hosted.
+# Every refusal message is fixed text. Only the final report and the
+# partial-removal failure render values, and only the frozen revision after this
+# check has proved it is exactly 40 lowercase hex characters, plus paths from
+# registered results. A '$' anchor alone accepts a trailing newline, so the
+# exact length is required too.
 - name: Require the exact host, source and removal confirmation
   ansible.builtin.assert:
     that:
-      - inventory_hostname in groups.get('role_coding_hosted', [])
+      - ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) | length == 0
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_architecture == 'x86_64'
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_distribution == 'Debian'
@@ -89,7 +98,7 @@
     fail_msg: >-
       Stop the hosted worker and every custody instance before removing credentials;
       each listed unit must be inactive or failed and this role stops nothing.
-      Nothing was removed. source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
+      Nothing was removed.
     quiet: true
 
 # Each reader home and private directory is created 0700 and owned by its
@@ -125,7 +134,6 @@
     fail_msg: >-
       A PostgreSQL environment parent is not a real directory owned by, and writable
       only by, its reader; reconcile it by hand. Nothing was removed.
-      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
     quiet: true
   loop: "{{ coding_hosted_postgres_environment_cleanup_directories.results }}"
   loop_control:
@@ -155,7 +163,6 @@
     fail_msg: >-
       A PostgreSQL environment path is a link, directory, hard link or another
       account's file; reconcile it by hand. Nothing was removed.
-      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
     quiet: true
   loop: "{{ coding_hosted_postgres_environment_cleanup_copies.results }}"
   loop_control:
@@ -224,7 +231,6 @@
     fail_msg: >-
       A worker or custody unit became active during removal; it may have read a copy
       mid-removal. Stop every unit, reconcile by hand and re-run.
-      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
     quiet: true
 
 - name: Reinspect both exact paths without following links
@@ -246,7 +252,6 @@
       - not item.stat.exists
     fail_msg: >-
       A PostgreSQL environment copy is still present after removal.
-      source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }}
     quiet: true
   loop: "{{ coding_hosted_postgres_environment_cleanup_after.results }}"
   loop_control:
