@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -103,6 +104,27 @@ func TestVerifyExistingListenerRequiresTopologyAddressAndNamespace(t *testing.T)
 				return errors.New("kernel fell back to TCP")
 			}
 			return nil
+		},
+		// SO_REUSEPORT would let another socket share the router port.
+		"reuseport listener": func() error {
+			shared := net.ListenConfig{Control: func(_, _ string, raw syscall.RawConn) error {
+				var optionErr error
+				if err := raw.Control(func(fd uintptr) {
+					optionErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				}); err != nil {
+					return err
+				}
+				return optionErr
+			}}
+			shared.SetMultipathTCP(false)
+			other, err := shared.Listen(t.Context(), "tcp4", "127.0.0.1:0")
+			if err != nil {
+				// Linux always supports SO_REUSEPORT; never pass by accident.
+				t.Fatalf("reuseport listener: %v", err)
+			}
+			defer other.Close()
+			otherConfig := Config{Address: other.Addr().(*net.TCPAddr).AddrPort()}
+			return verifyExistingListener(t.Context(), other, otherConfig, child(current), sameNamespace)
 		},
 		"no namespace reader": func() error {
 			return verifyExistingListener(t.Context(), listener, config, child(current), nil)

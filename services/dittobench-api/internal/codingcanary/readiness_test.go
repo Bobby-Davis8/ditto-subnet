@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +176,19 @@ func TestReadinessFailsClosedUntilPackDaemonAndImageAreAllReady(t *testing.T) {
 			}
 			if !test.ready && decoded.Ready {
 				t.Fatalf("not-ready response reported ready: %+v", decoded)
+			}
+			if !test.ready {
+				// Each flag requires every earlier one: the failed step and all
+				// later steps report false even when their own probe said true.
+				flags := []bool{
+					decoded.PackLoaded, decoded.RootlessTopologyReady, decoded.ListenerNamespaceReady,
+					decoded.ControlSocketReady, decoded.ExecutorDaemonReady, decoded.RuntimeImageReady,
+				}
+				order := []string{"pack", "rootless_topology", "listener_namespace", "control_socket", "executor_daemon", "runtime_image"}
+				failed := slices.Index(order, decoded.Failure)
+				if failed < 0 || slices.Contains(flags[failed:], true) || slices.Contains(flags[:failed], false) {
+					t.Fatalf("readiness flags do not stop at failure %q: %+v", decoded.Failure, decoded)
+				}
 			}
 			if test.ready && (!decoded.PackLoaded || !decoded.RootlessTopologyReady || !decoded.ListenerNamespaceReady ||
 				!decoded.ControlSocketReady || decoded.RuntimeImageDigest != testRuntimeImageDigest ||
