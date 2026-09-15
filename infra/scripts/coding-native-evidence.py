@@ -4,8 +4,9 @@
 This tool encodes, retains and verifies native enforcement evidence records and
 checks a curator-signed approval against their review. It runs no probes,
 contacts no host, daemon or service, opens no custody paths and never mints
-approval. Only Peyton's detached curator signature over an approval he authors
-authorizes a native run, and ``native.py`` consumes that approval separately.
+approval. It checks Peyton's detached curator signature offline; the host's
+``native.py`` does not, and consumes an approval by the digest its operator
+supplies (see the host-side follow-up in the evidence doc).
 """
 
 from __future__ import annotations
@@ -79,6 +80,14 @@ TOLERANCES = {
     "scratch_max_permille_of_limit": 1000,
     "log_max_permille_of_limit": 1000,
     "timeout_elapsed_max_permille_of_deadline": 1100,
+    # Lower bounds: the limit event must happen at or near the limit, so an
+    # idle or crashed burner never counts as enforcement.
+    "cpu_usage_min_permille_of_quota": 750,
+    "memory_peak_min_permille_of_limit": 900,
+    "pids_min_permille_of_limit": 1000,
+    "nofile_min_permille_of_limit": 990,
+    "scratch_min_permille_of_limit": 950,
+    "log_min_permille_of_limit": 500,
 }
 # Where each resource container's limits come from. Runtime constants are the
 # sandbox (--ulimit nofile=1024, --log-opt max-size=8m) and executor (24 KiB
@@ -110,8 +119,14 @@ BIND_SOURCES = (
     "scratch_limit_bytes",
     "nofile_limit",
     "log_limit_bytes",
-    "command_timeout_ms",
+    "hidden_command_timeout_ms",
+    "visible_command_timeout_ms",
 )
+# Every hosted grading test group's approved command timeout is evidenced.
+COMMAND_TIMEOUT_SOURCES = {
+    "hidden_command_timeout_ms": "hidden",
+    "visible_command_timeout_ms": "visible",
+}
 BIND_FIELDS = {
     "profile_equal": "profile",
     "bounded": "limit",
@@ -122,8 +137,21 @@ BIND_FIELDS = {
 SUBORDINATE_MIN_START = 100000
 SUBORDINATE_MIN_COUNT = 65536
 ENDPOINT_DOMAIN = b"dittobench-coding-native-endpoint-v1"
-ENDPOINT_LISTS = {"trusted_tcp": "trusted", "trusted_dns": "trusted_dns"}
+# The endpoint set is the connectivity profile without its per-issue fields
+# (schema, issued/expiry times and the fixed shadow flags), so a probe profile
+# and the canary's own later profile reproduce the same digest.
+ENDPOINT_SET_SCHEMA = "dittobench-coding-native-endpoint-set-v1"
+ENDPOINT_SET_DIGEST_SCHEMA = "dittobench-coding-native-endpoint-set-digest-v1"
 HOSTED_TEST_GROUPS = ("hidden", "visible")
+# Network phases observed while the connectivity profile is unexpired, and the
+# phase that must reach its expiry.
+NETWORK_PRE_EXPIRY_PHASES = ("active", "stop_rollback")
+NETWORK_EXPIRY_PHASE = "expiry"
+PIN_NAMES = (
+    "connectivity_endpoint_set_sha256",
+    "execution_profile_sha256",
+    "grading_profile_sha256",
+)
 
 CATALOG_FILE = (
     "services/dittobench-api/internal/codingenforcement/catalog/catalog-v1.json"
@@ -273,6 +301,7 @@ REVIEW_PASS_KEYS = {
     "inputs",
     "endpoints",
     "endpoint_counts",
+    "endpoint_set_sha256",
     "window",
 }
 WINDOW_KEYS = {
@@ -300,12 +329,17 @@ EXPECT_KEYS = {
     "outcome_in": {"type", "accept"},
     "exact": {"type", "value"},
     "profile_equal": {"type"},
-    "bounded": {"type", "tolerance"},
+    "bounded": {"type", "tolerance", "floor"},
     "supervisor_timeout": {"type", "tolerance"},
     "control": {"type", "result"},
     "subordinate_ids": {"type", "uid", "gid"},
 }
-SCOPES = ("host", "language", "trusted_endpoint")
+SCOPES = ("host", "language", "trusted_endpoint", "router_endpoint", "proxy_endpoint")
+SCOPE_ROLES = {
+    "trusted_endpoint": "trusted",
+    "router_endpoint": "router",
+    "proxy_endpoint": "refusing_proxy",
+}
 EXECUTION_PROFILE_KEYS = {"schema", "image_digest", "resource_policy", "budgets"}
 GRADING_PROFILE_KEYS = {
     "schema",
@@ -901,12 +935,12 @@ def parse_grading_profile(raw: bytes) -> dict[str, Any]:
     return {"sha256": sha256(raw), "policy": policy, "group_timeouts_ms": timeouts}
 
 
-def _endpoint_sha256(profile_sha256: str, label: str, address: str, port: int) -> str:
+def _endpoint_sha256(endpoint_set: str, label: str, address: str, port: int) -> str:
     return sha256(
         b"\x00".join(
             (
                 ENDPOINT_DOMAIN,
-                profile_sha256.encode(),
+                endpoint_set.encode(),
                 label.encode(),
                 f"{address}:{port}".encode(),
             )
@@ -914,13 +948,17 @@ def _endpoint_sha256(profile_sha256: str, label: str, address: str, port: int) -
     )
 
 
-def _endpoint_pairs(value: object, label: str, *, maximum: int) -> list[tuple]:
+def _endpoint_pairs(value: object, label: str, *, rollout: bool) -> list[tuple]:
+    """connectivity-policy.py ``pairs``: the deployer's exact endpoint rules."""
+
+    candidate, dns = label == "candidate_tcp", label == "trusted_dns"
+    maximum = 8 if candidate and rollout else 2 if candidate or dns else 32
     require(
         type(value) is list and len(value) <= maximum,
         f"connectivity {label} is malformed",
     )
     assert isinstance(value, list)
-    pairs = []
+    pairs: list[tuple[str, int]] = []
     for item in value:
         item = closed(item, {"address", "port"}, f"connectivity {label} entry")
         address, port = item["address"], item["port"]
@@ -942,53 +980,79 @@ def _endpoint_pairs(value: object, label: str, *, maximum: int) -> list[tuple]:
             ),
             f"connectivity {label} entry is malformed",
         )
-        if label == "trusted_dns":
+        if candidate:
+            require(
+                any(
+                    ip in ipaddress.IPv4Network(network)
+                    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+                )
+                and port >= 1024,
+                "connectivity candidate is not a private high port",
+            )
+        if dns:
             require(port == 53, "connectivity trusted_dns entry is malformed")
-        if label == "candidate_tcp":
-            require(ip.is_private and port >= 1024, "connectivity candidate is public")
         require((address, port) not in pairs, f"connectivity {label} repeats")
         pairs.append((address, port))
     return sorted(pairs)
 
 
 def parse_connectivity_profile(raw: bytes) -> dict[str, Any]:
-    """The worker connectivity profile; only derived hashes ever leave here."""
+    """The worker connectivity profile; only derived digests ever leave here.
+
+    Structure follows connectivity-policy.py ``policy`` except its wall-clock
+    window, which is checked against the evidence timestamps instead.
+    """
 
     value = closed(
         parse_json(raw, "connectivity profile"),
         CONNECTIVITY_KEYS,
         "connectivity profile",
     )
+    issued, expires = value["issued_at_unix"], value["expires_at_unix"]
     require(
-        value["schema"] in CONNECTIVITY_SCHEMAS
+        type(value["schema"]) is str
+        and value["schema"] in CONNECTIVITY_SCHEMAS
         and value["shadow_only"] is True
         and value["weight_eligible"] is False
         and type(value["trusted_loopback_tcp"]) is bool
-        and is_int(value["issued_at_unix"], 1)
-        and is_int(value["expires_at_unix"], 1)
-        and 0 < value["expires_at_unix"] - value["issued_at_unix"] <= 86400,
+        and is_int(issued, 0)
+        and is_int(expires, 1, (1 << 32) - 1)
+        and 0 < expires - issued <= 86400,
         "connectivity profile identity is malformed",
     )
-    digest = canonical_sha256(value)
-    trusted = _endpoint_pairs(value["trusted_tcp"], "trusted_tcp", maximum=32)
-    dns = _endpoint_pairs(value["trusted_dns"], "trusted_dns", maximum=2)
-    candidate = _endpoint_pairs(value["candidate_tcp"], "candidate_tcp", maximum=2)
-    # Peyton, 2026-09-15: the refusing proxy is running and listed beside the
-    # router, so the candidate list holds exactly those two endpoints.
-    require(bool(trusted), "connectivity profile lists no trusted endpoint")
-    require(len(candidate) == 2, "connectivity profile must list router and proxy")
+    rollout = value["schema"].endswith("v3")
+    pairs = {
+        label: _endpoint_pairs(value[label], label, rollout=rollout)
+        for label in ("trusted_tcp", "trusted_dns", "candidate_tcp")
+    }
+    require(
+        bool(pairs["trusted_tcp"]) and bool(pairs["candidate_tcp"]),
+        "connectivity profile lists no trusted or candidate endpoint",
+    )
+    endpoint_set = {
+        "schema": ENDPOINT_SET_SCHEMA,
+        "trusted_loopback_tcp": value["trusted_loopback_tcp"],
+        **{
+            label: [{"address": address, "port": port} for address, port in items]
+            for label, items in pairs.items()
+        },
+    }
+    endpoint_set_sha256 = canonical_sha256(endpoint_set)
+
+    def hashes(label: str) -> list[str]:
+        return sorted(
+            _endpoint_sha256(endpoint_set_sha256, label, *pair) for pair in pairs[label]
+        )
+
     return {
-        "sha256": digest,
+        "sha256": canonical_sha256(value),
+        "endpoint_set_sha256": endpoint_set_sha256,
+        "issued_at_unix": issued,
+        "expires_at_unix": expires,
         "endpoints": {
-            "trusted": sorted(
-                _endpoint_sha256(digest, "trusted_tcp", *pair) for pair in trusted
-            ),
-            "trusted_dns": sorted(
-                _endpoint_sha256(digest, "trusted_dns", *pair) for pair in dns
-            ),
-            "candidate": sorted(
-                _endpoint_sha256(digest, "candidate_tcp", *pair) for pair in candidate
-            ),
+            "trusted": hashes("trusted_tcp"),
+            "trusted_dns": hashes("trusted_dns"),
+            "candidate": hashes("candidate_tcp"),
         },
     }
 
@@ -1045,12 +1109,18 @@ def _validate_expect(expect: object, outcomes: set[str], label: str) -> None:
                 f"{label} exact value malformed",
             )
     elif kind == "bounded":
+        tolerance, floor = expect["tolerance"], expect["floor"]
         require(
-            type(expect["tolerance"]) is str
-            and expect["tolerance"] in TOLERANCES
-            and expect["tolerance"] != "version",
+            type(tolerance) is str
+            and "_max_permille_of_" in tolerance
+            and tolerance in TOLERANCES
+            and same(floor, tolerance.replace("_max_", "_min_"))
+            and floor in TOLERANCES,
             f"{label} tolerance is unknown",
         )
+        ceiling, lower = TOLERANCES[tolerance], TOLERANCES[floor]
+        assert isinstance(ceiling, int) and isinstance(lower, int)
+        require(1 <= lower <= ceiling, f"{label} tolerance floor exceeds its ceiling")
     elif kind == "supervisor_timeout":
         require(
             same(expect["tolerance"], "timeout_elapsed_max_permille_of_deadline"),
@@ -1085,15 +1155,19 @@ def _validate_bind(probe: dict[str, Any], kind: str) -> None:
         type(source) is str and source in BIND_SOURCES,
         f"{probe['id']} bind source is unknown",
     )
+    group = COMMAND_TIMEOUT_SOURCES.get(source)
     require(
-        (source == "command_timeout_ms")
-        == (probe["expect"]["type"] == "supervisor_timeout"),
+        (group is not None) == (probe["expect"]["type"] == "supervisor_timeout"),
         f"{probe['id']} bind source does not fit its type",
     )
     require(
-        source != "command_timeout_ms"
+        group is None
         or RESOURCE_CONTAINERS[container]["profile"] == "grading_profile_sha256",
         f"{probe['id']} has no approved command timeout",
+    )
+    require(
+        group is None or probe["id"] == f"{container}.supervisor_timeout.{group}",
+        f"{probe['id']} names another test group",
     )
 
 
@@ -1195,12 +1269,28 @@ def load_catalog(raw: bytes) -> dict[str, Any]:
                 f"{probe['id']} scope is unknown",
             )
             require(
-                probe["scope"] != "trusted_endpoint" or "trusted" in roles,
-                f"{probe['id']} needs trusted endpoints",
+                probe["scope"] not in SCOPE_ROLES
+                or SCOPE_ROLES[probe["scope"]] in roles,
+                f"{probe['id']} needs {probe['scope']} roles",
             )
             _validate_expect(probe["expect"], set(outcomes), probe["id"])
             _validate_bind(probe, kind)
         require(used_phases == set(phases), f"{kind} has a phase without probes")
+    network_phases = kinds["network_enforcement"]["phases"]
+    require(
+        all(name in network_phases for name in NETWORK_PRE_EXPIRY_PHASES)
+        and NETWORK_EXPIRY_PHASE in network_phases,
+        "catalog network phases lack the expiry window",
+    )
+    timeouts = {
+        probe["bind"].get("deadline_ms")
+        for probe in kinds["resource_enforcement"]["probes"]
+        if probe["expect"]["type"] == "supervisor_timeout"
+    }
+    require(
+        timeouts == set(COMMAND_TIMEOUT_SOURCES),
+        "catalog does not evidence every grading test group timeout",
+    )
     return catalog
 
 
@@ -1255,13 +1345,14 @@ def evaluate(
             and is_int(value["measured"]),
             "observed value is malformed",
         )
-        permille = TOLERANCES[expect["tolerance"]]
-        assert isinstance(permille, int)
+        permille, floor = TOLERANCES[expect["tolerance"]], TOLERANCES[expect["floor"]]
+        assert isinstance(permille, int) and isinstance(floor, int)
         return (
             value["enforced"] is True
             and value["limit"] >= 1
             and value["measured"] >= 1
             and value["measured"] * 1000 <= value["limit"] * permille
+            and value["measured"] * 1000 >= value["limit"] * floor
         )
     if kind == "supervisor_timeout":
         value = closed(
@@ -1351,8 +1442,10 @@ def resolve_bind(
         if spec["scratch"] == "executor" and language == "rust":
             return limit - min(limit // 2, 128 << 20)
         return limit
-    require(source == "command_timeout_ms", "bind source is unknown")
-    return profile["group_timeouts_ms"][observed["test_group"]]
+    require(source in COMMAND_TIMEOUT_SOURCES, "bind source is unknown")
+    group = COMMAND_TIMEOUT_SOURCES[source]
+    require(same(observed["test_group"], group), f"test_group is not {group}")
+    return profile["group_timeouts_ms"][group]
 
 
 # ---------------------------------------------------------------------------
@@ -1510,7 +1603,7 @@ def _release(value: object) -> dict[str, Any]:
 
 def _endpoints(
     value: object, entry: dict[str, Any], profiles: dict[str, dict[str, Any]]
-) -> list[str]:
+) -> dict[str, list[str]]:
     """Endpoints must be exactly the hashes derived from the connectivity profile."""
 
     require(type(value) is list, "record endpoints are malformed")
@@ -1536,7 +1629,7 @@ def _endpoints(
             f"record needs {bounds['min']}..{bounds['max']} {role} endpoints",
         )
     if not roles:
-        return []
+        return grouped
     name = "connectivity_profile_sha256"
     require(name in profiles, f"record needs the {name} document")
     derived = profiles[name]["endpoints"]
@@ -1545,19 +1638,25 @@ def _endpoints(
         and same(grouped["trusted_dns"], derived["trusted_dns"]),
         "record trusted endpoints differ from the connectivity profile",
     )
+    # Peyton, 2026-09-15: the refusing proxy runs beside the router, so the
+    # evidenced candidate list is exactly those two distinct endpoints.
     require(
-        sorted(grouped["router"] + grouped["refusing_proxy"]) == derived["candidate"],
+        len(derived["candidate"]) == 2
+        and sorted(grouped["router"] + grouped["refusing_proxy"])
+        == derived["candidate"],
         "record router and proxy differ from the connectivity profile",
     )
-    return grouped["trusted"]
+    return grouped
 
 
 Instance = tuple[str, str | None, str | None]
 
 
 def _required_instances(
-    entry: dict[str, Any], trusted: list[str]
+    entry: dict[str, Any], endpoints: dict[str, list[str]]
 ) -> dict[Instance, dict[str, Any]]:
+    """Router and proxy probes name their endpoint, trusted probes each one."""
+
     required: dict[Instance, dict[str, Any]] = {}
     for probe in entry["probes"]:
         if probe["scope"] == "host":
@@ -1566,7 +1665,7 @@ def _required_instances(
             for language in LANGUAGES:
                 required[(probe["id"], language, None)] = probe
         else:
-            for endpoint in trusted:
+            for endpoint in endpoints[SCOPE_ROLES[probe["scope"]]]:
                 required[(probe["id"], None, endpoint)] = probe
     return required
 
@@ -1591,6 +1690,28 @@ def _controls(observations: dict[Instance, Any]) -> None:
             same(passed["total"], wrong["total"]),
             f"{language} wrong control ran a different test count",
         )
+
+
+def _connectivity_window(
+    phases: list[dict[str, Any]], started: int, connectivity: dict[str, Any]
+) -> None:
+    """Network phases fall inside and then past the evidenced profile's window."""
+
+    issued, expires = connectivity["issued_at_unix"], connectivity["expires_at_unix"]
+    require(
+        issued <= started,
+        "connectivity profile was issued after network collection started",
+    )
+    by_name = {phase["name"]: phase for phase in phases}
+    for name in NETWORK_PRE_EXPIRY_PHASES:
+        require(
+            by_name[name]["completed_at_unix"] < expires,
+            f"network {name} phase does not end before the connectivity expiry",
+        )
+    require(
+        by_name[NETWORK_EXPIRY_PHASE]["completed_at_unix"] >= expires,
+        "network expiry phase ends before the connectivity expiry",
+    )
 
 
 def verify_record(
@@ -1628,7 +1749,7 @@ def verify_record(
             same(value, profiles[name]["sha256"]),
             f"record {name} differs from the supplied document",
         )
-    trusted = _endpoints(record["endpoints"], entry, profiles)
+    endpoints = _endpoints(record["endpoints"], entry, profiles)
     require(
         same(closed(record["tools"], TOOL_KEYS, "record tools"), tools),
         "record tool hashes differ from the reviewed checkout",
@@ -1649,7 +1770,7 @@ def verify_record(
         ),
         "record phases differ from the catalog order",
     )
-    required = _required_instances(entry, trusted)
+    required = _required_instances(entry, endpoints)
     outcomes = set(catalog["outcomes"])
     seen: set[Instance] = set()
     observations: dict[Instance, Any] = {}
@@ -1707,13 +1828,16 @@ def verify_record(
             except Refusal as error:
                 raise Refusal(f"probe {probe['id']} {error}") from None
             for field, source in definition["bind"].items():
-                expected = resolve_bind(
-                    source,
-                    probe["id"].split(".")[0],
-                    probe["language"],
-                    probe["observed"],
-                    profiles,
-                )
+                try:
+                    expected = resolve_bind(
+                        source,
+                        probe["id"].split(".")[0],
+                        probe["language"],
+                        probe["observed"],
+                        profiles,
+                    )
+                except Refusal as error:
+                    raise Refusal(f"probe {probe['id']} {error}") from None
                 require(
                     same(probe["observed"][field], expected),
                     f"probe {probe['id']} {field} differs from the approved profile",
@@ -1736,6 +1860,8 @@ def verify_record(
     require(not unmatched, f"probe {unmatched[0] if unmatched else ''} did not match")
     if kind == "preexec_confinement":
         _controls(observations)
+    if kind == "network_enforcement":
+        _connectivity_window(phases, started, profiles["connectivity_profile_sha256"])
 
     require(
         record["pre_collection_preflight_sha256"] != host_preflight_sha256,
@@ -1852,7 +1978,13 @@ def consistency(summaries: list[dict[str, Any]], moments: list[int]) -> None:
 
 def _context(checkout: Checkout) -> tuple[dict[str, Any], dict[str, str]]:
     catalog = load_catalog(checkout.read(CATALOG_FILE))
-    return catalog, checkout.tools()
+    tools = checkout.tools()
+    # The running verifier must itself be the reviewed evidence tool.
+    require(
+        sha256(Path(__file__).read_bytes()) == tools["evidence_tool_sha256"],
+        "running verifier differs from the reviewed checkout",
+    )
+    return catalog, tools
 
 
 def verify(
@@ -2017,6 +2149,9 @@ def review(
         result["release"] = first["release"]
         result["inputs"] = {name: profiles[name]["sha256"] for name in PROFILE_INPUTS}
         result["endpoints"] = endpoints
+        result["endpoint_set_sha256"] = profiles["connectivity_profile_sha256"][
+            "endpoint_set_sha256"
+        ]
         result["endpoint_counts"] = {
             role: sum(1 for item in endpoints if item["role"] == role)
             for role in catalog["kinds"]["network_enforcement"]["endpoint_roles"]
@@ -2248,13 +2383,22 @@ def check_approval(
     )
     # native.policy's closed approval shape cannot carry profile digests. They are
     # bound through the record digests the approval names, and must also equal
-    # independently reviewed pins (for example the signed profile approval).
+    # independently reviewed pins (for example the signed profile approval). The
+    # connectivity pin is the endpoint set, which the canary's own later profile
+    # reproduces; the evidenced probe profile's full digest stays in the review.
     require(
-        set(profile_pins) == set(PROFILE_INPUTS)
+        set(profile_pins) == set(PIN_NAMES)
         and all(is_digest(item) for item in profile_pins.values()),
         "profile pins are malformed",
     )
-    for name in PROFILE_INPUTS:
+    require(
+        same(
+            rebuilt["endpoint_set_sha256"],
+            profile_pins["connectivity_endpoint_set_sha256"],
+        ),
+        "review connectivity endpoint set differs from the reviewed pin",
+    )
+    for name in ("execution_profile_sha256", "grading_profile_sha256"):
         require(
             same(rebuilt["inputs"][name], profile_pins[name]),
             f"review {name} differs from the reviewed pin",
@@ -2330,6 +2474,7 @@ def check_approval(
         "review_sha256": sha256(review_raw),
         "signature_sha256": sha256(signature),
         "inputs": rebuilt["inputs"],
+        "endpoint_set_sha256": rebuilt["endpoint_set_sha256"],
         "endpoint_counts": rebuilt["endpoint_counts"],
         "consistent": True,
     }
@@ -2376,7 +2521,7 @@ def _review(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
 def _check(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     signature = read_input(args.signature, SIGNATURE_BYTES, "curator signature")
     profiles = load_profiles(_profile_paths(args))
-    pins = {name: getattr(args, name) for name in PROFILE_INPUTS}
+    pins = {name: getattr(args, name) for name in PIN_NAMES}
     with Store(args.store) as store:
         return (
             check_approval(
@@ -2395,6 +2540,20 @@ def _check(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
             ),
             True,
         )
+
+
+def _endpoint_set(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
+    profile = parse_connectivity_profile(
+        read_input(args.connectivity_profile, MAX_CONNECTIVITY, "connectivity profile")
+    )
+    return {
+        "schema": ENDPOINT_SET_DIGEST_SCHEMA,
+        "connectivity_profile_sha256": profile["sha256"],
+        "endpoint_set_sha256": profile["endpoint_set_sha256"],
+        "endpoint_counts": {
+            name: len(items) for name, items in profile["endpoints"].items()
+        },
+    }, True
 
 
 def _profile_arguments(command: argparse.ArgumentParser, *, required: bool) -> None:
@@ -2446,10 +2605,17 @@ def parser() -> argparse.ArgumentParser:
     approval.add_argument("--curator-public-key", type=Path, required=True)
     approval.add_argument("--curator-signing-key-sha256", required=True)
     _profile_arguments(approval, required=True)
-    for name in PROFILE_INPUTS:
+    for name in PIN_NAMES:
         approval.add_argument("--" + name.replace("_", "-"), dest=name, required=True)
     approval.add_argument("--openssl", type=Path, default=DEFAULT_OPENSSL)
     approval.set_defaults(handler=_check)
+
+    endpoint_set = commands.add_parser(
+        "endpoint-set",
+        help="print a connectivity profile's endpoint-set digest, never its addresses",
+    )
+    endpoint_set.add_argument("--connectivity-profile", type=Path, required=True)
+    endpoint_set.set_defaults(handler=_endpoint_set)
     return root
 
 
