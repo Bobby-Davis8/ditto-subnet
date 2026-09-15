@@ -876,6 +876,7 @@ def _run(tmp_path, name, hosts, plays, *flags, extra_env=None, marker=_UNSET) ->
         "ANSIBLE_RETRY_FILES_ENABLED": "0",
         "ANSIBLE_CALLBACK_RESULT_FORMAT": "yaml",
         "ANSIBLE_LIBRARY": LIBRARY_PATH,
+        "PYTHONDONTWRITEBYTECODE": "1",
         LOOKUP_STANDIN: LOOKUP_VALUE,
         **(extra_env if extra_env is not None else STANDINS),
     }
@@ -1255,6 +1256,7 @@ def _run_gate(tmp_path, name, host_vars, play, materialize_file, *flags) -> str:
         "ANSIBLE_RETRY_FILES_ENABLED": "0",
         "ANSIBLE_CALLBACK_RESULT_FORMAT": "yaml",
         "ANSIBLE_LIBRARY": LIBRARY_PATH,
+        "PYTHONDONTWRITEBYTECODE": "1",
         MARKER_ENV: OPERATION,
         **STANDINS,
     }
