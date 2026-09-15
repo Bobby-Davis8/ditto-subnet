@@ -24,8 +24,11 @@ func TestExpectationVectorsAgreeWithPython(t *testing.T) {
 		t.Fatalf("schema = %v", document["schema"])
 	}
 	ids := document["subordinate_ids"].(map[string]any)
-	start, _ := nonNegative(ids["uid_start"])
-	count, _ := nonNegative(ids["uid_count"])
+	uidStart, _ := nonNegative(ids["uid_start"])
+	uidCount, _ := nonNegative(ids["uid_count"])
+	gidStart, _ := nonNegative(ids["gid_start"])
+	gidCount, _ := nonNegative(ids["gid_count"])
+	subordinate := SubordinateIDs{UIDStart: uidStart, UIDCount: uidCount, GIDStart: gidStart, GIDCount: gidCount}
 	loaded, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +47,7 @@ func TestExpectationVectorsAgreeWithPython(t *testing.T) {
 		if err := expect.validate(loaded.OutcomeSet()); err != nil {
 			t.Fatalf("%s: %v", vector["name"], err)
 		}
-		matched, err := Evaluate(expect, vector["observed"], SubordinateIDs{UIDStart: start, UIDCount: count}, loaded.OutcomeSet(), loaded.Tolerances)
+		matched, err := Evaluate(expect, vector["observed"], subordinate, loaded.OutcomeSet(), loaded.Tolerances)
 		result := "unmatched"
 		switch {
 		case err != nil:

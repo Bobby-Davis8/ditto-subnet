@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -33,6 +34,12 @@ const (
 	ReviewSchema        = "dittobench-coding-native-evidence-review-v1"
 	Coverage            = "same_boot"
 	FreshnessMaxSeconds = 21600
+	// PreCollectionPreflightMaxAgeSeconds bounds a record's pre-collection
+	// preflight age when collection starts.
+	PreCollectionPreflightMaxAgeSeconds = 900
+	// Rootless Docker maps container uid c >= 1 to subordinate start + c - 1.
+	SubordinateMinStart = 100000
+	SubordinateMinCount = 65536
 
 	TolerancesVersion                   = "dittobench-coding-native-enforcement-tolerances-v1"
 	CPUUsageMaxPermilleOfQuota          = 1150
@@ -49,8 +56,29 @@ var (
 	Languages        = []string{"go", "node", "python", "rust"}
 	RouterNamespaces = []string{"host", "rootless-netns"}
 	NotCovered       = []string{"daemon_restart_recovery", "reboot_recovery"}
-	Kinds            = []string{"network_enforcement", "resource_enforcement", "preexec_confinement", "cleanup_recovery"}
+	// Kinds is also the fixed collection order; records never overlap.
+	Kinds         = []string{"network_enforcement", "resource_enforcement", "preexec_confinement", "cleanup_recovery"}
+	ProfileInputs = []string{"connectivity_profile_sha256", "execution_profile_sha256", "grading_profile_sha256"}
+	BindSources   = []string{"memory_limit_bytes", "cpu_quota_millis", "pids_limit", "scratch_limit_bytes", "nofile_limit", "log_limit_bytes", "command_timeout_ms"}
 )
+
+// ResourceContainer names where a resource container's limits come from.
+type ResourceContainer struct {
+	Profile       string `json:"profile"`
+	Scratch       string `json:"scratch"`
+	NofileLimit   int64  `json:"nofile_limit"`
+	LogLimitBytes int64  `json:"log_limit_bytes"`
+}
+
+// VersionedResourceContainers mirror the sandbox (nofile 1024, 8 MiB local
+// log) and executor (24 KiB model-visible output, Rust /out carve-out) code.
+var VersionedResourceContainers = map[string]ResourceContainer{
+	"harness":            {Profile: "execution_profile_sha256", Scratch: "full", NofileLimit: 1024, LogLimitBytes: 8388608},
+	"executor_authoring": {Profile: "execution_profile_sha256", Scratch: "executor", NofileLimit: 1024, LogLimitBytes: 24576},
+	"executor_grading":   {Profile: "grading_profile_sha256", Scratch: "executor", NofileLimit: 1024, LogLimitBytes: 24576},
+}
+
+var bindFields = map[string]string{ExpectProfileEqual: "profile", ExpectBounded: "limit", ExpectSupervisorTimeout: "deadline_ms"}
 
 // Probe scopes: once per record, once per approved language image, or once
 // per trusted endpoint listed in the record.
@@ -119,10 +147,11 @@ type Bounds struct {
 
 // Probe is one catalog entry.
 type Probe struct {
-	ID     string      `json:"id"`
-	Phase  string      `json:"phase"`
-	Scope  string      `json:"scope"`
-	Expect Expectation `json:"expect"`
+	ID     string            `json:"id"`
+	Phase  string            `json:"phase"`
+	Scope  string            `json:"scope"`
+	Expect Expectation       `json:"expect"`
+	Bind   map[string]string `json:"bind"`
 }
 
 // Kind is the probe set of one evidence kind.
@@ -135,17 +164,19 @@ type Kind struct {
 
 // Catalog is the decoded catalog-v1.json.
 type Catalog struct {
-	Schema              string          `json:"schema"`
-	RecordSchema        string          `json:"record_schema"`
-	ReviewSchema        string          `json:"review_schema"`
-	Languages           []string        `json:"languages"`
-	RouterNamespaces    []string        `json:"router_namespaces"`
-	Coverage            string          `json:"coverage"`
-	NotCovered          []string        `json:"not_covered"`
-	FreshnessMaxSeconds int64           `json:"freshness_max_seconds"`
-	Tolerances          Tolerances      `json:"tolerances"`
-	Outcomes            []string        `json:"outcomes"`
-	Kinds               map[string]Kind `json:"kinds"`
+	Schema              string                       `json:"schema"`
+	RecordSchema        string                       `json:"record_schema"`
+	ReviewSchema        string                       `json:"review_schema"`
+	Languages           []string                     `json:"languages"`
+	RouterNamespaces    []string                     `json:"router_namespaces"`
+	Coverage            string                       `json:"coverage"`
+	NotCovered          []string                     `json:"not_covered"`
+	FreshnessMaxSeconds int64                        `json:"freshness_max_seconds"`
+	PreflightMaxAge     int64                        `json:"pre_collection_preflight_max_age_seconds"`
+	ResourceContainers  map[string]ResourceContainer `json:"resource_containers"`
+	Tolerances          Tolerances                   `json:"tolerances"`
+	Outcomes            []string                     `json:"outcomes"`
+	Kinds               map[string]Kind              `json:"kinds"`
 }
 
 // Instance is one required probe occurrence in a record. Language and
@@ -173,8 +204,14 @@ func Load() (*Catalog, error) { return Parse(catalogBytes) }
 
 // Parse decodes and validates catalog bytes with closed keys.
 func Parse(raw []byte) (*Catalog, error) {
-	// The strict decoder refuses duplicate keys and non-integer numbers first.
-	if _, err := Decode(raw); err != nil {
+	// The strict decoder refuses duplicate keys and non-integer numbers first,
+	// and exact-case closed keys are checked before encoding/json, whose struct
+	// decoding would otherwise accept COVERAGE for coverage.
+	decoded, err := Decode(raw)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: %w", err)
+	}
+	if err := closedKeys(decoded); err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -204,6 +241,10 @@ func (c *Catalog) validate() error {
 		return errors.New("coverage differs")
 	case c.FreshnessMaxSeconds != FreshnessMaxSeconds:
 		return errors.New("freshness differs")
+	case c.PreflightMaxAge != PreCollectionPreflightMaxAgeSeconds:
+		return errors.New("preflight age differs")
+	case !maps.Equal(c.ResourceContainers, VersionedResourceContainers):
+		return errors.New("resource containers differ")
 	case c.Tolerances != VersionedTolerances:
 		return errors.New("tolerances differ")
 	}
@@ -224,19 +265,19 @@ func (c *Catalog) validate() error {
 		if !ok {
 			return errors.New("kinds differ")
 		}
-		if err := kind.validate(outcomes); err != nil {
+		if err := kind.validate(kindName, outcomes); err != nil {
 			return fmt.Errorf("%s: %w", kindName, err)
 		}
 	}
 	return nil
 }
 
-func (k Kind) validate(outcomes map[string]bool) error {
+func (k Kind) validate(kindName string, outcomes map[string]bool) error {
 	if k.Inputs == nil || !slices.IsSorted(k.Inputs) || len(slices.Compact(slices.Clone(k.Inputs))) != len(k.Inputs) {
 		return errors.New("inputs are malformed")
 	}
 	for _, input := range k.Inputs {
-		if !name.MatchString(input) || !strings.HasSuffix(input, "_sha256") {
+		if !slices.Contains(ProfileInputs, input) {
 			return errors.New("inputs are malformed")
 		}
 	}
@@ -244,7 +285,7 @@ func (k Kind) validate(outcomes map[string]bool) error {
 		return errors.New("endpoint roles are malformed")
 	}
 	for role, bounds := range k.EndpointRoles {
-		if !name.MatchString(role) || bounds.Min < 1 || bounds.Max < bounds.Min {
+		if !name.MatchString(role) || bounds.Min < 0 || bounds.Max < max(1, bounds.Min) {
 			return errors.New("endpoint role is malformed")
 		}
 	}
@@ -283,11 +324,45 @@ func (k Kind) validate(outcomes map[string]bool) error {
 		if err := probe.Expect.validate(outcomes); err != nil {
 			return fmt.Errorf("%s: %w", probe.ID, err)
 		}
+		if err := probe.validateBind(kindName); err != nil {
+			return fmt.Errorf("%s: %w", probe.ID, err)
+		}
 	}
 	for _, used := range phases {
 		if !used {
 			return errors.New("a phase has no probes")
 		}
+	}
+	return nil
+}
+
+// validateBind requires every limit a resource probe reports to name its
+// approved source, so no record can declare its own limit.
+func (probe Probe) validateBind(kindName string) error {
+	if probe.Bind == nil {
+		return errors.New("bind is malformed")
+	}
+	field, bindable := bindFields[probe.Expect.Type]
+	if kindName != "resource_enforcement" || !bindable {
+		if len(probe.Bind) != 0 {
+			return errors.New("must not bind limits")
+		}
+		return nil
+	}
+	container, _, _ := strings.Cut(probe.ID, ".")
+	spec, ok := VersionedResourceContainers[container]
+	if !ok {
+		return errors.New("container is unknown")
+	}
+	source, ok := probe.Bind[field]
+	if len(probe.Bind) != 1 || !ok || !slices.Contains(BindSources, source) {
+		return errors.New("bind is malformed")
+	}
+	if (source == "command_timeout_ms") != (probe.Expect.Type == ExpectSupervisorTimeout) {
+		return errors.New("bind source does not fit its type")
+	}
+	if source == "command_timeout_ms" && spec.Profile != "grading_profile_sha256" {
+		return errors.New("no approved command timeout")
 	}
 	return nil
 }
@@ -309,10 +384,19 @@ func (c *Catalog) RequiredInstances(kindName string, trustedEndpoints []string) 
 	if !ok {
 		return nil, errors.New("catalog: kind is unknown")
 	}
-	for _, endpoint := range trustedEndpoints {
-		if !sha256Hex.MatchString(endpoint) {
-			return nil, errors.New("catalog: trusted endpoint hash is malformed")
+	if bounds, trusted := kind.EndpointRoles["trusted"]; trusted {
+		if len(trustedEndpoints) < max(1, bounds.Min) || len(trustedEndpoints) > bounds.Max {
+			return nil, errors.New("catalog: trusted endpoint count is outside its bounds")
 		}
+	} else if len(trustedEndpoints) != 0 {
+		return nil, errors.New("catalog: kind has no trusted endpoints")
+	}
+	seen := map[string]bool{}
+	for _, endpoint := range trustedEndpoints {
+		if !sha256Hex.MatchString(endpoint) || seen[endpoint] {
+			return nil, errors.New("catalog: trusted endpoint hash is malformed or repeated")
+		}
+		seen[endpoint] = true
 	}
 	var result []Instance
 	for _, probe := range kind.Probes {
@@ -341,4 +425,74 @@ func (c *Catalog) RequiredInstances(kindName string, trustedEndpoints []string) 
 		return strings.Compare(left.ID+"\x00"+left.Language+"\x00"+left.EndpointSHA256, right.ID+"\x00"+right.Language+"\x00"+right.EndpointSHA256)
 	})
 	return result, nil
+}
+
+var (
+	catalogKeys   = []string{"coverage", "freshness_max_seconds", "kinds", "languages", "not_covered", "outcomes", "pre_collection_preflight_max_age_seconds", "record_schema", "resource_containers", "review_schema", "router_namespaces", "schema", "tolerances"}
+	toleranceKeys = []string{"cpu_usage_max_permille_of_quota", "log_max_permille_of_limit", "memory_peak_max_permille_of_limit", "nofile_max_permille_of_limit", "pids_max_permille_of_limit", "scratch_max_permille_of_limit", "timeout_elapsed_max_permille_of_deadline", "version"}
+	containerKeys = []string{"log_limit_bytes", "nofile_limit", "profile", "scratch"}
+	kindKeys      = []string{"endpoint_roles", "inputs", "phases", "probes"}
+	boundsKeys    = []string{"max", "min"}
+	probeKeys     = []string{"bind", "expect", "id", "phase", "scope"}
+)
+
+// exactObject requires an object whose keys are exactly keys (sorted), by case.
+func exactObject(value any, keys []string) (map[string]any, error) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, errors.New("expected an object")
+	}
+	present := slices.Sorted(maps.Keys(object))
+	if !slices.Equal(present, keys) {
+		return nil, errors.New("keys are not the exact closed set")
+	}
+	return object, nil
+}
+
+func closedKeys(decoded any) error {
+	top, err := exactObject(decoded, catalogKeys)
+	if err != nil {
+		return err
+	}
+	if _, err := exactObject(top["tolerances"], toleranceKeys); err != nil {
+		return fmt.Errorf("tolerances: %w", err)
+	}
+	containers, ok := top["resource_containers"].(map[string]any)
+	if !ok {
+		return errors.New("resource containers are malformed")
+	}
+	for _, container := range containers {
+		if _, err := exactObject(container, containerKeys); err != nil {
+			return fmt.Errorf("resource container: %w", err)
+		}
+	}
+	kinds, ok := top["kinds"].(map[string]any)
+	if !ok {
+		return errors.New("kinds are malformed")
+	}
+	for kindName, value := range kinds {
+		kind, err := exactObject(value, kindKeys)
+		if err != nil {
+			return fmt.Errorf("%s: %w", kindName, err)
+		}
+		roles, ok := kind["endpoint_roles"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s: endpoint roles are malformed", kindName)
+		}
+		for _, bounds := range roles {
+			if _, err := exactObject(bounds, boundsKeys); err != nil {
+				return fmt.Errorf("%s endpoint role: %w", kindName, err)
+			}
+		}
+		probes, ok := kind["probes"].([]any)
+		if !ok {
+			return fmt.Errorf("%s: probes are malformed", kindName)
+		}
+		for _, probe := range probes {
+			if _, err := exactObject(probe, probeKeys); err != nil {
+				return fmt.Errorf("%s probe: %w", kindName, err)
+			}
+		}
+	}
+	return nil
 }

@@ -96,7 +96,7 @@ func TestGoldenRecordMatchesPythonBytes(t *testing.T) {
 			if err := json.Unmarshal(encoded, &expect); err != nil {
 				t.Fatal(err)
 			}
-			matched, err := Evaluate(expect, observed, SubordinateIDs{UIDStart: 100000, UIDCount: 65536}, loaded.OutcomeSet(), loaded.Tolerances)
+			matched, err := Evaluate(expect, observed, SubordinateIDs{UIDStart: 100000, UIDCount: 65536, GIDStart: 100000, GIDCount: 65536}, loaded.OutcomeSet(), loaded.Tolerances)
 			if err != nil || matched != fields["matched"].(bool) {
 				t.Fatalf("%s: matched = %v, %v", fields["id"], matched, err)
 			}

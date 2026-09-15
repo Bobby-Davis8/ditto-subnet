@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // Expectation types. Each has a closed key set in the catalog and a closed
@@ -18,8 +19,8 @@ const (
 	ExpectProfileEqual      = "profile_equal"
 	ExpectBounded           = "bounded"
 	ExpectSupervisorTimeout = "supervisor_timeout"
-	ExpectTests             = "tests"
-	ExpectSubordinateUID    = "subordinate_uid"
+	ExpectControl           = "control"
+	ExpectSubordinateIDs    = "subordinate_ids"
 )
 
 var expectKeys = map[string][]string{
@@ -28,12 +29,14 @@ var expectKeys = map[string][]string{
 	ExpectProfileEqual:      {"type"},
 	ExpectBounded:           {"tolerance", "type"},
 	ExpectSupervisorTimeout: {"tolerance", "type"},
-	ExpectTests:             {"result", "type"},
-	ExpectSubordinateUID:    {"type"},
+	ExpectControl:           {"result", "type"},
+	ExpectSubordinateIDs:    {"gid", "type", "uid"},
 }
 
 // Observed strings are short lowercase names; no address can be recorded.
 var observedString = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
+var zeroSHA256 = strings.Repeat("0", 64)
 
 // ErrObservedShape marks an observation whose shape the expectation refuses.
 var ErrObservedShape = errors.New("observed value is malformed")
@@ -45,13 +48,20 @@ type Expectation struct {
 	Value     map[string]any
 	Tolerance string
 	Result    string
+	UID       int64
+	GID       int64
 }
 
 // SubordinateIDs is the host's subordinate uid/gid range from the record.
 type SubordinateIDs struct {
 	UIDStart int64
 	UIDCount int64
+	GIDStart int64
+	GIDCount int64
 }
+
+// hostedTestGroups is the hosted grading profile's fixed test group order.
+var hostedTestGroups = []string{"hidden", "visible"}
 
 // UnmarshalJSON enforces the closed key set for the expectation type.
 func (e *Expectation) UnmarshalJSON(raw []byte) error {
@@ -103,10 +113,17 @@ func (e *Expectation) UnmarshalJSON(raw []byte) error {
 		if e.Tolerance, ok = object["tolerance"].(string); !ok {
 			return errors.New("tolerance is malformed")
 		}
-	case ExpectTests:
+	case ExpectControl:
 		if e.Result, ok = object["result"].(string); !ok {
 			return errors.New("result is malformed")
 		}
+	case ExpectSubordinateIDs:
+		uid, uidOK := nonNegative(object["uid"])
+		gid, gidOK := nonNegative(object["gid"])
+		if !uidOK || !gidOK {
+			return errors.New("candidate ids are malformed")
+		}
+		e.UID, e.GID = uid, gid
 	}
 	return nil
 }
@@ -121,8 +138,10 @@ func (e Expectation) MarshalJSON() ([]byte, error) {
 		object["value"] = e.Value
 	case ExpectBounded, ExpectSupervisorTimeout:
 		object["tolerance"] = e.Tolerance
-	case ExpectTests:
+	case ExpectControl:
 		object["result"] = e.Result
+	case ExpectSubordinateIDs:
+		object["uid"], object["gid"] = e.UID, e.GID
 	}
 	return Canonical(object)
 }
@@ -155,11 +174,15 @@ func (e Expectation) validate(outcomes map[string]bool) error {
 		if e.Tolerance != "timeout_elapsed_max_permille_of_deadline" {
 			return errors.New("tolerance is unknown")
 		}
-	case ExpectTests:
-		if e.Result != "all_pass" && e.Result != "some_fail" {
+	case ExpectControl:
+		if e.Result != "all_pass" && e.Result != "some_fail" && e.Result != "timeout" {
 			return errors.New("result is unknown")
 		}
-	case ExpectProfileEqual, ExpectSubordinateUID:
+	case ExpectSubordinateIDs:
+		if e.UID < 1 || e.UID >= SubordinateMinCount || e.GID < 1 || e.GID >= SubordinateMinCount {
+			return errors.New("candidate ids are malformed")
+		}
+	case ExpectProfileEqual:
 	default:
 		return errors.New("expect type is unknown")
 	}
@@ -314,7 +337,7 @@ func Evaluate(expect Expectation, observed any, subordinate SubordinateIDs, outc
 		limit, measured := values[0], values[1]
 		return enforced && limit >= 1 && measured >= 1 && withinPermille(measured, limit, permille), nil
 	case ExpectSupervisorTimeout:
-		object, err := observedObject(observed, "deadline_ms", "elapsed_ms", "exit_code", "live_processes")
+		object, err := observedObject(observed, "deadline_ms", "elapsed_ms", "exit_code", "live_processes", "test_group")
 		if err != nil {
 			return false, err
 		}
@@ -322,14 +345,15 @@ func Evaluate(expect Expectation, observed any, subordinate SubordinateIDs, outc
 		if err != nil {
 			return false, err
 		}
+		group, ok := object["test_group"].(string)
 		deadline, elapsed, exitCode, live := values[0], values[1], values[2], values[3]
-		if exitCode > 255 {
+		if exitCode > 255 || !ok || !slices.Contains(hostedTestGroups, group) {
 			return false, ErrObservedShape
 		}
 		return exitCode == 124 && live == 0 && deadline >= 1 && elapsed >= deadline &&
 			withinPermille(elapsed, deadline, tolerances.TimeoutElapsedMaxPermilleOfDeadline), nil
-	case ExpectTests:
-		object, err := observedObject(observed, "passed", "total")
+	case ExpectControl:
+		object, err := observedObject(observed, "passed", "suite_sha256", "timed_out", "total")
 		if err != nil {
 			return false, err
 		}
@@ -337,28 +361,36 @@ func Evaluate(expect Expectation, observed any, subordinate SubordinateIDs, outc
 		if err != nil {
 			return false, err
 		}
+		suite, suiteOK := object["suite_sha256"].(string)
+		timedOut, timedOK := object["timed_out"].(bool)
 		passed, total := values[0], values[1]
-		if passed > total {
+		if passed > total || !suiteOK || !sha256Hex.MatchString(suite) || suite == zeroSHA256 || !timedOK {
 			return false, ErrObservedShape
 		}
-		if total == 0 {
-			return false, nil // an empty suite never proves anything
+		if expect.Result == "timeout" {
+			return timedOut, nil
+		}
+		// Fewer than two tests, or a wrong control passing none, is also what a
+		// crashed grader reports; neither proves the suite ran.
+		if timedOut || total < 2 {
+			return false, nil
 		}
 		if expect.Result == "all_pass" {
 			return passed == total, nil
 		}
-		return passed < total, nil
-	case ExpectSubordinateUID:
-		object, err := observedObject(observed, "host_uid")
+		return passed >= 1 && passed < total, nil
+	case ExpectSubordinateIDs:
+		object, err := observedObject(observed, "host_gid", "host_uid")
 		if err != nil {
 			return false, err
 		}
-		values, err := integers(object, "host_uid")
+		values, err := integers(object, "host_gid", "host_uid")
 		if err != nil {
 			return false, err
 		}
-		uid := values[0]
-		return uid != 0 && subordinate.UIDStart <= uid && uid < subordinate.UIDStart+subordinate.UIDCount, nil
+		hostGID, hostUID := values[0], values[1]
+		return expect.UID < subordinate.UIDCount && expect.GID < subordinate.GIDCount &&
+			hostUID == subordinate.UIDStart+expect.UID-1 && hostGID == subordinate.GIDStart+expect.GID-1, nil
 	}
 	return false, errors.New("expect type is unknown")
 }

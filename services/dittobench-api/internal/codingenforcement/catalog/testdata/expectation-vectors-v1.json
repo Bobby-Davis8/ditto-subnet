@@ -463,7 +463,23 @@
         "deadline_ms": 1000,
         "elapsed_ms": 1100,
         "exit_code": 124,
-        "live_processes": 0
+        "live_processes": 0,
+        "test_group": "hidden"
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout visible group",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1000,
+        "exit_code": 124,
+        "live_processes": 0,
+        "test_group": "visible"
       },
       "result": "matched"
     },
@@ -477,7 +493,8 @@
         "deadline_ms": 1000,
         "elapsed_ms": 1101,
         "exit_code": 124,
-        "live_processes": 0
+        "live_processes": 0,
+        "test_group": "hidden"
       },
       "result": "unmatched"
     },
@@ -491,7 +508,8 @@
         "deadline_ms": 1000,
         "elapsed_ms": 999,
         "exit_code": 124,
-        "live_processes": 0
+        "live_processes": 0,
+        "test_group": "hidden"
       },
       "result": "unmatched"
     },
@@ -505,7 +523,8 @@
         "deadline_ms": 1000,
         "elapsed_ms": 1000,
         "exit_code": 137,
-        "live_processes": 0
+        "live_processes": 0,
+        "test_group": "hidden"
       },
       "result": "unmatched"
     },
@@ -519,7 +538,8 @@
         "deadline_ms": 1000,
         "elapsed_ms": 1000,
         "exit_code": 124,
-        "live_processes": 1
+        "live_processes": 1,
+        "test_group": "hidden"
       },
       "result": "unmatched"
     },
@@ -533,6 +553,36 @@
         "deadline_ms": 1000,
         "elapsed_ms": 1000,
         "exit_code": 380,
+        "live_processes": 0,
+        "test_group": "hidden"
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout unknown group",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1000,
+        "exit_code": 124,
+        "live_processes": 0,
+        "test_group": "private"
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "tolerance": "timeout_elapsed_max_permille_of_deadline",
+        "type": "supervisor_timeout"
+      },
+      "name": "timeout missing group",
+      "observed": {
+        "deadline_ms": 1000,
+        "elapsed_ms": 1000,
+        "exit_code": 124,
         "live_processes": 0
       },
       "result": "invalid"
@@ -540,11 +590,13 @@
     {
       "expect": {
         "result": "all_pass",
-        "type": "tests"
+        "type": "control"
       },
       "name": "all pass",
       "observed": {
         "passed": 3,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
         "total": 3
       },
       "result": "matched"
@@ -552,11 +604,13 @@
     {
       "expect": {
         "result": "all_pass",
-        "type": "tests"
+        "type": "control"
       },
       "name": "all pass with a failure",
       "observed": {
         "passed": 2,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
         "total": 3
       },
       "result": "unmatched"
@@ -564,11 +618,27 @@
     {
       "expect": {
         "result": "all_pass",
-        "type": "tests"
+        "type": "control"
+      },
+      "name": "single-test suite proves nothing",
+      "observed": {
+        "passed": 1,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
+        "total": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "control"
       },
       "name": "empty suite never passes",
       "observed": {
         "passed": 0,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
         "total": 0
       },
       "result": "unmatched"
@@ -576,11 +646,54 @@
     {
       "expect": {
         "result": "all_pass",
-        "type": "tests"
+        "type": "control"
+      },
+      "name": "timed out suite never passes",
+      "observed": {
+        "passed": 3,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": true,
+        "total": 3
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "control"
       },
       "name": "passed above total",
       "observed": {
         "passed": 4,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
+        "total": 3
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "control"
+      },
+      "name": "missing suite identity",
+      "observed": {
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "result": "all_pass",
+        "type": "control"
+      },
+      "name": "zero suite identity",
+      "observed": {
+        "passed": 3,
+        "suite_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "timed_out": false,
         "total": 3
       },
       "result": "invalid"
@@ -588,11 +701,13 @@
     {
       "expect": {
         "result": "some_fail",
-        "type": "tests"
+        "type": "control"
       },
-      "name": "wrong control fails",
+      "name": "wrong control fails some",
       "observed": {
         "passed": 1,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
         "total": 3
       },
       "result": "matched"
@@ -600,11 +715,27 @@
     {
       "expect": {
         "result": "some_fail",
-        "type": "tests"
+        "type": "control"
       },
-      "name": "wrong control passes",
+      "name": "crashed grader passes none",
       "observed": {
-        "passed": 3,
+        "passed": 0,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
+        "total": 1
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "some_fail",
+        "type": "control"
+      },
+      "name": "wrong control passes none",
+      "observed": {
+        "passed": 0,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
         "total": 3
       },
       "result": "unmatched"
@@ -612,52 +743,146 @@
     {
       "expect": {
         "result": "some_fail",
-        "type": "tests"
+        "type": "control"
       },
-      "name": "empty suite never fails usefully",
+      "name": "wrong control passes all",
       "observed": {
-        "passed": 0,
-        "total": 0
+        "passed": 3,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
+        "total": 3
       },
       "result": "unmatched"
     },
     {
       "expect": {
-        "type": "subordinate_uid"
+        "result": "timeout",
+        "type": "control"
       },
-      "name": "uid inside range",
+      "name": "hang control timed out",
       "observed": {
+        "passed": 0,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": true,
+        "total": 3
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "result": "timeout",
+        "type": "control"
+      },
+      "name": "hang control finished",
+      "observed": {
+        "passed": 3,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": false,
+        "total": 3
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "result": "timeout",
+        "type": "control"
+      },
+      "name": "timed_out not a boolean",
+      "observed": {
+        "passed": 0,
+        "suite_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "timed_out": 1,
+        "total": 3
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "gid": 65532,
+        "type": "subordinate_ids",
+        "uid": 65532
+      },
+      "name": "harness candidate mapped",
+      "observed": {
+        "host_gid": 165531,
         "host_uid": 165531
       },
       "result": "matched"
     },
     {
       "expect": {
-        "type": "subordinate_uid"
+        "gid": 10001,
+        "type": "subordinate_ids",
+        "uid": 10001
       },
-      "name": "uid at range end",
+      "name": "executor candidate mapped",
       "observed": {
-        "host_uid": 165536
+        "host_gid": 110000,
+        "host_uid": 110000
+      },
+      "result": "matched"
+    },
+    {
+      "expect": {
+        "gid": 65532,
+        "type": "subordinate_ids",
+        "uid": 65532
+      },
+      "name": "uid off by one",
+      "observed": {
+        "host_gid": 165531,
+        "host_uid": 165532
       },
       "result": "unmatched"
     },
     {
       "expect": {
-        "type": "subordinate_uid"
+        "gid": 10001,
+        "type": "subordinate_ids",
+        "uid": 10001
       },
-      "name": "uid below range",
+      "name": "gid not mapped",
       "observed": {
-        "host_uid": 99999
+        "host_gid": 100000,
+        "host_uid": 110000
       },
       "result": "unmatched"
     },
     {
       "expect": {
-        "type": "subordinate_uid"
+        "gid": 10001,
+        "type": "subordinate_ids",
+        "uid": 10001
+      },
+      "name": "any nonzero uid is not enough",
+      "observed": {
+        "host_gid": 110000,
+        "host_uid": 150000
+      },
+      "result": "unmatched"
+    },
+    {
+      "expect": {
+        "gid": 65532,
+        "type": "subordinate_ids",
+        "uid": 65532
       },
       "name": "uid negative",
       "observed": {
+        "host_gid": 165531,
         "host_uid": -1
+      },
+      "result": "invalid"
+    },
+    {
+      "expect": {
+        "gid": 65532,
+        "type": "subordinate_ids",
+        "uid": 65532
+      },
+      "name": "gid missing",
+      "observed": {
+        "host_uid": 165531
       },
       "result": "invalid"
     }
