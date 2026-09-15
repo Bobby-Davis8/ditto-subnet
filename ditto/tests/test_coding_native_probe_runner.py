@@ -149,9 +149,10 @@ def test_live_requested_config_equals_the_approved_profile():
     pinned_path = os.environ.get("DITTOBENCH_NATIVE_PROBE_ENFORCEMENT_IMAGES")
     if os.environ.get(REQUIRE_LIVE) == "1":
         assert pinned_path
-    assert report["grading_profile_sha256"] == hashlib.sha256(
-        CI_PROFILE.read_bytes()
-    ).hexdigest()
+    assert (
+        report["grading_profile_sha256"]
+        == hashlib.sha256(CI_PROFILE.read_bytes()).hexdigest()
+    )
     if pinned_path:
         raw = Path(pinned_path).read_bytes()
         pinned = json.loads(raw)
