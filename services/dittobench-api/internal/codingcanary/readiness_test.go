@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -175,5 +176,56 @@ func TestReadinessProbeIsBoundedByItsTimeout(t *testing.T) {
 	})
 	if _, decoded := getReadiness(t, service, http.MethodGet, ReadinessPath, true); !decoded.Ready {
 		t.Fatalf("readiness=%+v", decoded)
+	}
+}
+
+// The shared contract vector is the wire both the scorer and the validator
+// runtime are pinned to.
+func TestReadinessEncodesTheSharedContractVector(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), "packages", "dittobench-coding-contract", "testdata", "coding_certification_canary_readiness_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector struct {
+		Ready    map[string]any `json:"ready"`
+		Failures []string       `json:"not_ready_failures"`
+	}
+	if err := json.Unmarshal(body, &vector); err != nil {
+		t.Fatal(err)
+	}
+	pack, err := LoadPublicPack(repoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := readinessService(t, pack, func(context.Context) ReadinessCheck {
+		return ReadinessCheck{ExecutorDaemon: true, RuntimeImage: true}
+	})
+	response, _ := getReadiness(t, service, http.MethodGet, ReadinessPath, true)
+	var encoded map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(encoded, vector.Ready) {
+		t.Fatalf("readiness wire drifted from the contract vector:\n got=%v\nwant=%v", encoded, vector.Ready)
+	}
+	seen := map[string]bool{}
+	for _, check := range []struct {
+		pack  PublicPack
+		check ReadinessCheck
+	}{
+		{PublicPack{}, ReadinessCheck{ExecutorDaemon: true, RuntimeImage: true}},
+		{pack, ReadinessCheck{}},
+		{pack, ReadinessCheck{ExecutorDaemon: true}},
+	} {
+		_, decoded := getReadiness(t, readinessService(t, check.pack, func(context.Context) ReadinessCheck { return check.check }), http.MethodGet, ReadinessPath, true)
+		seen[decoded.Failure] = true
+	}
+	for _, failure := range vector.Failures {
+		if !seen[failure] {
+			t.Errorf("failure code %q is never produced", failure)
+		}
+	}
+	if len(seen) != len(vector.Failures) {
+		t.Fatalf("failure codes=%v vector=%v", seen, vector.Failures)
 	}
 }

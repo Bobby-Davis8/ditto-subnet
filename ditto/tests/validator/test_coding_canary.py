@@ -785,6 +785,47 @@ async def test_canary_runtime_readiness_fails_closed(
             await runtime.require_ready()
 
 
+async def test_canary_runtime_readiness_accepts_the_shared_contract_vector() -> None:
+    vector = json.loads(
+        (
+            Path(__file__).parents[3]
+            / "packages"
+            / "dittobench-coding-contract"
+            / "testdata"
+            / "coding_certification_canary_readiness_v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    ready = vector["ready"]
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"},
+            json=ready,
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as http:
+        runtime = CodingCanaryRuntime(_runtime_config(), http, clock=lambda: _NOW)
+        readiness = await runtime.require_ready()
+        assert readiness == CodingCanaryReadiness(
+            canary_manifest_sha256=ready["canary_manifest_sha256"],
+            runner_plan_sha256=ready["runner_plan_sha256"],
+            grader_plan_sha256=ready["grader_plan_sha256"],
+            resource_profile_sha256=ready["resource_profile_sha256"],
+            inference_policy_sha256=ready["inference_policy_sha256"],
+        )
+        for failure in vector["not_ready_failures"]:
+            ready = {**vector["ready"], "ready": False, "failure": failure}
+            with pytest.raises(PlatformInfrastructureError, match=failure):
+                await runtime.require_ready()
+    # The pinned public canary identity Platform binds into every lease.
+    assert readiness.canary_manifest_sha256 == (
+        "cb608113db0cc31001fe0a7294854453061f9e85d1471520100ce99eca97a903"
+    )
+
+
 async def test_canary_runtime_readiness_refuses_an_unreachable_scorer() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
