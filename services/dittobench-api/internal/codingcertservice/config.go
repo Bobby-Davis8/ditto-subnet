@@ -65,6 +65,7 @@ const (
 	RuntimeRepositoryEnvironment = "DITTOBENCH_CODING_CERTIFICATION_RUNTIME_IMAGE_REPOSITORY"
 	RuntimeDigestEnvironment     = "DITTOBENCH_CODING_CERTIFICATION_RUNTIME_IMAGE_DIGEST"
 	PackManifestEnvironment      = "DITTOBENCH_CODING_CERTIFICATION_PACK_MANIFEST_SHA256"
+	RouterHelperEnvironment      = "DITTOBENCH_CODING_CERTIFICATION_ROUTER_HELPER_SHA256"
 )
 
 var (
@@ -89,6 +90,7 @@ type Config struct {
 	RuntimeRepository   string
 	RuntimeImageDigest  string
 	PackManifestSHA256  string
+	RouterHelperSHA256  string
 	CertificationRoot   string
 	ControlSocketPath   string
 	DockerSocketPath    string
@@ -128,8 +130,10 @@ func ConfigFromEnvironment(getenv func(string) string, euid int) (Config, error)
 	repository := getenv(RuntimeRepositoryEnvironment)
 	digest := getenv(RuntimeDigestEnvironment)
 	manifest := getenv(PackManifestEnvironment)
+	helper := getenv(RouterHelperEnvironment)
 	if len(repository) > 255 || !repositoryPattern.MatchString(repository) ||
-		!imageDigestPattern.MatchString(digest) || !sha256Pattern.MatchString(manifest) {
+		!imageDigestPattern.MatchString(digest) || !sha256Pattern.MatchString(manifest) ||
+		!sha256Pattern.MatchString(helper) {
 		return Config{}, ErrConfig
 	}
 	credentials := getenv("CREDENTIALS_DIRECTORY")
@@ -140,7 +144,8 @@ func ConfigFromEnvironment(getenv func(string) string, euid int) (Config, error)
 	return Config{
 		ServiceUID: uid, ControlGID: gid, RouterListen: router, Runtime: runtime,
 		RuntimeRepository: repository, RuntimeImageDigest: digest, PackManifestSHA256: manifest,
-		CertificationRoot: CertificationRoot, ControlSocketPath: ControlSocketPath,
+		RouterHelperSHA256: helper,
+		CertificationRoot:  CertificationRoot, ControlSocketPath: ControlSocketPath,
 		DockerSocketPath: DockerSocketPath, RouterHelperPath: RouterHelperPath,
 		PrivateRoot: PrivateRoot, PolicyPath: PolicyPath, CredentialDirectory: credentials,
 	}, nil

@@ -44,7 +44,8 @@ validator container (root)                 host
 | Control socket | `/run/ditto-coding-certification/control.sock` | `ditto-coding-cert` | `ditto-coding-cert-clients` | `0660` |
 | Daemon socket directory | `/run/ditto-coding-certification-docker` | `ditto-coding-cert` | (any) | `0700` |
 | Daemon socket | `/run/ditto-coding-certification-docker/docker.sock` | `ditto-coding-cert` | (any) | `0600` |
-| Router helper | `/usr/local/lib/ditto-coding-certification/dittobench-coding-router-listener` | root | root | not writable by others |
+| Router helper | `/usr/local/lib/ditto-coding-certification/dittobench-coding-router-listener` | root | (any) | not group/other writable; pinned SHA-256 |
+| `nsenter` | `/usr/bin/nsenter` | root | (any) | not group/other writable |
 | Certification pack | `/usr/local/lib/ditto-coding-certification/certification-root` | root | root | read-only |
 | Locked inference policy | `/usr/local/lib/ditto-coding-certification/coding_inference_policy_locked_v1.json` | root | root | read-only |
 | Private state | `/var/lib/ditto-coding-certification/private` | `ditto-coding-cert` | | `0700` |
@@ -71,6 +72,7 @@ no `DITTOBENCH_SANDBOX_*`, `DOCKER_HOST`, proxy or CA variable):
 | `DITTOBENCH_CODING_CERTIFICATION_RUNTIME_IMAGE_REPOSITORY` | Docker repository grammar, no tag |
 | `DITTOBENCH_CODING_CERTIFICATION_RUNTIME_IMAGE_DIGEST` | `sha256:<64 hex>` |
 | `DITTOBENCH_CODING_CERTIFICATION_PACK_MANIFEST_SHA256` | the pinned canary manifest digest; startup refuses another pack |
+| `DITTOBENCH_CODING_CERTIFICATION_ROUTER_HELPER_SHA256` | SHA-256 of the installed router helper; startup refuses another helper |
 
 The coding harness gets no CA bundle, no GitHub token and fixed limits (3g
 memory, 512m tmpfs, 2 CPUs, 512 pids). The Docker CLI drops every inherited
@@ -121,8 +123,9 @@ reported as `failure`:
 | 5 | `executor_daemon` | the dedicated daemon reports rootless and carries the isolated-daemon label |
 | 6 | `runtime_image` | the pinned `sha256` runtime image digest is present locally with the supervisor contract |
 
-Startup applies the topology check before creating private state, the router
-listener or the control socket, re-verifies the listener after construction,
+Startup verifies the helper (root-owned, unwritable by others, pinned SHA-256,
+root-owned ancestors, no links) and `nsenter`, then applies the topology check
+before creating private state, the router listener or the control socket, re-verifies the listener after construction,
 and creates the control socket last.
 
 The validator worker calls readiness before issuing a lease and again between

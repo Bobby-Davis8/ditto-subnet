@@ -26,6 +26,7 @@ func validEnvironment() map[string]string {
 		RuntimeRepositoryEnvironment: "registry.invalid/ditto/coding-runtime",
 		RuntimeDigestEnvironment:     testDigest,
 		PackManifestEnvironment:      testPack,
+		RouterHelperEnvironment:      strings.Repeat("3", 64),
 		"CREDENTIALS_DIRECTORY":      "/run/credentials/ditto-coding-certification.service",
 	}
 }
@@ -100,6 +101,8 @@ func TestConfigRefusesEveryInvalidValueWithoutEchoingIt(t *testing.T) {
 		"uppercase image digest": func(v map[string]string) { v[RuntimeDigestEnvironment] = strings.ToUpper(testDigest) },
 		"short image digest":     func(v map[string]string) { v[RuntimeDigestEnvironment] = testDigest[:70] },
 		"missing pack digest":    func(v map[string]string) { delete(v, PackManifestEnvironment) },
+		"missing helper digest":  func(v map[string]string) { delete(v, RouterHelperEnvironment) },
+		"short helper digest":    func(v map[string]string) { v[RouterHelperEnvironment] = "3" },
 		"uppercase pack digest":  func(v map[string]string) { v[PackManifestEnvironment] = strings.ToUpper(testPack) },
 		"no credentials":         func(v map[string]string) { delete(v, "CREDENTIALS_DIRECTORY") },
 		"credentials elsewhere":  func(v map[string]string) { v["CREDENTIALS_DIRECTORY"] = "/var/lib/secrets" },

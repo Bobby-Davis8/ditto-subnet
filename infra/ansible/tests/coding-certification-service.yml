@@ -24,6 +24,7 @@
       coding_certification_service_runtime_image_repository: registry.invalid/ditto/coding-runtime
       coding_certification_service_runtime_image_digest: "sha256:{{ '1' * 64 }}"
       coding_certification_service_pack_manifest_sha256: cb608113db0cc31001fe0a7294854453061f9e85d1471520100ce99eca97a903
+      coding_certification_service_router_helper_sha256: "{{ '3' * 64 }}"
   tasks:
     - name: Keep the shipped defaults disabled and empty
       ansible.builtin.assert:
@@ -66,6 +67,7 @@
         coding_certification_service_runtime_image_repository: "{{ valid_profile.coding_certification_service_runtime_image_repository }}"
         coding_certification_service_runtime_image_digest: "{{ valid_profile.coding_certification_service_runtime_image_digest }}"
         coding_certification_service_pack_manifest_sha256: "{{ valid_profile.coding_certification_service_pack_manifest_sha256 }}"
+        coding_certification_service_router_helper_sha256: "{{ valid_profile.coding_certification_service_router_helper_sha256 }}"
         daemon_unit: "{{ lookup('template', templates + '/ditto-coding-certification-docker.service.j2') }}"
         service_unit: "{{ lookup('template', templates + '/ditto-coding-certification.service.j2') }}"
         environment_file: "{{ lookup('template', templates + '/ditto-coding-certification.env.j2').splitlines() }}"
@@ -99,6 +101,7 @@
           - "'DITTOBENCH_CODING_CERTIFICATION_ROUTER_LISTEN=10.203.0.1:11438' in environment_file"
           - "'DITTOBENCH_CODING_CERTIFICATION_CONTROL_GID=61002' in environment_file"
           - "'DITTOBENCH_CODING_CERTIFICATION_RUNTIME_IMAGE_DIGEST=sha256:' + '1' * 64 in environment_file"
+          - "'DITTOBENCH_CODING_CERTIFICATION_ROUTER_HELPER_SHA256=' + '3' * 64 in environment_file"
           - environment_file | select('search', 'SANDBOX|DOCKER_HOST|PROXY=|CA_BUNDLE|SSL_CERT|TOKEN') | reject('search', '^DITTOBENCH_CODING_CERTIFICATION_EGRESS_PROXY=') | list == []
 
     - name: Reject every incomplete or unsafe render profile
@@ -127,4 +130,5 @@
         - {name: egress proxy by hostname, set: {coding_certification_service_egress_proxy: "http://proxy:3128"}}
         - {name: runtime image tag, set: {coding_certification_service_runtime_image_digest: "latest"}}
         - {name: repository with a tag, set: {coding_certification_service_runtime_image_repository: "registry.invalid/runtime:latest"}}
+        - {name: missing router helper digest, set: {coding_certification_service_router_helper_sha256: ""}}
         - {name: uppercase manifest digest, set: {coding_certification_service_pack_manifest_sha256: "CB608113DB0CC31001FE0A7294854453061F9E85D1471520100CE99ECA97A903"}}

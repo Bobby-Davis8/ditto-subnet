@@ -66,6 +66,12 @@ func Run(ctx context.Context, getenv func(string) string, euid int) error {
 	if err != nil {
 		return ErrConfig
 	}
+	// The router listener runs the pinned helper through nsenter; both must be
+	// root-owned and unwritable by anyone else before either is executed.
+	if VerifyTrustedExecutable(config.RouterHelperPath, config.RouterHelperSHA256) != nil ||
+		VerifyTrustedExecutable(rootlessnetns.NsenterExecutable, "") != nil {
+		return ErrPlacement
+	}
 	placement := newPlacement(config, euid, nil, nil)
 	startup, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()

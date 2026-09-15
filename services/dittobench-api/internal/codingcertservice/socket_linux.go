@@ -1,7 +1,10 @@
 package codingcertservice
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -204,4 +207,47 @@ func (control *ControlSocket) Close() error {
 	var err error
 	control.closeOnce.Do(func() { err = control.listener.Close() })
 	return err
+}
+
+// ErrExecutable refuses an untrusted helper executable. It never names the path.
+var ErrExecutable = errors.New("coding certification executable refused")
+
+// VerifyTrustedExecutable requires path to be a regular, root-owned file that
+// no one else can write, below root-owned directories that no one else can
+// write, reached without links, and, when want is non-empty, to hash to the
+// pinned lowercase SHA-256.
+func VerifyTrustedExecutable(path string, want string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Dir(path) == "/" {
+		return ErrExecutable
+	}
+	// Root is the only acceptable owner: no service user may own the path.
+	directory, _, err := openSecureDirectory(filepath.Dir(path), 0, func(stat unix.Stat_t) bool {
+		return stat.Uid == 0 && stat.Mode&0o022 == 0
+	})
+	if err != nil {
+		return ErrExecutable
+	}
+	defer unix.Close(directory)
+	fd, err := unix.Openat(directory, filepath.Base(path), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return ErrExecutable
+	}
+	file := os.NewFile(uintptr(fd), "trusted-executable")
+	defer file.Close()
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != 0 ||
+		stat.Mode&0o022 != 0 || stat.Mode&0o111 == 0 || stat.Size <= 0 || stat.Size > 256<<20 {
+		return ErrExecutable
+	}
+	if want == "" {
+		return nil
+	}
+	hash := sha256.New()
+	if written, err := io.Copy(hash, io.LimitReader(file, stat.Size+1)); err != nil || written != stat.Size {
+		return ErrExecutable
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != want {
+		return ErrExecutable
+	}
+	return nil
 }

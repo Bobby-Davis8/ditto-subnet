@@ -1,10 +1,13 @@
 package codingcertservice
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -363,5 +366,46 @@ func TestDockerSocketRequiresOwnerModesAndNoLinks(t *testing.T) {
 	}
 	if VerifyDockerSocket(daemon(t, DockerDirectoryMode, DockerSocketMode), euid+1) == nil {
 		t.Fatal("another owner accepted")
+	}
+}
+
+func TestTrustedExecutableMustBeRootOwnedUnwritableAndPinned(t *testing.T) {
+	// /usr/bin/env is root-owned, not writable by others, below root-owned
+	// directories on any supported host.
+	if err := VerifyTrustedExecutable("/usr/bin/env", ""); err != nil {
+		t.Fatalf("system executable refused: %v", err)
+	}
+	if VerifyTrustedExecutable("/usr/bin/env", strings.Repeat("0", 64)) == nil {
+		t.Fatal("wrong pinned digest accepted")
+	}
+	body, err := os.ReadFile("/usr/bin/env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	if err := VerifyTrustedExecutable("/usr/bin/env", hex.EncodeToString(digest[:])); err != nil {
+		t.Fatalf("pinned digest refused: %v", err)
+	}
+	directory := privateTempDir(t)
+	own := filepath.Join(directory, "helper")
+	if err := os.WriteFile(own, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "env-link")
+	if err := os.Symlink("/usr/bin/env", link); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"user-owned helper":         own,
+		"symlink to a system file":  link,
+		"relative path":             "usr/bin/env",
+		"unclean path":              "/usr/bin/../bin/env",
+		"directory":                 "/usr/bin",
+		"missing":                   "/usr/bin/ditto-certification-missing-helper",
+		"below a user-owned folder": filepath.Join(directory, "missing"),
+	} {
+		if VerifyTrustedExecutable(path, "") == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 }
