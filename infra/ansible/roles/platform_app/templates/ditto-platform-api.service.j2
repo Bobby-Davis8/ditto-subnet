@@ -18,9 +18,9 @@ Type=exec
 User=ditto-api
 Group=ditto-api
 SupplementaryGroups=
-# Metadata-only seed check as ditto-api, then the server. Both source only the
-# root-owned /etc/ditto-platform/api environment files.
-ExecStartPre=/usr/local/libexec/ditto-platform-api/launch preflight
+# One launcher run resolves the release once, runs the metadata-only seed check
+# as ditto-api from it, then execs the server from the same release. It sources
+# only the root-owned /etc/ditto-platform/api environment files.
 ExecStart=/usr/local/libexec/ditto-platform-api/launch serve
 Restart=on-failure
 RestartSec=2

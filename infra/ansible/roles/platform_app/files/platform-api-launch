@@ -1,12 +1,13 @@
 #!/bin/bash
 # Managed by infra/ansible/roles/platform_app. Edits here are wiped on next run.
 #
-# Starts ditto-api, or the hosted-v2 signer metadata preflight, from a sealed
-# root-owned release as the dedicated ditto-api user. Run only by
-# ditto-platform-api.service and by the root release installer's transient
-# preflight unit (infra/docs/coding-hosted-control-signer-v2.md). It sources
-# only root-owned environment files and never touches the control-signer seed;
-# the Python loader and preflight own every seed check.
+# Starts ditto-api from a sealed root-owned release as the dedicated ditto-api
+# user, always after the hosted-v2 signer metadata preflight (`serve`), or runs
+# only that preflight (`preflight`). Run only by ditto-platform-api.service and
+# by the root release installer's transient preflight unit
+# (infra/docs/coding-hosted-control-signer-v2.md). It sources only root-owned
+# environment files and never touches the control-signer seed; the Python
+# loader and preflight own every seed check.
 set -euo pipefail
 umask 077
 
@@ -29,8 +30,9 @@ esac
   exit 77
 }
 
-# Resolve `current` once so the preflight and the server cannot straddle a
-# release switch.
+# Resolve `current` once, in this single launcher run, and use the resolved
+# release for both the preflight and the server, so the two cannot straddle a
+# release switch. The unit therefore has no separate ExecStartPre.
 release="$(readlink -e -- "${2:-$api_root/current}")" || {
   echo "ERROR: no installed ditto-api release" >&2
   exit 66
@@ -57,4 +59,5 @@ cd "$release/apps/platform"
 if [ "$mode" = preflight ]; then
   exec ./.venv/bin/python -I -m ditto.api_server.coding_hosted_signer_preflight --check-metadata
 fi
+./.venv/bin/python -I -m ditto.api_server.coding_hosted_signer_preflight --check-metadata
 exec ./.venv/bin/python -I -m ditto.api_server

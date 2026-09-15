@@ -29,6 +29,13 @@
   ansible.builtin.import_tasks: coding_hosted_signer.yml
   when: platform_coding_hosted_control_enabled | bool
 
+# --- The dedicated users must exist before any task below chowns to ditto-api
+# (Hippius evidence files, the environment copy), so a first converge with the
+# identity and Hippius evidence both on works in one pass.
+- name: Create the dedicated ditto-api and ditto-api-build accounts
+  ansible.builtin.import_tasks: api_service_accounts.yml
+  when: platform_api_service_identity_enabled | bool
+
 # --- gcloud (used to read secrets via the VM's attached runtime SA / ADC) ---
 - name: Ensure gcloud is available (GCE Debian images normally ship it)
   ansible.builtin.command: gcloud --version

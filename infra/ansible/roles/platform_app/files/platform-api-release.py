@@ -14,11 +14,14 @@ may run exactly these four argument vectors through sudo
 ``install`` fetches the revision from GitHub into fresh root-only Git
 directories, refuses it unless it is reachable from ``main``, extracts
 ``git archive`` output, copies the deploy-built dashboard as plain data, builds
-the Python environment as the unprivileged ``ditto-api-build`` user inside a
-sandboxed transient unit, then seals the tree root-owned and records a manifest
-digest. Finally it runs the hosted signer metadata preflight from that release
-as ``ditto-api``. ``activate`` re-verifies the digest, points ``current`` at the
-release and restarts ditto-platform-api.service.
+the Python environment as the unprivileged ``ditto-api-build`` user inside
+sandboxed transient units (hash-pinned build backends, no build isolation),
+then seals the tree root-owned and records a manifest digest. Finally it runs
+the hosted signer metadata preflight from that release as ``ditto-api``.
+``activate`` re-verifies the digest, points ``current`` at the release and
+restarts ditto-platform-api.service. While the root-owned environment enables
+the control signer, both refuse unless the deploy user has no live route to the
+Docker daemon.
 
 Nothing here opens, stats, hashes or copies the control-signer seed. Diagnostics
 never echo a deploy-supplied value.
@@ -48,10 +51,12 @@ from typing import IO, Any
 COMMANDS = ("install", "activate", "stop", "logs")
 BRANCH = "main"
 REVISION = re.compile(r"[0-9a-f]{40}")
-# Exactly the keys scripts/update.sh owns in .env.deploy. Values are limited to
-# characters that `set -a; . ./.env.deploy` and the launcher's quoted copy
-# both read literally: no whitespace, quotes, `$`, `&`, `;`, parentheses or
-# backslashes.
+# Exactly the keys scripts/update.sh owns in .env.deploy. A value may hold any
+# printable ASCII character that stays literal inside the single quotes this
+# installer writes, which covers every URL update.sh's upsert_env accepts
+# (`&`, `|`, `?`, `~` ...). Refused: whitespace, control characters (newline,
+# NUL), quotes, backquotes, `$` and backslashes, so nothing can expand or
+# end the quoting.
 DEPLOY_KEYS = frozenset(
     {
         "DITTO_UPLOAD_PAYMENT_ADDRESS",
@@ -63,7 +68,7 @@ DEPLOY_KEYS = frozenset(
         "SUBTENSOR_ARCHIVE_RPC_URL",
     }
 )
-DEPLOY_VALUE = re.compile(r"[A-Za-z0-9._~:/?#@!*+,=%-]{1,1024}")
+DEPLOY_VALUE = re.compile(r"[!#%&()*+,./0-9:;<=>?@A-Z\[\]^_a-z{|}~-]{1,1024}")
 PYTHON = re.compile(r"/usr/bin/python3\.[0-9]{1,2}")
 ACCOUNT = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 DASHBOARD_NAME = re.compile(r"[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,254}")
@@ -110,6 +115,11 @@ class Host:
     builder_home: Path = Path("/var/lib/ditto-platform-api-build")
     dashboard_source: Path = Path("/opt/ditto-subnet/apps/platform/dashboard/dist")
     launcher: Path = Path("/usr/local/libexec/ditto-platform-api/launch")
+    docker_probe: Path = Path(
+        "/usr/local/libexec/ditto-platform-api/deploy-docker-access"
+    )
+    proc_root: Path = Path("/proc")
+    docker_socket: Path = Path("/run/docker.sock")
     repository: str = "git@github.com:ditto-assistant/ditto-subnet.git"
     git_protocols: str = "ssh"
     unit: str = "ditto-platform-api.service"
@@ -145,6 +155,10 @@ class Host:
     @property
     def settings_file(self) -> Path:
         return self.config_dir / "release.json"
+
+    @property
+    def platform_env(self) -> Path:
+        return self.config_dir / "platform.env"
 
     @property
     def deploy_env(self) -> Path:
@@ -208,14 +222,18 @@ def parse_request(data: bytes, *, with_values: bool) -> Request:
     values: dict[str, str] = {}
     for number, line in enumerate(lines[1:], start=2):
         key, separator, value = line.partition("=")
-        if (
-            not with_values
-            or not separator
-            or key not in DEPLOY_KEYS
-            or key in values
-            or not DEPLOY_VALUE.fullmatch(value)
-        ):
-            raise ReleaseError(f"request line {number} is not an allowed deploy value")
+        if not separator or key not in DEPLOY_KEYS:
+            # Never echo the line: it is not a known key, so it may be a value.
+            raise ReleaseError(f"request line {number} is not an allowed deploy key")
+        if not with_values:
+            raise ReleaseError(f"{key}: activate requests carry no deploy values")
+        if key in values:
+            raise ReleaseError(f"{key} appears more than once")
+        if not DEPLOY_VALUE.fullmatch(value):
+            raise ReleaseError(
+                f"{key} is empty, longer than 1024 characters, or holds whitespace, "
+                "a control character, a quote, a backquote, `$` or a backslash"
+            )
         values[key] = value
     return Request(revision, tuple(sorted(values.items())))
 
@@ -321,6 +339,7 @@ def require_host(host: Host, settings: Settings) -> None:
     ):
         require_trusted_file(executable, host, modes={0o755, 0o555})
     require_trusted_file(host.launcher, host, modes={0o755, 0o555})
+    require_trusted_file(host.docker_probe, host, modes={0o755, 0o555})
     require_distinct_accounts(host, settings)
     builder = account(host.builder_user)
     info = _lstat(host.builder_home)
@@ -331,6 +350,47 @@ def require_host(host: Host, settings: Settings) -> None:
     ):
         raise ReleaseError(f"{host.builder_home} must be a 0700 builder directory")
     require_trusted_directory(host.builder_home.parent, host)
+
+
+def signer_enabled(host: Host) -> bool:
+    """Read the activation flag the unit will start with, the way the loader does.
+
+    Only an explicit false or 0 disables; any other value, including one the
+    loader would reject, counts as enabled so the Docker check still runs.
+    """
+    require_trusted_file(host.platform_env, host, modes={0o640})
+    value = "false"
+    for line in host.platform_env.read_text().splitlines():
+        if line.startswith("DITTO_CODING_HOSTED_CONTROL_ENABLED="):
+            value = line.split("=", 1)[1].strip().strip("'\"").lower()
+    return value not in {"false", "0"}
+
+
+def require_deploy_without_docker(host: Host, settings: Settings, run: Runner) -> None:
+    """Refuse while any live deploy process could reach the root Docker daemon.
+
+    Docker access is root-equivalent, so it would reach the seed. Group files
+    alone are not enough: a running pm2 daemon keeps its old groups.
+    """
+    result = run(
+        [
+            str(settings.python),
+            "-I",
+            str(host.docker_probe),
+            f"--user={settings.platform_owner}",
+            "--group=docker",
+            f"--proc={host.proc_root}",
+            f"--socket={host.docker_socket}",
+        ],
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+    )
+    if result.returncode != 0:
+        raise ReleaseError(
+            f"{settings.platform_owner} can still reach the Docker daemon (see the "
+            "lines above), so the hosted control signer may not run. Enable "
+            "platform_pylon_root_unit_enabled, converge, restart pm2-deploy.service, "
+            "then redeploy"
+        )
 
 
 # --- Reviewed source --------------------------------------------------------
@@ -602,58 +662,125 @@ def sandbox_arguments(unit: str, user: str) -> list[str]:
 def build_environment(
     host: Host, settings: Settings, release: Path, revision: str, run: Runner
 ) -> None:
+    """Build .venv as ditto-api-build without resolving any build backend.
+
+    Every build dependency (hatchling, hatch-vcs, editables and their
+    requirements) comes from the reviewed release-build-requirements.txt,
+    installed as wheels with every hash required. `uv sync --no-build-isolation`
+    then builds the project, the shared protocol and the pinned Git dependency
+    with exactly those backends and removes them again; runtime packages are
+    verified against uv.lock.
+    """
     platform = release / "apps" / "platform"
     venv = platform / ".venv"
+    requirements = platform / "release-build-requirements.txt"
+    require_trusted_file(requirements, host, modes={0o644})
     builder = account(host.builder_user)
     venv.mkdir(mode=0o755)
     os.chown(venv, builder.pw_uid, builder.pw_gid)
     cache = host.builder_home / "uv-cache"
-    argv = [
-        host.systemd_run,
-        *sandbox_arguments(
-            f"ditto-platform-api-build-{revision[:12]}", host.builder_user
+    steps = (
+        ("venv", ["venv", "--quiet", str(venv)]),
+        (
+            "build-backends",
+            [
+                "pip",
+                "install",
+                "--quiet",
+                "--require-hashes",
+                "--no-build",
+                f"--python={venv}/bin/python",
+                f"--requirements={requirements}",
+            ],
         ),
-        f"--property=ReadWritePaths={venv} {host.builder_home}",
-        "--property=InaccessiblePaths=-/etc/ditto-platform -/opt/ditto-subnet "
-        f"-{host.work_root} -/run/docker.sock",
-        f"--working-directory={platform}",
-        "--setenv=PATH=/usr/bin:/bin",
-        f"--setenv=HOME={host.builder_home}",
-        f"--setenv=UV_CACHE_DIR={cache}",
-        f"--setenv=UV_PYTHON={settings.python}",
-        "--setenv=UV_PYTHON_DOWNLOADS=never",
-        "--setenv=UV_PYTHON_PREFERENCE=only-system",
-        "--setenv=UV_NO_CONFIG=1",
-        # Copies, never hard links into the builder-owned cache.
-        "--setenv=UV_LINK_MODE=copy",
-        # The sealed tree is read-only at run time, so compile dependencies now.
-        "--setenv=UV_COMPILE_BYTECODE=1",
-        f"--setenv=UV_PROJECT_ENVIRONMENT={venv}",
-        "--",
-        host.uv,
-        "sync",
-        "--frozen",
-        "--no-dev",
-        "--no-progress",
-        f"--project={platform}",
-    ]
-    # The transient unit's cgroup is stopped when uv exits, so no builder
-    # process survives to write into the tree after it is sealed.
-    _checked(
-        run(argv, env={"PATH": "/usr/bin:/bin", "LANG": "C"}),
-        "the Python environment build failed",
+        (
+            "sync",
+            [
+                "sync",
+                "--frozen",
+                "--no-dev",
+                "--no-build-isolation",
+                "--no-progress",
+                f"--project={platform}",
+            ],
+        ),
     )
+    for step, arguments in steps:
+        argv = [
+            host.systemd_run,
+            *sandbox_arguments(
+                f"ditto-platform-api-build-{step}-{revision[:12]}", host.builder_user
+            ),
+            f"--property=ReadWritePaths={venv} {host.builder_home}",
+            "--property=InaccessiblePaths=-/etc/ditto-platform -/opt/ditto-subnet "
+            f"-{host.work_root} -/run/docker.sock",
+            f"--working-directory={platform}",
+            "--setenv=PATH=/usr/bin:/bin",
+            f"--setenv=HOME={host.builder_home}",
+            f"--setenv=UV_CACHE_DIR={cache}",
+            f"--setenv=UV_PYTHON={settings.python}",
+            "--setenv=UV_PYTHON_DOWNLOADS=never",
+            "--setenv=UV_PYTHON_PREFERENCE=only-system",
+            "--setenv=UV_NO_CONFIG=1",
+            # Copies, never hard links into the builder-owned cache.
+            "--setenv=UV_LINK_MODE=copy",
+            # The sealed tree is read-only at run time, so compile bytecode now.
+            "--setenv=UV_COMPILE_BYTECODE=1",
+            f"--setenv=UV_PROJECT_ENVIRONMENT={venv}",
+            "--",
+            host.uv,
+            *arguments,
+        ]
+        # Each transient unit's cgroup is stopped when uv exits, so no builder
+        # process survives to write into the tree after it is sealed.
+        _checked(
+            run(argv, env={"PATH": "/usr/bin:/bin", "LANG": "C"}),
+            f"the Python environment build failed at {step}",
+        )
 
 
-def _allowed_link(release: Path, path: Path, target: str, settings: Settings) -> bool:
+MAX_LINK_HOPS = 40
+
+
+def _allowed_link(release: Path, path: Path, settings: Settings) -> bool:
+    """Resolve the link hop by hop the way the kernel would.
+
+    Every intermediate step must stay inside the release, so a chain of
+    relative links cannot escape even when each target looks harmless on its
+    own. The one exception is a .venv/bin/python* link whose resolution ends at
+    the pinned root-owned interpreter.
+    """
     relative = path.relative_to(release)
-    venv_bin = ("apps", "platform", ".venv", "bin")
-    if target == str(settings.python):
-        return relative.parts[:-1] == venv_bin and relative.name.startswith("python")
-    if os.path.isabs(target):
-        return False
-    resolved = os.path.normpath(os.path.join(path.parent, target))
-    return resolved == str(release) or resolved.startswith(f"{release}{os.sep}")
+    python_link = relative.parts[:-1] == (
+        "apps",
+        "platform",
+        ".venv",
+        "bin",
+    ) and relative.name.startswith("python")
+    pending = list(relative.parts)
+    current = release
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if current == release:
+                return False
+            current = current.parent
+            continue
+        candidate = current / part
+        if not candidate.is_symlink():
+            current = candidate
+            continue
+        hops += 1
+        if hops > MAX_LINK_HOPS:
+            return False
+        target = os.readlink(candidate)
+        if os.path.isabs(target):
+            return python_link and target == str(settings.python) and not pending
+        pending = [*Path(target).parts, *pending]
+    return True
 
 
 def seal(host: Host, settings: Settings, release: Path) -> None:
@@ -663,7 +790,7 @@ def seal(host: Host, settings: Settings, release: Path) -> None:
             path = Path(directory) / name
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
-                if not _allowed_link(release, path, os.readlink(path), settings):
+                if not _allowed_link(release, path, settings):
                     raise ReleaseError(
                         f"release link {path.relative_to(release)} leaves the release"
                     )
@@ -818,6 +945,8 @@ def locked(host: Host) -> Iterator[None]:
 def install(host: Host, request: Request, run: Runner) -> str:
     settings = load_settings(host)
     require_host(host, settings)
+    if signer_enabled(host):
+        require_deploy_without_docker(host, settings, run)
     owner = account(settings.platform_owner)
     release = host.releases / request.revision
     reused = False
@@ -849,13 +978,14 @@ def install(host: Host, request: Request, run: Runner) -> str:
                 copy_dashboard(host.dashboard_source, dashboard / "dist", owner.pw_uid)
                 build_environment(host, settings, release, request.revision, run)
                 seal(host, settings, release)
+                # The receipt hashes the tree once; activate verifies it again
+                # at the moment it switches, so no second pass here.
                 write_receipt(host, settings, release, request.revision)
             except BaseException:
                 shutil.rmtree(release, ignore_errors=True)
                 raise
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
-        verify_release(host, settings, request.revision)
     run_preflight(host, release, request.revision, run)
     stage_deploy_env(host, request)
     return "reused" if reused else "installed"
@@ -873,6 +1003,8 @@ def _current_revision(host: Host) -> str | None:
 def activate(host: Host, request: Request, run: Runner) -> None:
     settings = load_settings(host)
     require_host(host, settings)
+    if signer_enabled(host):
+        require_deploy_without_docker(host, settings, run)
     verify_release(host, settings, request.revision)
     staged = host.staged_deploy_env(request.revision)
     if staged.exists():
@@ -889,6 +1021,15 @@ def activate(host: Host, request: Request, run: Runner) -> None:
             env={"PATH": "/usr/bin:/bin", "LANG": "C"},
         ),
         f"could not enable {host.unit}",
+    )
+    # A unit that hit its start limit refuses to start again for the limit
+    # interval, which would block a rollback deploy; clear that first.
+    _checked(
+        run(
+            [host.systemctl, "reset-failed", host.unit],
+            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+        ),
+        f"could not reset {host.unit}",
     )
     _checked(
         run(

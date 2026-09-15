@@ -1,7 +1,7 @@
 ---
-# Imported from tasks/main.yml when platform_api_service_identity_enabled.
-# Default off; turning it on is a reviewed activation
-# (infra/docs/coding-hosted-control-signer-v2.md).
+# Imported from tasks/main.yml when platform_api_service_identity_enabled, after
+# tasks/api_service_accounts.yml created the users. Default off; turning it on
+# is a reviewed activation (infra/docs/coding-hosted-control-signer-v2.md).
 #
 # Prepares ditto-api to run as the locked-down `ditto-api` user from sealed,
 # root-owned releases instead of under the deploy user's pm2:
@@ -65,59 +65,6 @@
       only root can write. Sealed releases link their environment to it.
     quiet: true
 
-- name: Ensure the dedicated service groups
-  ansible.builtin.group:
-    name: "{{ item }}"
-    system: true
-    state: present
-  loop:
-    - ditto-api
-    - ditto-api-build
-
-- name: Ensure the locked-down ditto-api and ditto-api-build users
-  ansible.builtin.user:
-    name: "{{ item.name }}"
-    group: "{{ item.name }}"
-    # Exactly no supplementary group: not docker, ditto, sudo, adm or
-    # systemd-journal.
-    groups: []
-    append: false
-    system: true
-    shell: /usr/sbin/nologin
-    home: "{{ item.home }}"
-    create_home: false
-    password: "!"
-    comment: "{{ item.comment }}"
-    state: present
-  loop:
-    - name: ditto-api
-      home: /var/lib/ditto-platform-api
-      comment: Ditto Platform API (hosted control signer)
-    - name: ditto-api-build
-      home: /var/lib/ditto-platform-api-build
-      comment: Ditto Platform API release builder
-  loop_control:
-    label: "{{ item.name }}"
-
-- name: Read group membership for the dedicated users
-  ansible.builtin.getent:
-    database: group
-
-- name: Refuse privileged group membership for the dedicated users
-  ansible.builtin.assert:
-    that:
-      - >-
-        item.1 not in
-        (ansible_facts['getent_group'].get(item.0, ['', '', ''])[2] | default('') | split(','))
-    fail_msg: "{{ item.1 }} must not be a member of {{ item.0 }}."
-    quiet: true
-  loop: >-
-    {{ ['docker', 'sudo', 'adm', 'systemd-journal', 'google-sudoers',
-        deploy_group | default('ditto'), platform_group, platform_owner]
-       | unique | product(['ditto-api', 'ditto-api-build']) | list }}
-  loop_control:
-    label: "{{ item.1 }} not in {{ item.0 }}"
-
 - name: Ensure the root-owned release and configuration directories
   ansible.builtin.file:
     path: "{{ item.path }}"
@@ -155,6 +102,14 @@
   ansible.builtin.copy:
     src: platform-api-launch
     dest: /usr/local/libexec/ditto-platform-api/launch
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the live Docker-access probe the installer runs for the signer
+  ansible.builtin.copy:
+    src: deploy-docker-access.py
+    dest: /usr/local/libexec/ditto-platform-api/deploy-docker-access
     owner: root
     group: root
     mode: "0755"
