@@ -33,11 +33,16 @@ The Go host is constructed when `DITTOBENCH_CODING_SHADOW_ENABLED=true` or
 executor factory, artifact fetcher, scoped memory projector, durable outbox,
 dormant screened-harness controller, direct-source registry, opaque workspace
 and Luna routes, relay journal, attempt supervisor, publication service, and a
-bounded outbox sweep loop. The public-canary handler is attached only when
-`DITTOBENCH_CODING_CANARY_ENABLED=true` and
-`DITTOBENCH_CODING_CERTIFICATION_ROOT` contains the pinned `certification/v1`
-pack; a canary-enabled host without that pack fails closed. The sandbox scorer
-image carries that pack, and Compose pins the root to it (see
+bounded outbox sweep loop. Every harness and executor Docker call targets
+`DITTOBENCH_CODING_DOCKER_HOST`, the dedicated rootless coding daemon, never
+the scorer's own `DOCKER_HOST`. The public-canary handler and its readiness
+probe are attached only when `DITTOBENCH_CODING_CANARY_ENABLED=true` and
+`DITTOBENCH_CODING_CERTIFICATION_ROOT` holds a `certification/v1` pack that
+passes the loader's integrity checks. If the host cannot be built (missing or
+rootful daemon endpoint, private root, listener, daemon probe, runtime
+repository, or pack), the scorer logs the refusal, every coding route answers
+404, and ordinary scoring continues. The sandbox scorer image carries the pack,
+and Compose pins the root to it (see
 [Validator certification canary](#validator-certification-canary)). The
 default-off canary worker claims a lease, exchanges a lease-bound inference
 grant, posts the exchanged grant into the canary control plane, and always
@@ -143,80 +148,131 @@ execution, certification, scoring, or emissions authority.
 The contract-v1 certification canary runs on the ordinary production
 validator stack, beside scoring, through the supported lease, grant, and
 receipt path. There is no admin certification bypass. Every switch below ships
-false.
+false, and every target list ships empty.
 
-- **Scorer origin.** `CodingCanaryRuntime` accepts an HTTPS origin, a loopback
-  origin, or exactly the Compose service origin `http://sandbox-docker:8000`.
-  Every other plaintext host or port is rejected, as are paths, userinfo,
-  queries, and fragments. Plaintext is acceptable only there: the scorer shares
-  sandbox-docker's network namespace on the stack's private bridge, and miner
-  containers in the nested daemon cannot reach port 8000. The scorer bearer
-  and per-lease broker private key use a dedicated client that ignores proxy
-  environment settings.
-- **Certify bound.** The certify call is single-shot. Its timeout is the time
-  left before the lease deadline, capped at the scorer's 32-minute operation
-  bound. The call is refused once the deadline has passed. A deadline or task
-  cancellation closes the stream, so the scorer sees the disconnect and
-  destroys the harness. The worker still revokes the grant in its shielded
-  cleanup.
-- **Scorer pack.** The `coding-certification-pack` build stage copies the
-  committed `certification/v1` capsule and the locked inference policy it
-  names, then:
-  - checks each file against a pinned SHA-256 digest, including the manifest
-    digest that Platform binds into leases;
-  - fails the build on any extra file or link;
-  - makes the tree read-only.
+- **Scorer origin.** `coding_executor_transport.scorer_control_origin` is the
+  single rule for the canary runtime and the local-mode shadow supervisor. It
+  accepts an HTTPS origin, a loopback origin, or exactly the Compose service
+  origin `http://sandbox-docker:8000`. Every other plaintext host or port is
+  rejected, as are paths, userinfo, queries, and fragments. Plaintext is
+  acceptable only there: the scorer shares sandbox-docker's network namespace
+  on the stack's private bridge, and miner containers in the nested daemon
+  cannot reach port 8000. Both workers share one private scorer client, which
+  ignores proxy environment settings, for the scorer bearer and the per-lease
+  broker private key.
+- **Dedicated coding daemon.** The scorer's coding host reaches Docker only
+  through `DITTOBENCH_CODING_DOCKER_HOST`. That value must be a local
+  `unix:///...sock` endpoint. It must not be a conventional rootful socket
+  (`/var/run/docker.sock`, `/run/docker.sock`) or the scorer's own
+  `DOCKER_HOST`, which on Compose is the privileged rootful sandbox-docker
+  daemon at `tcp://127.0.0.1:2375`. The daemon must also prove, live, that it
+  runs rootless and carries the isolated-daemon label. When the value is unset,
+  which is the default, every coding gate is refused.
+- **Targets.** The worker takes a lease only for an exact target:
+  `VALIDATOR_CODING_CANARY_AGENT_IDS` (1 to 16 canonical agent UUIDs) together
+  with `VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY`, which must equal this
+  validator's own hotkey. Both default to empty, which refuses every lease, and
+  a copied configuration cannot make another validator run the canary.
+  Non-target offers are dropped. Targets are rechecked before issue, and an
+  issued lease naming another agent or hotkey is aborted before claim. Platform's
+  separate certification allowlist binds the same agent and hotkey plus the
+  artifact.
+- **Readiness before issue and claim.** Before issuing a lease, the worker
+  calls `GET /v1/coding/certifier/canary/readiness` with the canary bearer.
+  The probe creates no harness, container, grant, or lease. It reports ready
+  only when three checks pass: the loaded pack re-verifies; the dedicated
+  daemon passes the harness check and the executor's rootless and
+  isolated-label checks; and the exact runtime image digest is present with the
+  supervisor contract. It also returns the pack's five lease digests. Any other
+  answer, including a 404 from a refused host, refuses before issue and keeps
+  the offer. After issue, the worker aborts the still-issued lease if its pack
+  digests differ from the ready scorer's.
+- **Certify bound.** The certify call is single-shot. Its only bound is the
+  time left before the lease deadline. Platform issues 20-minute deadlines, the
+  lease model rejects a deadline more than 30 minutes after issue, and the
+  scorer stops the operation at the same deadline and at its 20-minute default.
+  `asyncio.timeout` enforces that bound over the whole exchange, with short
+  connect, write, and pool limits and no read timeout. The call is refused once
+  the deadline has passed, and every deadline error says "deadline exceeded". A
+  deadline or task cancellation closes the stream, so the scorer sees the
+  disconnect and destroys the harness. The worker still revokes the grant in
+  its shielded cleanup.
+- **Scorer pack.** Integrity is enforced by the loader
+  (`codingcanary.LoadPublicPack`), not by Dockerfile pins:
+  - the grader tree must hold exactly the manifest's `grader_files` (path,
+    size, SHA-256), and Platform binds the manifest digest into every lease;
+  - the visible workspace must match one pinned listing digest;
+  - the locked policy must match its pinned digest;
+  - any other file, link, or special file fails closed.
 
-  Only the `sandbox` target carries it, root-owned, at
-  `/opt/ditto/coding/certification-root`. Compose pins
-  `DITTOBENCH_CODING_CERTIFICATION_ROOT` to that path. The scorer reads it only
-  when `DITTOBENCH_CODING_CANARY_ENABLED=true`, and the root is not
-  operator-selectable, because the runtime loader does not re-hash the
-  workspace or grader files. A pack edit selects the scorer release.
+  Interpreter caches and Finder metadata (`__pycache__/`, `*.pyc`,
+  `.DS_Store`) are neither verified nor bundled, and the root `.dockerignore`
+  excludes the same names at any depth. The `coding-certification-pack` build
+  stage only copies the committed `certification/v1` capsule and locked policy
+  and makes them read-only, so a stray or tampered file disables the canary
+  route but never fails the scorer build. Only the `sandbox` target carries the
+  pack, root-owned, at `/opt/ditto/coding/certification-root`, and Compose pins
+  `DITTOBENCH_CODING_CERTIFICATION_ROOT` to that path. A pack edit selects the
+  scorer release.
 - **Production rendering.** The `validator_stack` role has two switches:
-  - `validator_stack_dittobench_coding_canary_enabled` renders the scorer gate
-    and the runtime image repository and `sha256:` digest;
-  - `validator_stack_coding_canary_enabled` renders the validator worker and
-    its poll interval, and requires the scorer switch.
+  - `validator_stack_dittobench_coding_canary_enabled` renders the scorer gate,
+    the runtime image repository (Docker reference grammar) and `sha256:`
+    digest, and `validator_stack_coding_docker_host`. It builds the whole
+    scorer coding host, not just a route. A failure leaves the coding routes at
+    404 and ordinary scoring running.
+  - `validator_stack_coding_canary_enabled` renders the validator worker, its
+    poll interval, `validator_stack_coding_canary_agent_ids`, and
+    `validator_stack_coding_canary_validator_hotkey`. It requires the scorer
+    switch, the dedicated daemon endpoint, and 1 to 16 exact targets bound to
+    `validator_stack_hotkey`.
 
-  Validation runs before any host mutation. Stage the scorer switch first, then
+  Validation runs before any host mutation. Stage the scorer switch first. Then
   confirm two things before turning on the validator switch: the scorer stays
-  healthy, and the canary route no longer returns 404.
+  healthy, and the readiness probe answers `ready: true`.
 - **Exchange origin.** Validators accept a coding grant exchange URL only when
   it is exactly `{VALIDATOR_PLATFORM_API_URL}/api/v1/validator/...`. Platform
   renders that URL from `platform_coding_validator_api_base_url`, which
-  production pins to `https://platform-api.heyditto.ai`, not the
-  `https://dittobench.ai` inference origin. The default keeps other hosts'
-  rendering unchanged. Production still leaves `platform_coding_shadow_enabled`
+  defaults to `https://{{ platform_domain }}` on every host
+  (`https://platform-api.heyditto.ai` in production), never the
+  `https://dittobench.ai` inference origin. Shadow transport activation asserts
+  exactly that origin. Production still leaves `platform_coding_shadow_enabled`
   unset.
 
 ### Remaining prerequisite: rootless coding daemon
 
-The production `sandbox-docker` service is privileged rootful DinD. The
-certification executor requires a rootless daemon with the isolated-daemon
-label and checks this in its Docker preflight. That check runs during
-`certify`, after Platform has already issued and claimed the lease. This change
-installs no such daemon, and the canary runtime has no remote-executor mode.
-Do not enable `validator_stack_coding_canary_enabled` on a host until a
-separately reviewed rootless, isolated coding daemon serves that scorer.
+The production `sandbox-docker` service is privileged rootful DinD, and it is
+the only daemon in the stack. Nothing here installs the dedicated rootless
+coding daemon, so both canary switches are refused (in the role, in the scorer,
+and by the readiness probe) until a separately reviewed change provides it.
+That change must provide:
+
+- a rootless Docker daemon, separate from sandbox-docker, labelled
+  `io.heyditto.dittobench.isolated=true`, whose `docker info` security options
+  include `rootless`;
+- its Unix socket mounted into the `dittobench-api` container and named by
+  `DITTOBENCH_CODING_DOCKER_HOST`, never the rootful sandbox socket;
+- the scorer's coding sandbox profile against that daemon:
+  `DITTOBENCH_SANDBOX_EGRESS_NETWORK` and `DITTOBENCH_SANDBOX_EGRESS_PROXY`
+  (the coding harness requires both), and a reachable host gateway;
+- the reviewed runtime image `repository@sha256:digest` preloaded on that
+  daemon with the supervisor-contract label, because nothing is pulled at
+  certify;
+- stale-resource cleanup for that daemon, and the coding source listener
+  (`:11438`) and relay reachable from its containers.
 
 ### One-shot risks
 
-A certification attempt is not retried. Today a lease that fails after claim
-never expires and cannot be aborted. Causes include the missing daemon, the
-certify deadline, and a Platform 503 during grant exchange or submission. The
-failure blocks certification for that exact agent, artifact, and screened
-image. The separate Platform lease-expiry PR mitigates this by expiring and
-boundedly aborting claimed leases. Until it lands, treat each enabled attempt
-as irreversible.
+A certification attempt is not retried. Readiness and targeting now refuse
+the known pre-claim failures. A lease can still fail after claim, for example
+on the certify deadline or a Platform 503 during grant exchange or submission.
+On `main` such a lease never expires, which blocks certification for that exact
+agent, artifact, and screened image. The companion Platform change expires
+claimed leases after their deadline, caps claims at 3 per identity per 24 hours,
+and adds an operator allowlist. Until that change is merged and verified,
+treat each enabled attempt as irreversible.
 
-Two more constraints apply:
-
-- **No targeting.** The worker is offered every agent the validator scores. With
-  both switches on and no targeting allowlist, the validator attempts
-  certification for every qualified agent, not one chosen canary.
-- **Short validity.** An issued certificate is valid for one hour. Any hosted
-  assignment that depends on it must be created inside that window.
+An issued certificate is valid for one hour. Any hosted assignment that depends
+on it must be created inside that window.
 
 ## Activation checklist
 
@@ -253,8 +309,8 @@ scorer or worker consumer. It creates an empty daemon identity and an empty
 socket-client group only; enabling a future coding worker remains a separate
 reviewed operator action.
 
-Setting only a subset fails closed: no ticket is claimed, or startup rejects
-the incomplete runtime. The committed Compose values keep both worker gates
+Setting only a subset fails closed: no ticket is claimed, or the scorer logs
+a refusal and serves ordinary scoring with every coding route disabled. The committed Compose values keep both worker gates
 false. This PR does not deploy the Platform transport configuration, change a
 benchmark version, combine coding with ordinary scoring, alter emissions, or
 enable a leaderboard weight.
@@ -268,7 +324,9 @@ uv run pytest -q ditto/tests/validator/test_coding_worker.py \
   ditto/tests/validator/test_coding_publication.py \
   ditto/tests/validator/test_coding_canary.py \
   ditto/tests/validator/test_coding_runtime_wiring.py \
-  ditto/tests/test_coding_certification_scorer_image.py
+  ditto/tests/validator/test_config.py \
+  ditto/tests/test_coding_certification_scorer_image.py \
+  ditto/tests/test_coding_executor_validator_runtime.py
 
 (cd infra/ansible && uvx --from ansible-core==2.21.2 ansible-playbook --check \
   -i localhost, tests/validator-stack-coding-canary.yml)
@@ -276,6 +334,8 @@ uv run pytest -q ditto/tests/validator/test_coding_worker.py \
 cd services/dittobench-api
 go test -race ./internal/codinghost ./internal/codingpublication \
   ./internal/codingsupervisor ./internal/codingphase \
-  ./internal/codingattempt ./internal/codingexecutor ./internal/codingcanary
+  ./internal/codingattempt ./internal/codingexecutor ./internal/codingcanary \
+  ./internal/sandbox
+go test -run 'Coding|ControlPlane' ./cmd/dittobench-api
 go vet ./...
 ```
