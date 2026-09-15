@@ -124,16 +124,23 @@ func TestObserveRequestedConfigRefusesUnpinnedImagesAndLanguages(t *testing.T) {
 		_, err := ObserveHostedGradingRequestedConfig(context.Background(), rootlessDocker(), value)
 		return err
 	}
-	for name, change := range map[string]func(*HostedGradingRequest){
-		"no image set":     func(r *HostedGradingRequest) { r.EnforcementImages = nil },
-		"unknown language": func(r *HostedGradingRequest) { r.Languages = []string{"java"} },
-		"repeated":         func(r *HostedGradingRequest) { r.Languages = []string{"python", "python"} },
-		"unmeasured runner": func(r *HostedGradingRequest) {
+	// Each refusal must come from its own guard, not from a later failure.
+	for name, test := range map[string]struct {
+		change func(*HostedGradingRequest)
+		reason string
+	}{
+		"no image set":     {func(r *HostedGradingRequest) { r.EnforcementImages = nil }, "enforcement images are malformed"},
+		"unknown language": {func(r *HostedGradingRequest) { r.Languages = []string{"java"} }, "unknown language"},
+		"repeated":         {func(r *HostedGradingRequest) { r.Languages = []string{"python", "python"} }, "repeated"},
+		"unmeasured runner": {func(r *HostedGradingRequest) {
 			r.RunnerSHA256 = func() (string, error) { return "", errors.New("unreadable") }
-		},
+		}, "could not be measured"},
+		"malformed runner digest": {func(r *HostedGradingRequest) {
+			r.RunnerSHA256 = func() (string, error) { return strings.Repeat("A", 64), nil }
+		}, "could not be measured"},
 	} {
-		if err := request(change); err == nil {
-			t.Errorf("%s accepted", name)
+		if err := request(test.change); err == nil || !strings.Contains(err.Error(), test.reason) {
+			t.Errorf("%s: want %q, got %v", name, test.reason, err)
 		}
 	}
 	sum := sha256.Sum256(profile)

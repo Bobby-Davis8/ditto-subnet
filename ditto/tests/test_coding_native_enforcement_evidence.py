@@ -2385,21 +2385,23 @@ def test_records_bind_the_exact_release_index(world, change, reason):
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
-        ("runtime_archive_sha256", digest("x"), "runtime_archive_sha256 differs"),
-        ("source_revision", "f" * 40, "source_revision differs"),
+        ("runtime_archive_sha256", digest("x"), "runtime_archive_sha256"),
+        ("source_revision", "f" * 40, "source_revision"),
     ],
 )
 def test_record_release_fields_must_equal_the_release_index(
     world, field, value, reason
 ):
+    # The exact index refusal: the preflight comparison would also name the
+    # field, so a substring match would pass without the index check.
     record = copy.deepcopy(world.records["cleanup_recovery"])
     record["release"][field] = value
     failure = world.verify_record(record)
-    assert failure is not None and reason in failure
+    assert failure == f"record {reason} differs from the release index"
     record = copy.deepcopy(world.records["cleanup_recovery"])
     record["release"]["image_approval_sha256"]["rust"] = digest("x")
     failure = world.verify_record(record)
-    assert failure is not None and "image_approval_sha256 differs" in failure
+    assert failure == "record image_approval_sha256 differs from the release index"
 
 
 @pytest.mark.parametrize(
