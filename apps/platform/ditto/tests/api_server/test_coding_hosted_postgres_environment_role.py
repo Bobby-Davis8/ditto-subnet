@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -20,7 +21,7 @@ TASKS = (
 )
 
 
-def _set_fact(key: str) -> object:
+def _set_fact(key: str) -> Any:
     """Return the value a set_fact task assigns to ``key`` in materialize.yml."""
     for task in yaml.safe_load(TASKS.read_text()):
         arguments = task.get("ansible.builtin.set_fact", {})
