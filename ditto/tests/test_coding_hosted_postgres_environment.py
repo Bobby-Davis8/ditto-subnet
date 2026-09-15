@@ -3,6 +3,7 @@
 import copy
 import grp
 import hashlib
+import importlib.util
 import json
 import os
 import pwd
@@ -10,6 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,13 @@ GROUP_CHECK = (
     "ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) "
     "| length == 0"
 )
-NON_OVERRIDABLE_MAGIC = {"groups", "ansible_play_hosts_all"}
+NON_OVERRIDABLE_MAGIC = {
+    "groups",
+    "ansible_play_hosts_all",
+    "ansible_play_batch",
+    "ansible_check_mode",
+    "ansible_pipelining",
+}
 
 CUSTODY = "/var/lib/ditto-coding-custody/private/postgres-environment.json"
 HOSTED = "/var/lib/ditto-coding-hosted/private/postgres-environment.json"
@@ -84,16 +92,20 @@ LISTING = "List live worker and custody units"
 LIVE = "Refuse to replace credentials unless every listed unit is inactive or failed"
 ASSEMBLE = "Assemble the fixed environment entries from the captured host"
 RENDER = "Render the environment document once with the controller-only password"
-DIRECTORIES = "Create owner-only credential directories for each reader"
-WRITE = "Write each reader's own PostgreSQL environment copy without printing it"
+WRITE = "Write each reader's own PostgreSQL environment copy through pinned directories"
 RELIST_WRITE = "Re-list live worker and custody units after writing"
 LIVE_WRITE = "Refuse if any unit became active during the write"
-REINSPECT = "Reinspect both copies as ownership, mode and digest metadata only"
-SEALED = "Require owner-only regular single-link copies"
 DIGEST = "Require both copies to hold exactly the rendered document"
 RELIST_VERIFY = "Re-list live worker and custody units after verifying"
 LIVE_VERIFY = "Refuse if any unit became active during verification"
 REPORT = "Report only that the copies exist"
+RAW_GATE = "Require the raw enabled flag to be a boolean true inside the include"
+CHECK_MODE = "Refuse check mode, which cannot verify the write"
+PIPELINING = (
+    "Require pipelining on and remote files not kept before reading the password"
+)
+WRITE_MODULE = "coding_hosted_postgres_environment_write"
+WRITE_MODULE_PATH = ROLE / f"library/{WRITE_MODULE}.py"
 
 # The one allow-list regex, shared with the initial, post-write and post-verify
 # live-unit checks and with the cleanup role.
@@ -180,16 +192,33 @@ def test_default_off_gate_is_decided_once_behind_a_dynamic_include() -> None:
     assert play["gather_facts"] is False
 
 
-def test_no_bool_filter_can_print_a_coerced_value() -> None:
+def test_no_bool_filter_touches_an_operator_input() -> None:
     # ansible-core 2.21 prints any non-boolean string the bool filter coerces in
-    # a deprecation warning, even under no_log, so neither task file uses it.
-    for text in (yaml.safe_dump(_main()), PARSED):
-        assert not re.search(r"\|\s*bool\b", text)
+    # a deprecation warning, even under no_log, so the gate never uses it. The
+    # only bool filters are in the pipelining guard, on ansible_pipelining and a
+    # config value, never on a coding_hosted_* input or an env lookup.
+    assert not re.search(r"\|\s*bool\b", yaml.safe_dump(_main()))
+    bool_tasks = [
+        task["name"]
+        for task in _walk(_materialize())
+        if re.search(r"\|\s*bool\b", json.dumps(task))
+    ]
+    assert bool_tasks == [PIPELINING]
+    that = _task(PIPELINING)["ansible.builtin.assert"]["that"]
+    for line in that:
+        assert PFX not in line and "lookup('env'" not in line
 
 
 def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() -> None:
     tasks = _materialize()
-    assert [t["name"] for t in tasks[:2]] == [PASSWORD_VARIABLE, PRESET]
+    # The raw-gate and check-mode refusals lead; the password and preset guards
+    # follow, still before any register or set_fact.
+    assert [t["name"] for t in tasks[:4]] == [
+        RAW_GATE,
+        CHECK_MODE,
+        PASSWORD_VARIABLE,
+        PRESET,
+    ]
     # Nothing is registered or set before the guards, so at guard time only the
     # documented inputs carry the prefix.
     before = tasks[: tasks.index(_task(PRESET))]
@@ -312,15 +341,20 @@ def test_target_modules_that_touch_the_password_run_under_no_log() -> None:
         f"{PFX}document",
         f"{PFX}entries",
         f"{PFX}captured_",
-        f"{PFX}files",
-        "get_checksum",
+        f"{PFX}written",
+        "checksum",
     ]
     for task in _walk(_materialize()):
         if controller & set(task):
             continue
         if any(marker in json.dumps(task) for marker in sensitive):
             assert task.get("no_log") is True, task["name"]
-    assert _task(WRITE)["no_log"] is True and _task(REINSPECT)["no_log"] is True
+    write = _task(WRITE)
+    assert write["no_log"] is True
+    # The document is a no_log argument-spec param, so the module never logs its
+    # invocation to the target's journal and returns nothing sensitive.
+    source = WRITE_MODULE_PATH.read_text()
+    assert '"content": {"type": "str", "required": True, "no_log": True}' in source
 
 
 def test_identity_and_accounts_come_from_registered_probes_no_facts_gathered() -> None:
@@ -334,8 +368,9 @@ def test_identity_and_accounts_come_from_registered_probes_no_facts_gathered() -
     assert accounts["register"] == f"{PFX}accounts"
 
     that = _task(HOST)["ansible.builtin.assert"]["that"]
-    assert that[:5] == [
+    assert that[:6] == [
         GROUP_CHECK,
+        "ansible_play_batch == ['ditto-coding-hosted-v2']",
         *(
             f"{PFX}identity.ansible_facts.ansible_{key} == '{value}'"
             for key, value in PROBED_IDENTITY.items()
@@ -403,7 +438,7 @@ def _set_fact(name: str) -> dict:
 def test_revision_and_database_host_refuse_a_trailing_newline() -> None:
     that = _task(HOST)["ansible.builtin.assert"]["that"]
     host_pattern = "^10[.]30[.]0[.]([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-3])$"
-    assert that[5:] == [
+    assert that[6:] == [
         f"{PFX}captured_revision is string",
         f"{PFX}captured_revision is match('^[0-9a-f]{{40}}$')",
         f"{PFX}captured_revision | length == 40",
@@ -483,42 +518,128 @@ def test_unit_state_is_rechecked_after_write_and_after_verify() -> None:
 
 def test_credentials_are_never_logged_read_back_or_diffed() -> None:
     write = _task(WRITE)
-    assert write["no_log"] is True and write["diff"] is False
+    assert write["no_log"] is True
     for forbidden in ("slurp", "fetch", "set -x", "gcloud secrets", "extra_vars"):
         assert forbidden not in MATERIALIZE_TEXT
     report = _task(REPORT)["ansible.builtin.debug"]["msg"]
     assert "password" not in report.lower()
     assert "{{" not in report
-    # Every task that touches the password, the document, the captured inputs or
-    # a stat result (which carries the checksum) is no_log.
-    for name in (CAPTURE, PASSWORD, ASSEMBLE, RENDER, WRITE, REINSPECT, SEALED, DIGEST):
+    # Every task that touches the password, the document or the captured inputs
+    # is no_log; the write result carries the digest, so it is too.
+    for name in (CAPTURE, PASSWORD, ASSEMBLE, RENDER, WRITE, DIGEST):
         assert _task(name).get("no_log") is True, name
-    # The sealed assert loops over whole stat results, so no_log is what keeps
-    # item.stat.checksum out of the -v output and failure lines.
-    assert _task(SEALED)["loop"] == f"{{{{ {PFX}files.results }}}}"
 
 
-def test_copies_are_verified_by_owner_mode_and_digest_only() -> None:
-    stat = _task(REINSPECT)
-    assert stat["ansible.builtin.stat"] == {
-        "path": "{{ item.path }}",
-        "follow": False,
-        "get_checksum": True,
-        "checksum_algorithm": "sha256",
-        "get_mime": False,
+def test_copies_are_written_and_verified_through_the_pinned_write_module() -> None:
+    # The copy is written by the role-local module, never by copy/file/stat, so
+    # a swapped symlink cannot be followed and no follow=false stat can be fooled.
+    write = _task(WRITE)
+    assert set(write) == {
+        "name",
+        WRITE_MODULE,
+        "loop",
+        "loop_control",
+        "register",
+        "no_log",
     }
-    assert stat["loop"] == _task(WRITE)["loop"] == COPIES
-    assert stat["register"] == f"{PFX}files"
-    that = _task(SEALED)["ansible.builtin.assert"]["that"]
-    assert "item.stat.pw_name == item.item.owner" in that
-    assert "item.stat.mode == '0600'" in that
-    assert "item.stat.nlink == 1" in that
-    assert "not item.stat.islnk" in that
+    assert write[WRITE_MODULE] == {
+        "path": "{{ item.path }}",
+        "owner": "{{ item.owner }}",
+        "content": f"{{{{ {PFX}document }}}}",
+    }
+    assert write["loop"] == COPIES
+    assert write["register"] == f"{PFX}written"
+    for forbidden in (
+        "ansible.builtin.copy",
+        "ansible.builtin.file",
+        "ansible.builtin.stat",
+        "ansible.builtin.template",
+    ):
+        assert forbidden not in MATERIALIZE_TEXT, forbidden
+    # The digest check reads the module's returned state and checksum only.
     digest = _task(DIGEST)
     assert digest["ansible.builtin.assert"]["that"] == [
-        f"item.stat.checksum == {PFX}document | hash('sha256')"
+        "item.state == 'written'",
+        f"item.checksum == {PFX}document | hash('sha256')",
     ]
-    assert digest["loop"] == f"{{{{ {PFX}files.results }}}}"
+    assert digest["loop"] == f"{{{{ {PFX}written.results }}}}"
+    # The module opens every component with O_NOFOLLOW and writes atomically.
+    source = _flat(WRITE_MODULE_PATH.read_text())
+    assert "os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC" in source
+    assert "os.open(component, _DIRECTORY_FLAGS, dir_fd=fd)" in source
+    assert "os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW" in source
+    assert (
+        "os.rename(temp, NAME, src_dir_fd=private_fd, dst_dir_fd=private_fd)" in source
+    )
+    assert "def recheck_parents" in source
+
+
+def test_write_module_refuses_swapped_parents_and_writes_atomically(tmp_path) -> None:
+    tmp_path = tmp_path.resolve()
+    module = _write_module()
+    uid = os.getuid()
+    home = tmp_path / "var/lib/ditto-coding-hosted"
+    home.mkdir(parents=True, mode=0o700)
+    path = str(home / "private/postgres-environment.json")
+    state, checksum = module.write_copy(path, uid, '["POSTGRES_PASSWORD=x"]')
+    written = Path(home / "private/postgres-environment.json")
+    assert state == "written"
+    assert written.read_text() == '["POSTGRES_PASSWORD=x"]'
+    assert written.stat().st_mode & 0o777 == 0o600 and written.stat().st_nlink == 1
+    assert written.parent.stat().st_mode & 0o777 == 0o700
+    # A private swapped for a symlink to a root-ish victim dir is refused, and the
+    # victim stays empty: the write never follows the link.
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o755)
+    home2 = tmp_path / "var/lib/ditto-coding-custody"
+    home2.mkdir(parents=True, mode=0o700)
+    (home2 / "private").symlink_to(victim)
+    with pytest.raises(module.UnsafeCopy):
+        module.write_copy(str(home2 / "private/postgres-environment.json"), uid, "z")
+    assert list(victim.iterdir()) == []
+    # A group-writable home is refused.
+    home.chmod(0o770)
+    with pytest.raises(module.UnsafeCopy):
+        module.write_copy(path, uid, "y")
+    home.chmod(0o700)
+    # check mode writes nothing.
+    home3 = tmp_path / "var/lib/ditto-coding-hosted-c"
+    home3.mkdir(parents=True, mode=0o700)
+    assert (
+        module.write_copy(
+            str(home3 / "private/postgres-environment.json"), uid, "c", check_mode=True
+        )[0]
+        == "would_write"
+    )
+    assert not (home3 / "private/postgres-environment.json").exists()
+
+
+def test_check_mode_and_raw_gate_and_pipelining_are_refused_first() -> None:
+    names = [t["name"] for t in _materialize()]
+    # The raw-gate and check-mode refusals run before any probe or capture.
+    assert names[:2] == [RAW_GATE, CHECK_MODE]
+    raw = _task(RAW_GATE)
+    assert raw["no_log"] is True
+    assert raw["ansible.builtin.assert"]["that"] == [
+        f"({PFX}enabled | default(false, true)) is sameas true"
+    ]
+    assert _task(CHECK_MODE)["ansible.builtin.assert"]["that"] == [
+        "not ansible_check_mode"
+    ]
+    # The pipelining guard runs before the password is read.
+    assert names.index(PIPELINING) < names.index(PASSWORD)
+    assert _task(PIPELINING)["ansible.builtin.assert"]["that"] == [
+        "ansible_pipelining | default(false) | bool",
+        "not (lookup('ansible.builtin.config', 'DEFAULT_KEEP_REMOTE_FILES') | bool)",
+    ]
+
+
+def test_identity_check_pins_the_reviewed_host_by_inventory_name() -> None:
+    that = _task(HOST)["ansible.builtin.assert"]["that"]
+    # ansible_play_batch carries real inventory names, so the reviewed host must
+    # be the only target; a labelled rogue VM without --limit cannot receive it.
+    assert GROUP_CHECK in that
+    assert "ansible_play_batch == ['ditto-coding-hosted-v2']" in that
 
 
 def test_playbook_group_connection_and_ci_registration() -> None:
@@ -612,6 +733,11 @@ def test_docs_describe_every_forgery_guard() -> None:
         "`varnames`",
         "`ansible_play_hosts_all`",
         "`ansible_inject_invocation`",
+        "ansible_play_batch",
+        "check mode",
+        "O_NOFOLLOW",
+        "renameat",
+        "keep_remote_files",
         "SHA-1, MD5 and SHA-256",
         f"`{REHEARSAL_GATE}=1`",
     ):
@@ -779,25 +905,46 @@ def _rewrite(node: Any, *, local_identity: bool, mock_accounts: bool) -> Any:
     return node
 
 
+def _write_module() -> Any:
+    spec = importlib.util.spec_from_file_location(WRITE_MODULE, WRITE_MODULE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
 def _build_role(
-    dst: Path, *, local_identity: bool, mock_accounts: bool, wrong_mode: bool = False
+    dst: Path, *, local_identity: bool, mock_accounts: bool, break_digest: bool = False
 ) -> None:
-    tasks = dst / "roles/coding_hosted_postgres_environment/tasks"
-    tasks.mkdir(parents=True)
-    (tasks / "main.yml").write_text(MAIN)
+    role = dst / "roles/coding_hosted_postgres_environment"
+    (role / "tasks").mkdir(parents=True)
+    shutil.copytree(
+        ROLE / "library",
+        role / "library",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    (role / "tasks/main.yml").write_text(MAIN)
     materialize = _rewrite(
         copy.deepcopy(_materialize()),
         local_identity=local_identity,
         mock_accounts=mock_accounts,
     )
-    if wrong_mode:
-        # Force the sealed check to fail after a successful write so the test can
-        # prove the checksum is not printed when the owner/mode assert fails.
-        _task(WRITE, materialize)["ansible.builtin.copy"]["mode"] = "0640"
+    if break_digest:
+        # Force the post-write digest check to fail after a real write, so the
+        # test can prove the checksum is not printed when a verify assert fails.
+        _task(DIGEST, materialize)["ansible.builtin.assert"]["that"] = [
+            "item.checksum == 'deadbeef'"
+        ]
     rendered = json.dumps(materialize)
     assert "systemctl" not in rendered
     assert not any(f'"{owner}"' in rendered for owner in OWNERS)
-    (tasks / "materialize.yml").write_text(yaml.safe_dump(materialize, sort_keys=False))
+    (role / "tasks/materialize.yml").write_text(
+        yaml.safe_dump(materialize, sort_keys=False)
+    )
 
 
 def _record(content: str) -> dict:
@@ -878,6 +1025,9 @@ def _hostvars(root: Path, **overrides: object) -> dict:
     return base
 
 
+REVIEWED_HOST = "ditto-coding-hosted-v2"
+
+
 def _run(
     tmp_path: Path,
     name: str,
@@ -885,18 +1035,32 @@ def _run(
     *flags: str,
     local_identity: bool = True,
     mock_accounts: bool = True,
-    wrong_mode: bool = False,
+    break_digest: bool = False,
     residual: str | None = None,
     outside: dict[str, dict] | None = None,
+    pipelining: str = "True",
+    keep_remote_files: str | None = None,
+    host_name: str | None = None,
+    seed_homes: bool = False,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
+    if seed_homes:
+        for hostvars in hosts.values():
+            _seed_homes(Path(hostvars["rehearsal_root"]))
     _build_role(
         work,
         local_identity=local_identity,
         mock_accounts=mock_accounts,
-        wrong_mode=wrong_mode,
+        break_digest=break_digest,
     )
+    # A single in-group host is named for the reviewed host, so the play targets
+    # exactly it and ansible_play_batch == [REVIEWED_HOST]. Multi-host cases keep
+    # their names to prove the batch check refuses them.
+    if host_name is not None:
+        hosts = {host_name: next(iter(hosts.values()))}
+    elif len(hosts) == 1 and not outside:
+        hosts = {REVIEWED_HOST: next(iter(hosts.values()))}
     inventory: dict[str, Any] = {
         "all": {"children": {"role_coding_hosted": {"hosts": hosts}}}
     }
@@ -924,8 +1088,13 @@ def _run(
         "ANSIBLE_LOG_PATH": str(work / "ansible.log"),
         "ANSIBLE_NOCOLOR": "1",
         "ANSIBLE_RETRY_FILES_ENABLED": "0",
+        # Pipelining on and remote files not kept: the role refuses otherwise, and
+        # this is the normal operating mode. Cases that flip these override here.
+        "ANSIBLE_PIPELINING": pipelining,
         "DITTO_CODING_PG_PASSWORD": REHEARSAL_PASSWORD,
     }
+    if keep_remote_files is not None:
+        environment["ANSIBLE_KEEP_REMOTE_FILES"] = keep_remote_files
     completed = subprocess.run(
         [
             "uvx",
@@ -1000,6 +1169,16 @@ def _leak_forms() -> set[str]:
     return forms
 
 
+def _seed_homes(root: Path) -> None:
+    # The reader homes are created 0700 by the daemon and custody bootstraps in
+    # production; the write module requires them to exist. Seed them so the
+    # write-reaching cases mimic a bootstrapped host.
+    for item in COPIES:
+        home = root / Path(item["path"]).parents[1].relative_to("/")
+        home.mkdir(parents=True, exist_ok=True)
+        home.chmod(0o700)
+
+
 def _outcome(root: Path) -> dict | None:
     path = root / "outcome.json"
     return json.loads(path.read_text()) if path.exists() else None
@@ -1031,100 +1210,81 @@ def _materialized(root: Path, host: str = DATABASE_HOST) -> None:
 def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
     tmp_path,
 ) -> None:
-    inventory_cases = [
-        "materialized",
-        "no_units",
-        *LIVE_UNITS,
-        "lazy_host",
-        "lazy_enabled",
-        "leak_enabled",
-        "enabled_password",
-        "enabled_string_true",
-        "leak_host_error",
-        "leak_host_value",
-        "revision_newline",
-        "host_newline",
-        "preset_result",
-        "undocumented_input",
-        "password_variable",
-        "password_raising",
-        "preset_item",
-    ]
-    roots = {name: tmp_path / "hosts" / name for name in inventory_cases}
-    hosts = {name: _hostvars(roots[name]) for name in inventory_cases}
-    hosts["no_units"]["rehearsal_units"] = ""
-    for name, line in LIVE_UNITS.items():
-        hosts[name]["rehearsal_units"] = STOPPED_UNITS + line + "\n"
+    # Each case runs as its own single-host play named for the reviewed host, so
+    # the batch identity check holds and the module writes to a real tree.
+    def host(name, **overrides):
+        return _hostvars(tmp_path / "hosts" / name, **overrides)
+
+    materialize = {
+        "materialized": host("materialized"),
+        "no_units": host("no_units", rehearsal_units=""),
+    }
     # A lazily templated host renders 203.0.113.9 only inside a loop; captured
     # once with no item it must resolve to the safe address and write that.
-    hosts["lazy_host"][f"{PFX}host"] = (
-        '{{ "203.0.113.9" if item is defined else "10.30.0.5" }}'
+    materialize["lazy_host"] = host(
+        "lazy_host",
+        **{f"{PFX}host": '{{ "203.0.113.9" if item is defined else "10.30.0.5" }}'},
     )
-    # A lazily templated gate is false with no loop item and must not write.
-    hosts["lazy_enabled"][f"{PFX}enabled"] = "{{ item is defined }}"
-    # A flag that renders to the password: the bool filter would print it in a
-    # deprecation warning; sameas refuses it silently. Only a boolean true opens.
-    hosts["enabled_password"][f"{PFX}enabled"] = (
-        '{{ lookup("env", "DITTO_CODING_PG_PASSWORD") }}'
-    )
-    hosts["enabled_string_true"][f"{PFX}enabled"] = "true"
-    # A gate whose template errors while reading the password must resolve to
-    # false (default guard) and write nothing, without leaking the value.
-    hosts["leak_enabled"][f"{PFX}enabled"] = (
-        '{{ {}[lookup("env", "DITTO_CODING_PG_PASSWORD")] }}'
-    )
-    # A template that errors while reading the password, and one that resolves to
-    # the password: both must be caught at capture and fail validation, silently.
-    hosts["leak_host_error"][f"{PFX}host"] = (
-        '{{ {}[lookup("env", "DITTO_CODING_PG_PASSWORD")] }}'
-    )
-    hosts["leak_host_value"][f"{PFX}host"] = (
-        '{{ lookup("env", "DITTO_CODING_PG_PASSWORD") }}'
-    )
-    hosts["revision_newline"][f"{PFX}source_revision"] = REVISION + "\n"
-    hosts["host_newline"][f"{PFX}host"] = DATABASE_HOST + "\n"
-    # Inventory values are refused exactly like extra vars.
-    hosts["preset_result"][f"{PFX}units"] = {"stdout": "", "stdout_lines": []}
-    hosts["undocumented_input"][f"{PFX}user"] = "postgres"
-    hosts["password_variable"][f"{PFX}password"] = "rehearsal-variable"
-    # Refused by name: 'is defined' would render this and print its error.
-    hosts["password_raising"][f"{PFX}password"] = (
-        '{{ lookup("file", lookup("env", "DITTO_CODING_PG_PASSWORD")) }}'
-    )
-    hosts["preset_item"]["item"] = {
-        "path": str(tmp_path / "elsewhere"),
-        "owner": "root",
+    for name, hostvars in materialize.items():
+        _run(tmp_path, f"mat_{name}", {name: hostvars}, seed_homes=True)
+        _materialized(tmp_path / "hosts" / name)
+
+    # A lazy gate, a gate templated to the password, and a string "true" all
+    # leave the include closed and write nothing.
+    dormant = {
+        "lazy_enabled": "{{ item is defined }}",
+        "enabled_password": '{{ lookup("env", "DITTO_CODING_PG_PASSWORD") }}',
+        "leak_enabled": '{{ {}[lookup("env", "DITTO_CODING_PG_PASSWORD")] }}',
+        "enabled_string_true": "true",
     }
+    for name, value in dormant.items():
+        root = tmp_path / "hosts" / name
+        _run(tmp_path, f"dorm_{name}", {name: host(name, **{f"{PFX}enabled": value})})
+        assert _written(root, CUSTODY) is None
+        assert not (root / "var").exists(), name
 
-    _run(tmp_path, "inventory", hosts)
-
-    _materialized(roots["materialized"])
-    _materialized(roots["no_units"])
-    _materialized(roots["lazy_host"])  # wrote the safe captured address, not 203.
-    # A lazy gate and a gate whose template errors both wrote nothing.
-    for name in (
-        "lazy_enabled",
-        "leak_enabled",
-        "enabled_password",
-        "enabled_string_true",
-    ):
-        assert _written(roots[name], CUSTODY) is None
-        assert not (roots[name] / "var").exists()
-
-    refusals = {
-        **dict.fromkeys(LIVE_UNITS, LIVE),
-        "leak_host_error": HOST,
-        "leak_host_value": HOST,
-        "revision_newline": HOST,
-        "host_newline": HOST,
-        "preset_result": PRESET,
-        "undocumented_input": PRESET,
-        "password_variable": PASSWORD_VARIABLE,
-        "password_raising": PASSWORD_VARIABLE,
-        "preset_item": PRESET,
+    live_units: dict[str, tuple[dict, str]] = {name: ({}, LIVE) for name in LIVE_UNITS}
+    refusals: dict[str, tuple[dict, str]] = {
+        **live_units,
+        "leak_host_error": (
+            {f"{PFX}host": '{{ {}[lookup("env", "DITTO_CODING_PG_PASSWORD")] }}'},
+            HOST,
+        ),
+        "leak_host_value": (
+            {f"{PFX}host": '{{ lookup("env", "DITTO_CODING_PG_PASSWORD") }}'},
+            HOST,
+        ),
+        "revision_newline": ({f"{PFX}source_revision": REVISION + "\n"}, HOST),
+        "host_newline": ({f"{PFX}host": DATABASE_HOST + "\n"}, HOST),
+        "preset_result": ({f"{PFX}units": {"stdout": "", "stdout_lines": []}}, PRESET),
+        "undocumented_input": ({f"{PFX}user": "postgres"}, PRESET),
+        "password_variable": (
+            {f"{PFX}password": "rehearsal-variable"},
+            PASSWORD_VARIABLE,
+        ),
+        "password_raising": (
+            {
+                f"{PFX}password": (
+                    '{{ lookup("file", lookup("env", "DITTO_CODING_PG_PASSWORD")) }}'
+                )
+            },
+            PASSWORD_VARIABLE,
+        ),
+        "preset_item": (
+            {"item": {"path": str(tmp_path / "x"), "owner": "root"}},
+            PRESET,
+        ),
     }
-    for name, task in refusals.items():
-        _refused_at(roots[name], task)
+    for name, (payload, task) in refusals.items():
+        root = tmp_path / "hosts" / name
+        if name in LIVE_UNITS:
+            hostvars = host(
+                name, rehearsal_units=STOPPED_UNITS + LIVE_UNITS[name] + "\n"
+            )
+        else:
+            hostvars = host(name, **payload)
+        _run(tmp_path, f"ref_{name}", {name: hostvars})
+        _refused_at(root, task)
 
 
 @rehearsal
@@ -1195,6 +1355,7 @@ def test_rehearsal_injected_invocations_never_carry_the_password(tmp_path) -> No
         "-vvv",
         "-e",
         json.dumps({"ansible_inject_invocation": True}),
+        seed_homes=True,
     )
     _materialized(root)
 
@@ -1248,15 +1409,113 @@ def test_rehearsal_start_at_task_cannot_skip_guards_to_reach_the_write(
 
 
 @rehearsal
-def test_rehearsal_a_sealed_failure_never_prints_the_checksum(tmp_path) -> None:
-    # Write with the wrong mode so the owner/mode assert fails after a real
-    # write. _run already asserts the document digest (the on-disk checksum) and
-    # every password form are absent from the -v --diff output, which is exactly
-    # what no_log on the stat and owner/mode tasks guarantees.
-    root = tmp_path / "hosts/sealed"
-    _run(tmp_path, "sealed", {"sealed": _hostvars(root)}, wrong_mode=True)
+def test_rehearsal_a_verify_failure_never_prints_the_checksum(tmp_path) -> None:
+    # Break the post-write digest check so it fails after a real write. _run
+    # asserts the document digest (the on-disk checksum) and every password form
+    # are absent from the -v --diff output and the log, which is what no_log on
+    # the write result and the digest assert guarantees.
+    root = tmp_path / "hosts/verify"
+    _run(
+        tmp_path,
+        "verify",
+        {"verify": _hostvars(root)},
+        break_digest=True,
+        seed_homes=True,
+    )
     outcome = _outcome(root)
-    assert outcome is not None and outcome.get("task") == SEALED, outcome
+    assert outcome is not None and outcome.get("task") == DIGEST, outcome
+
+
+@rehearsal
+def test_rehearsal_module_never_writes_through_a_swapped_parent(tmp_path) -> None:
+    # The reader owns its home and can swap private for a symlink to a root-owned
+    # directory. The module refuses at the write, following no link, and the
+    # victim directory stays empty.
+    root = tmp_path / "hosts/swap"
+    hostvars = _hostvars(root)
+    victim = tmp_path / "victim-root-owned"
+    victim.mkdir()
+    custody_home = root / "var/lib/ditto-coding-custody"
+    custody_home.mkdir(parents=True, mode=0o700)
+    (custody_home / "private").symlink_to(victim)
+    _run(tmp_path, "swap", {"swap": hostvars})
+    outcome = _outcome(root)
+    assert outcome is not None and outcome.get("task") == WRITE, outcome
+    assert list(victim.iterdir()) == []
+    assert _written(root, CUSTODY) is None
+
+
+@rehearsal
+def test_rehearsal_module_replaces_a_symlinked_copy_with_a_real_file(tmp_path) -> None:
+    # The copy path itself is a symlink to an outside file. renameat replaces the
+    # link entry with a real regular file; the outside file is never written.
+    root = tmp_path / "hosts/relink"
+    hostvars = _hostvars(root)
+    _seed_homes(root)
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside")
+    for home in ("ditto-coding-custody", "ditto-coding-hosted"):
+        private = root / "var/lib" / home / "private"
+        private.mkdir(mode=0o700)
+        (private / "postgres-environment.json").symlink_to(outside)
+    _run(tmp_path, "relink", {"relink": hostvars})
+    _materialized(root)
+    assert outside.read_text() == "outside"
+
+
+@rehearsal
+def test_rehearsal_check_mode_pipelining_and_kept_files_are_refused(tmp_path) -> None:
+    check = tmp_path / "hosts/check"
+    _run(tmp_path, "check", {"check": _hostvars(check)}, "--check")
+    _refused_at(check, CHECK_MODE)
+    pipe_off = tmp_path / "hosts/pipe_off"
+    _run(tmp_path, "pipe_off", {"pipe_off": _hostvars(pipe_off)}, pipelining="False")
+    _refused_at(pipe_off, PIPELINING)
+    keep = tmp_path / "hosts/keep_files"
+    _run(tmp_path, "keep_files", {"keep_files": _hostvars(keep)}, keep_remote_files="1")
+    _refused_at(keep, PIPELINING)
+
+
+@rehearsal
+def test_rehearsal_a_rogue_inventory_host_is_refused_without_limit(tmp_path) -> None:
+    # A labelled rogue VM that reports the reviewed identity but is a different
+    # inventory host is refused by the batch check, which reads real names.
+    root = tmp_path / "hosts/rogue"
+    _run(tmp_path, "rogue", {"rogue-vm": _hostvars(root)}, host_name="rogue-vm")
+    _refused_at(root, HOST)
+
+
+@rehearsal
+def test_rehearsal_start_at_a_main_task_cannot_open_the_gate_with_enabled_false(
+    tmp_path,
+) -> None:
+    # --start-at-task at a main.yml task with the captured gate and registers
+    # preset must not write: starting at the capture recomputes it false, and
+    # starting at the include is caught by the raw-enabled assert.
+    presets = json.dumps(
+        {
+            CAPTURED_GATE: True,
+            f"{PFX}units": {"stdout": "", "stdout_lines": []},
+            f"{PFX}written": [],
+        }
+    )
+    for task in (CAPTURE_GATE, INCLUDE, EXPLAIN):
+        root = tmp_path / "hosts" / f"start_{task[:8]}"
+        hostvars = _hostvars(root, **{f"{PFX}enabled": False})
+        _run(
+            tmp_path,
+            f"start_{task[:8]}",
+            {"h": hostvars},
+            "--start-at-task",
+            task,
+            "-e",
+            presets,
+        )
+        assert _written(root, CUSTODY) is None and _written(root, HOSTED) is None
+        assert not (root / "var").exists(), task
+        if task == INCLUDE:
+            outcome = _outcome(root)
+            assert outcome is not None and outcome.get("task") == RAW_GATE, outcome
 
 
 @rehearsal

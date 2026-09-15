@@ -3,6 +3,29 @@
 # guard below runs exactly once, before any copy is written, and reads only
 # values this run produced.
 
+# The gate main.yml captured could be preset while --start-at-task skips the
+# capture, opening the include with enabled=false. Re-assert the raw flag here,
+# with the same default(false, true) and no_log as the capture, so the include
+# writes nothing unless enabled is genuinely a boolean true.
+- name: Require the raw enabled flag to be a boolean true inside the include
+  ansible.builtin.assert:
+    that:
+      - (coding_hosted_postgres_environment_enabled | default(false, true)) is sameas true
+    fail_msg: Materialization runs only when enabled is set to a boolean true. Nothing was written.
+    quiet: true
+  no_log: true
+
+# This role only writes files; it never previews. --check would skip the write
+# module and the unit re-checks but still run the probes, so it is refused up
+# front with a constant, accurate message. The dormant fixture stays the check
+# path: main.yml never includes this file when the gate is closed.
+- name: Refuse check mode, which cannot verify the write
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+    fail_msg: This role writes credential files and does not support check mode. Nothing was written.
+    quiet: true
+
 # Extra vars outrank role defaults, registered results and set_facts alike, so
 # the only defence against a preset internal name is to refuse it before that
 # name is created. varnames lists names without rendering any value and is
@@ -73,8 +96,11 @@
   no_log: true
 
 # inventory_hostname and group_names are host variables that extra vars
-# override, so group membership is proved from two magic variables they cannot:
-# every host in this play must belong to role_coding_hosted.
+# override, so group membership is proved from magic variables they cannot:
+# every host in this play must belong to role_coding_hosted, and the play must
+# target exactly the reviewed host. ansible_play_batch carries real inventory
+# names, so hostname/arch/distribution reported by the target's own setup can
+# no longer route the password to a labelled rogue VM run without --limit.
 # A single trailing newline satisfies a '$' anchor, so the revision also needs
 # its exact length and the host must survive trimming unchanged. The captured
 # values are inert strings by now, so this assert cannot render an operator
@@ -83,6 +109,7 @@
   ansible.builtin.assert:
     that:
       - ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) | length == 0
+      - ansible_play_batch == ['ditto-coding-hosted-v2']
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_architecture == 'x86_64'
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_distribution == 'Debian'
@@ -95,6 +122,24 @@
       - coding_hosted_postgres_environment_captured_host == coding_hosted_postgres_environment_captured_host | trim
       - coding_hosted_postgres_environment_captured_host is match('^10[.]30[.]0[.]([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-3])$')
     fail_msg: Require the reviewed source, dedicated host, exact PostgreSQL private IP and confirmation.
+    quiet: true
+
+# Without pipelining ansible-core writes the module, including its arguments, to
+# a temp file under the ssh user's ~/.ansible/tmp on the target, and with
+# keep_remote_files on it leaves it there; the password would persist even on a
+# dropped connection. Refuse before the password is read unless pipelining is
+# effectively on and remote files are not kept. ansible_pipelining reflects the
+# connection's real setting; if an operator forces it true they genuinely enable
+# pipelining, so this cannot be spoofed to true while files are still written.
+- name: Require pipelining on and remote files not kept before reading the password
+  ansible.builtin.assert:
+    that:
+      - ansible_pipelining | default(false) | bool
+      - not (lookup('ansible.builtin.config', 'DEFAULT_KEEP_REMOTE_FILES') | bool)
+    fail_msg: >-
+      Enable pipelining (ANSIBLE_PIPELINING=1 or pipelining=true) and leave
+      keep_remote_files off before materializing, so the password is never
+      written to a temp file on the target. Nothing was written.
     quiet: true
 
 - name: Require one bounded single-line password from the controller environment
@@ -167,33 +212,28 @@
       | to_json }}
   no_log: true
 
-- name: Create owner-only credential directories for each reader
-  ansible.builtin.file:
+# A path-based file/copy run as root follows a symlink the reader account can
+# swap in for private or the copy itself, even mid-run: it would chown and chmod
+# the link target to the account and write the password inside it, and a
+# follow=false stat of the final path would still pass. The role-local module
+# instead opens every component from / with O_NOFOLLOW, verifies the reader-owned
+# home and private directories on the descriptors (creating private if absent),
+# writes an O_CREAT|O_EXCL temp with fchown/fchmod/fsync and renames it into the
+# pinned directory, and re-verifies the parents after the write. The document is
+# a no_log module argument, so it never reaches the target's journal, and the
+# task is no_log. It returns the on-disk sha256 for the digest check below.
+- name: Write each reader's own PostgreSQL environment copy through pinned directories
+  coding_hosted_postgres_environment_write:
     path: "{{ item.path }}"
-    state: directory
     owner: "{{ item.owner }}"
-    group: "{{ item.owner }}"
-    mode: "0700"
-  loop:
-    - {path: /var/lib/ditto-coding-custody/private, owner: ditto-coding-custody}
-    - {path: /var/lib/ditto-coding-hosted/private, owner: ditto-coding-hosted}
-  loop_control:
-    label: "{{ item.path }}"
-
-- name: Write each reader's own PostgreSQL environment copy without printing it
-  ansible.builtin.copy:
-    dest: "{{ item.path }}"
     content: "{{ coding_hosted_postgres_environment_document }}"
-    owner: "{{ item.owner }}"
-    group: "{{ item.owner }}"
-    mode: "0600"
   loop:
     - {path: /var/lib/ditto-coding-custody/private/postgres-environment.json, owner: ditto-coding-custody}
     - {path: /var/lib/ditto-coding-hosted/private/postgres-environment.json, owner: ditto-coding-hosted}
   loop_control:
     label: "{{ item.path }}"
+  register: coding_hosted_postgres_environment_written
   no_log: true
-  diff: false
 
 # A unit could start between the pre-write listing and now, so a copy may have
 # been written and read mid-rotation. Re-list and refuse loudly if so; the role
@@ -217,47 +257,19 @@
       mid-rotation. Stop every unit, reconcile by hand and re-run.
     quiet: true
 
-- name: Reinspect both copies as ownership, mode and digest metadata only
-  ansible.builtin.stat:
-    path: "{{ item.path }}"
-    follow: false
-    get_checksum: true
-    checksum_algorithm: sha256
-    get_mime: false
-  loop:
-    - {path: /var/lib/ditto-coding-custody/private/postgres-environment.json, owner: ditto-coding-custody}
-    - {path: /var/lib/ditto-coding-hosted/private/postgres-environment.json, owner: ditto-coding-hosted}
-  loop_control:
-    label: "{{ item.path }}"
-  register: coding_hosted_postgres_environment_files
-  no_log: true
-
-# no_log: the loop item is a whole stat result, so without it item.stat.checksum
-# (the document's SHA-256, enough for offline password guessing) would print on
-# failure and with -v.
-- name: Require owner-only regular single-link copies
-  ansible.builtin.assert:
-    that:
-      - item.stat.isreg | default(false)
-      - not item.stat.islnk
-      - item.stat.pw_name == item.item.owner
-      - item.stat.mode == '0600'
-      - item.stat.nlink == 1
-      - item.stat.size > 0
-    fail_msg: A PostgreSQL environment copy is not sealed to its reader.
-    quiet: true
-  loop: "{{ coding_hosted_postgres_environment_files.results }}"
-  loop_control:
-    label: "{{ item.item.path }}"
-  no_log: true
-
+# The module already re-opened each copy through the pinned directory and
+# verified it is a regular, single-link, reader-owned 0600 file holding exactly
+# the document before returning. This independent digest check confirms the
+# sha256 it returned matches the rendered document, catching a module bug. The
+# whole write result carries that digest, so this stays no_log.
 - name: Require both copies to hold exactly the rendered document
   ansible.builtin.assert:
     that:
-      - item.stat.checksum == coding_hosted_postgres_environment_document | hash('sha256')
+      - item.state == 'written'
+      - item.checksum == coding_hosted_postgres_environment_document | hash('sha256')
     fail_msg: A PostgreSQL environment copy does not match the rendered document.
     quiet: true
-  loop: "{{ coding_hosted_postgres_environment_files.results }}"
+  loop: "{{ coding_hosted_postgres_environment_written.results }}"
   loop_control:
     label: "{{ item.item.path }}"
   no_log: true
