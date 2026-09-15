@@ -74,7 +74,46 @@ counts for any profile, never its addresses.
 ## Approved profiles
 
 `verify`, `review` and `check-approval` read the exact profile documents with
-`--execution-profile`, `--grading-profile` and `--connectivity-profile`.
+`--execution-profile`, `--grading-profile`, `--connectivity-profile` and
+`--enforcement-images`, plus the release index with `--release-index`.
+
+### Per-language probe images (B5 PR 3b)
+
+Peyton (2026-09-15): "every language image" means every image the approved
+profile names, using the same approved limits and timeouts, but each with that
+language's canonical, explicitly recorded test command. A common argv is never
+forced.
+
+`dittobench-coding-native-enforcement-images-v1` is canonical JSON with closed
+keys:
+
+- `grading_profile_sha256`: the approved grading profile whose limits, timeouts,
+  command IDs and expected totals every language uses.
+- `images`: exactly `go`, `node`, `python` and `rust`. Each has a distinct
+  `image_digest` (OCI manifest digest), its own `build_argv`, and its own
+  `test_argv` for `hidden` and `visible`.
+  - Every argv is 1 to 64 printable arguments with a bare non-shell executable.
+  - Test commands must use `dittobench-test-driver`.
+  - Rust-specific arguments are allowed only because they are recorded here.
+
+Resource and pre-exec records carry the set's digest as
+`inputs.enforcement_images_sha256`. The verifier requires:
+
+- the set names the supplied grading profile;
+- each language's `image_digest` is that language's released image (the
+  release index's `image_ref` digest);
+- the grading profile's own image is exactly one released language, whose
+  recorded build and test commands equal the profile's.
+
+The signed approval pins the set in `profile_pins.enforcement_images_sha256`.
+
+The probe runner takes image digests and commands only from this set
+(`--enforcement-images`; `--image` is gone). It builds each language's hosted
+grading manifest from the approved profile with that language's commands, and
+refuses a set for another profile. It also refuses a manifest or resolved
+repository digest other than the pinned one. `--language` narrows which
+pinned languages it observes. Go and Python parse one shared vector
+(`catalog/testdata/enforcement-images-vector-v1.json`).
 
 - The execution and grading profiles must be their exact Go canonical bytes
   (sorted, compact, newline), and their sha256 must equal the record's
@@ -281,11 +320,10 @@ tool never handles a private key. It then checks:
 - The approval's `runner_sha256` matches the checkout's `run.py`.
 - The review's digests equal independently reviewed pins
   (`--execution-profile-sha256`, `--grading-profile-sha256`,
-  `--connectivity-endpoint-set-sha256`), for example from the signed profile
-  approval and the canary's own connectivity profile.
-  - `native.policy`'s closed approval shape cannot carry these digests. The
-    approval binds them through the record digests it names, and the pins
-    make that binding visible.
+  `--enforcement-images-sha256`, `--connectivity-endpoint-set-sha256`), for
+  example from the signed profile approval and the canary's own connectivity
+  profile.
+  - The signed approval also carries the same pins in `profile_pins` (PR 3a).
   - The probe profile's full digest stays in the review; it is not a pin.
 - The approval's `evidence_sha256`, machine, boot, source revision, release
   manifest and image approvals equal the review.
@@ -307,8 +345,8 @@ record.
   a record:
   - `resolve-images REF...` pins approved `repository@sha256` images to local
     content ids and refuses a missing image instead of pulling it.
-  - `observe-requested-config --grading-profile FILE --executor-repository REPO
-    --image LANGUAGE=sha256:...` emits a
+  - `observe-requested-config --grading-profile FILE --enforcement-images FILE
+    --executor-repository REPO [--language LANGUAGE]...` emits a
     `dittobench-coding-native-probe-observations-v1` report with
     `"enforcement_measured": false`. The verifier refuses that schema as a
     record, and a test proves it.
@@ -469,8 +507,9 @@ with a doubled pids limit failed the comparison.
 2. Harness swap: set `--memory-swap` equal to memory only in the hosted-v2
    harness constructor, leaving the shared v8 sandbox unchanged?
 3. Should the hosted harness launch add `--pull never`?
-4. Is "every language image" the approved profile's limits and group timeouts
-   with each language's own fixture test argv?
+4. ~~Every language image?~~ Answered: every image the approved profile names,
+   with the same limits and timeouts, each with its own recorded commands
+   (PR 3b).
 5. ~~Source trees or binary?~~ Answered: the release-recorded binary digest is
    binding, and the source trees are provenance (PR 3b).
 
