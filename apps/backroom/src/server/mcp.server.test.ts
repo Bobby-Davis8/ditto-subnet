@@ -10,6 +10,7 @@ import {
   createBackroomMcpServer,
   type McpGrantProps,
 } from './mcp.server'
+import { fetchCodingControlPlane } from './admin.service'
 
 const session: BackroomSession = {
   version: 2,
@@ -7236,7 +7237,7 @@ describe('Backroom MCP tools', () => {
     }
     const leases = {
       total: 1,
-      limit: 25,
+      limit: 10,
       offset: 0,
       leases: [
         {
@@ -7246,8 +7247,13 @@ describe('Backroom MCP tools', () => {
       ],
       weight_eligible: false,
     }
+    let leaseStatus = 200
     const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) =>
-      Response.json(String(input).includes('/coding-certification-leases') ? leases : payload),
+      String(input).includes('/coding-certification-leases')
+        ? Response.json(leaseStatus === 200 ? leases : { detail: 'unavailable' }, {
+            status: leaseStatus,
+          })
+        : Response.json(payload),
     )
     vi.stubGlobal('fetch', fetchMock)
     const { client, server } = await connect([BACKROOM_READ_SCOPE])
@@ -7270,14 +7276,26 @@ describe('Backroom MCP tools', () => {
       coding_certified: true,
       active_certification_count: 1,
       certification_leases: {
+        available: true,
         total: 1,
         leases: [{ status: 'completed', receipt_status: 'failed', claim_allowlist_revision: 1 }],
       },
     })
     expect(fetchMock).toHaveBeenCalledWith(
-      `https://platform-api.heyditto.ai/api/v1/admin/coding-certification-leases?agent_id=${agentId}&limit=25`,
+      `https://platform-api.heyditto.ai/api/v1/admin/coding-certification-leases?agent_id=${agentId}&limit=10`,
       expect.anything(),
     )
+    leaseStatus = 503
+    const degraded = await client.callTool({
+      name: 'get_agent_coding_certifications',
+      arguments: { agentId, limit: 25 },
+    })
+    expect(degraded.isError, readTextResult(degraded)).not.toBe(true)
+    expect(readJsonResult(degraded)).toMatchObject({
+      agent_id: agentId,
+      active_certification_count: 1,
+      certification_leases: { available: false },
+    })
     expect(fetchMock).toHaveBeenCalledWith(
       `https://platform-api.heyditto.ai/api/v1/admin/agents/${agentId}/coding-certifications?limit=25`,
       expect.objectContaining({
@@ -7553,33 +7571,41 @@ describe('Backroom MCP tools', () => {
       shadow_only: true,
       weight_eligible: false,
     }
+    const current = codingAllowlistRevision(2, { enabled: true, integrity: 'invalid' })
     const certificationAllowlist = {
       enabled: false,
       integrity: 'invalid',
       effective: 'refuse_all',
-      current: codingAllowlistRevision(2, { enabled: true, integrity: 'invalid' }),
-      history: [codingAllowlistRevision(2, { enabled: true, integrity: 'invalid' })],
+      current,
+      history: [],
       max_entries: 16,
       weight_eligible: false,
     }
     const certificationLeases = {
       total: 1,
-      limit: 25,
+      limit: 10,
       offset: 0,
       leases: [codingCertificationLease('11111111-1111-4111-8111-111111111111', 'completed')],
       weight_eligible: false,
     }
-    const fetchMock = vi.fn().mockImplementation(async (url: string) => Response.json(
-      url.includes('/coding-catalog/releases')
-        ? catalog
-        : url.includes('/coding-private-v2-releases')
-          ? privateV2
-          : url.includes('/coding-certification-allowlist')
-            ? certificationAllowlist
-            : url.includes('/coding-certification-leases')
-              ? certificationLeases
-              : native,
-    ))
+    let certificationStatus = 200
+    let leaseBody: unknown = certificationLeases
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/coding-certification-allowlist')) {
+        return Response.json(
+          certificationStatus === 200 ? certificationAllowlist : { detail: 'Not Found' },
+          { status: certificationStatus },
+        )
+      }
+      if (url.includes('/coding-certification-leases')) return Response.json(leaseBody)
+      return Response.json(
+        url.includes('/coding-catalog/releases')
+          ? catalog
+          : url.includes('/coding-private-v2-releases')
+            ? privateV2
+            : native,
+      )
+    })
     vi.stubGlobal('fetch', fetchMock)
     const { client, server } = await connect([BACKROOM_READ_SCOPE])
     try {
@@ -7588,23 +7614,47 @@ describe('Backroom MCP tools', () => {
         arguments: { limit: 25 },
       })
       expect(response.isError, readTextResult(response)).not.toBe(true)
+      const { history: _history, ...allowlistWithoutHistory } = certificationAllowlist
       expect(readJsonResult(response)).toEqual({
         catalog,
         private_v2: privateV2,
         native,
-        certification_allowlist: certificationAllowlist,
-        certification_leases: certificationLeases,
+        certification_allowlist: { available: true, ...allowlistWithoutHistory },
+        certification_leases: { available: true, ...certificationLeases },
         shadow_only: true,
         weight_eligible: false,
       })
       expect(readTextResult(response)).not.toMatch(/grant_id|bearer/)
+      // The embedded canary state is bounded independently of the catalog limit.
       expect(fetchMock.mock.calls.map(([url]) => String(url)).sort()).toEqual([
         'https://platform-api.heyditto.ai/api/v1/admin/coding-catalog/releases?limit=25',
-        'https://platform-api.heyditto.ai/api/v1/admin/coding-certification-allowlist?history_limit=25',
-        'https://platform-api.heyditto.ai/api/v1/admin/coding-certification-leases?limit=25',
+        'https://platform-api.heyditto.ai/api/v1/admin/coding-certification-allowlist?history_limit=0',
+        'https://platform-api.heyditto.ai/api/v1/admin/coding-certification-leases?limit=10',
         'https://platform-api.heyditto.ai/api/v1/admin/coding-control-plane?limit=25',
         'https://platform-api.heyditto.ai/api/v1/admin/coding-private-v2-releases?limit=25',
       ])
+
+      // A Platform that lacks or fails the canary endpoints still serves the
+      // Coding control plane, with explicit unavailable markers.
+      certificationStatus = 404
+      leaseBody = { leases: 'not a lease page' }
+      const degraded = await client.callTool({
+        name: 'get_coding_control_plane',
+        arguments: { limit: 25 },
+      })
+      expect(degraded.isError, readTextResult(degraded)).not.toBe(true)
+      const degradedBody = readJsonResult(degraded) as Record<string, Record<string, unknown>>
+      expect(degradedBody.native).toEqual(native)
+      expect(degradedBody.certification_allowlist).toMatchObject({ available: false })
+      expect(degradedBody.certification_leases).toMatchObject({ available: false })
+      expect(String(degradedBody.certification_allowlist.error)).toMatch(/404|not found/i)
+
+      // The console loader discards canary state, so it never requests it.
+      fetchMock.mockClear()
+      await fetchCodingControlPlane({ limit: 25 })
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url).includes('/coding-certification-')),
+      ).toBe(false)
     } finally {
       await client.close()
       await server.close()
