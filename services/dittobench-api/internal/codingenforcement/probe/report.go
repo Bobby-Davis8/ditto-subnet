@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"time"
 
@@ -21,6 +22,8 @@ const ObservationReportSchema = "dittobench-coding-native-probe-observations-v1"
 // requestedConfigSource says exactly what was observed.
 const requestedConfigSource = "docker_inspect_created_unstarted_container"
 
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // RequestedConfigInspector is the executor's requested-configuration read-back.
 type RequestedConfigInspector interface {
 	InspectRequestedResourceConfig(ctx context.Context) (codingexecutor.RequestedResourceConfig, error)
@@ -36,6 +39,9 @@ type HostedGradingRequest struct {
 	SeccompProfile  string
 	AppArmorProfile string
 	Now             func() time.Time
+	// RunnerSHA256 measures the running probe binary; RunningExecutableSHA256
+	// when nil.
+	RunnerSHA256 func() (string, error)
 }
 
 // ObserveHostedGradingRequestedConfig inspects the requested resource
@@ -50,6 +56,14 @@ func ObserveHostedGradingRequestedConfig(ctx context.Context, docker DockerCLI, 
 	now := request.Now
 	if now == nil {
 		now = time.Now
+	}
+	measure := request.RunnerSHA256
+	if measure == nil {
+		measure = RunningExecutableSHA256
+	}
+	runnerSHA256, err := measure()
+	if err != nil || !sha256Hex.MatchString(runnerSHA256) {
+		return nil, errors.New("probe: the running probe binary could not be measured")
 	}
 	if err := requireRootlessIsolatedDaemon(ctx, docker); err != nil {
 		return nil, err
@@ -102,7 +116,10 @@ func ObserveHostedGradingRequestedConfig(ctx context.Context, docker DockerCLI, 
 	return map[string]any{
 		"schema":               ObservationReportSchema,
 		"enforcement_measured": false,
-		"entries":              entries,
+		// Measured on this host from the running process, for comparison
+		// with the release-recorded runtime.probe_runner_sha256.
+		"probe_runner_binary_sha256": runnerSHA256,
+		"entries":                    entries,
 	}, nil
 }
 
