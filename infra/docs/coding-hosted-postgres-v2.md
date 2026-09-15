@@ -166,7 +166,7 @@ so adding an operation never edits the script or a shared registry. It:
 - **Refuses dangerous environment** rather than silently stripping it:
   every `ANSIBLE_*` and `_ANSIBLE_*` variable (config file, keep remote files,
   debug, verbosity, log path, callbacks, strategy, plugin and library paths,
-  remote temp and all others), `LD_*`, `DYLD_*`, `OPENSSL_*`, `GCONV_*`, `GLIBC_*`, `UV_PYTHON*`,
+  remote temp and all others), `LD_*`, `DYLD_*`, `OPENSSL_*`, `GCONV_*`, `GLIBC_*`, `UV_PYTHON` and its install mirrors,
   `CLOUDSDK_PYTHON*`, `SSL_CERT_FILE`/`SSL_CERT_DIR`, `UV_NO_VERIFY_HASHES`,
   `UV_INSECURE_HOST`, `UV_CONFIG_FILE`, every `PYTHON*` variable except
   `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `PYTHONIOENCODING`,

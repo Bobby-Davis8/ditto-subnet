@@ -294,7 +294,7 @@ def test_script_directory_is_dropped_from_sys_path_before_other_imports(
         assert str(real) not in completed.stdout
 
 
-GUARD_SHA256 = "71fe0a4a4b463c514053a02d6633383db3f15535807bee9e8656dbf0e4f399a2"
+GUARD_SHA256 = "a8ff028ecf7846fdda440f4a90dae187822dc5ca476e7c9c463ac199e30e7297"
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +377,7 @@ def test_only_an_operation_and_a_reviewed_revision_are_accepted(
         ("GCONV_PATH", "/tmp"),
         ("GLIBC_TUNABLES", "glibc.malloc.check=3"),
         ("UV_PYTHON", "/tmp/evil-python"),
+        ("UV_PYTHON_INSTALL_MIRROR", "https://mirror.invalid"),
         ("UV_NO_VERIFY_HASHES", "1"),
         ("CLOUDSDK_PYTHON", "/tmp/evil-python"),
         ("CLOUDSDK_PYTHON_SITEPACKAGES", "1"),
@@ -403,7 +404,13 @@ def test_dangerous_environment_is_refused_before_ansible(
 
 def test_harmless_python_settings_are_accepted(tmp_path: Path) -> None:
     repo, revision = _synthetic_repo(tmp_path)
-    env = _operator_env(tmp_path, PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1")
+    env = _operator_env(
+        tmp_path,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONUNBUFFERED="1",
+        UV_PYTHON_INSTALL_DIR="/opt/uv/python",
+        UV_CACHE_DIR="/opt/uv/cache",
+    )
     code, _, recorder = _run(repo, ["rehearsal-probe", revision], env)
     assert code == 0
     assert len(recorder.invocations) == 1
