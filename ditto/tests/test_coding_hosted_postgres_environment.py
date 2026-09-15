@@ -714,9 +714,11 @@ def _play() -> dict:
             {
                 "name": "Rehearse the role",
                 "block": [
+                    # A static import, like the playbook's roles: list, so
+                    # --start-at-task sees exactly the tasks it sees in production.
                     {
-                        "name": "Include the role",
-                        "ansible.builtin.include_role": {
+                        "name": "Import the role",
+                        "ansible.builtin.import_role": {
                             "name": "coding_hosted_postgres_environment"
                         },
                     },
@@ -1044,18 +1046,31 @@ def test_rehearsal_extra_vars_leak_payload_is_caught_at_capture(tmp_path) -> Non
 def test_rehearsal_start_at_task_cannot_skip_guards_to_reach_the_write(
     tmp_path,
 ) -> None:
-    root = tmp_path / "hosts/startat"
-    _run(
-        tmp_path,
-        "startat",
-        {"startat": _hostvars(root)},
-        "--start-at-task",
-        WRITE,
-    )
-    # The write lives in a dynamically included file, so --start-at-task cannot
-    # reach it: nothing ran, nothing was written.
-    assert _written(root, CUSTODY) is None and _written(root, HOSTED) is None
-    assert not (root / "var").exists()
+    # The play imports the role statically, as the playbook's roles: list does,
+    # so every task in tasks/main.yml is a valid start point. Each host also lists
+    # a live unit, so a start that skipped the guards would be observable.
+    starts = {
+        "write": WRITE,
+        "render": RENDER,
+        "preset": PRESET,
+        "include": INCLUDE,
+    }
+    for name, task in starts.items():
+        root = tmp_path / "hosts" / name
+        hostvars = _hostvars(root)
+        hostvars["rehearsal_units"] = STOPPED_UNITS + LIVE_UNITS["active"] + "\n"
+        _run(tmp_path, name, {name: hostvars}, "--start-at-task", task)
+        assert _written(root, CUSTODY) is None and _written(root, HOSTED) is None
+        assert not (root / "var").exists(), name
+        if task == INCLUDE:
+            # Starting at the include skips the capture: the undefined captured
+            # gate fails the host instead of writing anything.
+            outcome = _outcome(root)
+            assert outcome is not None and outcome.get("task") == INCLUDE, outcome
+        else:
+            # Tasks inside the dynamically included materialize.yml are invisible
+            # to --start-at-task, so nothing in the play ran at all.
+            assert _outcome(root) is None, (name, _outcome(root))
 
 
 @rehearsal
