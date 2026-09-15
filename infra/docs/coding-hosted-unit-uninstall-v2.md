@@ -169,10 +169,14 @@ reloads again.
   - `connectivity-policy.py`
   - `/etc/ditto-coding-hosted/connectivity.json`
 
-  Without their units these files are inert. Removing them would need its own
-  reviewed role.
-- Failed instances stay in `list-units` as `not-found failed` until someone runs
-  `systemctl reset-failed`. The role runs no state-changing systemctl command.
+  Without their units these files are inert. They stay on purpose so a
+  reinstall can reuse them. Removing them needs a separate, narrowly reviewed
+  retirement role; this uninstall will not be broadened to cover them.
+- Failed instances stay in `list-units` as `not-found failed`, which keeps the
+  failure evidence. The role never runs `systemctl reset-failed` and runs no
+  state-changing systemctl command. Once the retained failures have been
+  reviewed, the operator may run `systemctl reset-failed` for the two units by
+  hand as a separate, explicit step.
 - The module scans only `/etc/systemd/system`. It does not scan
   `/etc/systemd/system.control`, `/run/systemd` or `/usr/lib/systemd`. The
   post-reload `LoadState` check catches a unit file there, but not a drop-in
