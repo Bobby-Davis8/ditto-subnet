@@ -73,6 +73,7 @@ REHEARSAL_GATE = "DITTO_ANSIBLE_REHEARSAL"
 FREEZE_GATE = "Freeze the removal gate once, neutralising templates and loops"
 INCLUDE = "Remove the native PostgreSQL environment copies only when explicitly enabled"
 EXPLAIN = "Explain dormant native PostgreSQL environment removal"
+RAW_GATE = "Require the raw enabled flag to be a boolean true inside the include"
 PRESET = "Refuse preset registered results and undocumented role inputs"
 FREEZE_INPUTS = "Freeze the removal inputs once, neutralising templates and loops"
 IDENTITY = "Probe this machine's identity into a result extra vars cannot preset"
@@ -87,6 +88,8 @@ COPY_CHECK = (
     "reader"
 )
 REMOVAL = "Unlink the present copies and report any partial removal"
+RECORD = "Record which copies the module removed and which vanished before removal"
+VANISHED = "Refuse if a copy present before removal vanished instead of being removed"
 UNLINK = (
     "Unlink each exact copy that exists through a pinned directory and nothing else"
 )
@@ -227,10 +230,17 @@ def test_no_bool_filter_can_print_a_coerced_value() -> None:
 
 def test_preset_refusal_runs_first_and_is_the_single_source_of_truth() -> None:
     tasks = _remove()
-    assert tasks[0]["name"] == PRESET
+    # The raw-gate refusal leads; the preset guard is next, still before any
+    # register or set_fact.
+    assert [t["name"] for t in tasks[:2]] == [RAW_GATE, PRESET]
+    raw = _task(RAW_GATE)
+    assert raw["no_log"] is True
+    assert raw["ansible.builtin.assert"]["that"] == [
+        f"({PREFIX}enabled | default(false, true)) is sameas true"
+    ]
     assert not any(
         "register" in task or "ansible.builtin.set_fact" in task
-        for task in _walk(tasks[:1])
+        for task in _walk(tasks[: tasks.index(_task(PRESET))])
     )
     that, item = _task(PRESET)["ansible.builtin.assert"]["that"]
     assert _flat(that) == _flat(
@@ -252,6 +262,8 @@ def test_preset_refusal_runs_first_and_is_the_single_source_of_truth() -> None:
         f"{PREFIX}directories",
         f"{PREFIX}copies",
         f"{PREFIX}unlinked",
+        f"{PREFIX}removed",
+        f"{PREFIX}vanished",
         f"{PREFIX}units_after_removal",
         f"{PREFIX}after",
     }
@@ -297,7 +309,8 @@ def test_inputs_are_frozen_once_and_never_rendered_into_messages() -> None:
         FROZEN_REVISION: f"{{{{ {PREFIX}source_revision | default('', true) }}}}",
     }
     tasks = _remove()
-    assert [task["name"] for task in tasks[:4]] == [
+    assert [task["name"] for task in tasks[:5]] == [
+        RAW_GATE,
         PRESET,
         FREEZE_INPUTS,
         IDENTITY,
@@ -330,6 +343,7 @@ def test_inputs_are_frozen_once_and_never_rendered_into_messages() -> None:
         FROZEN_REVISION,
         f"{PREFIX}unlinked",
         f"{PREFIX}copies",
+        f"{PREFIX}removed",
         "ansible_check_mode",
     }
     for task in _walk(tasks[host_index + 1 :]):
@@ -349,13 +363,15 @@ def test_probed_host_check_matches_the_materialization_literals() -> None:
     # Same literals as the materialization host check, both read from a
     # registered probe: a -e ansible_facts value replaces gathered facts.
     materialize_host = _task(MATERIALIZE_HOST, MATERIALIZE)
-    inventory, *facts = materialize_host["ansible.builtin.assert"]["that"][:5]
+    inventory, batch, *facts = materialize_host["ansible.builtin.assert"]["that"][:6]
     # inventory_hostname and group_names are host variables extra vars override;
-    # groups and ansible_play_hosts_all are magic variables they cannot.
+    # groups, ansible_play_hosts_all and ansible_play_batch are magic variables
+    # they cannot, so both roles pin the group and the exact reviewed host.
     assert inventory == (
         "ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) "
         "| length == 0"
     )
+    assert batch == "ansible_play_batch == ['ditto-coding-hosted-v2']"
     probed = []
     for line in facts:
         match = re.fullmatch(
@@ -369,6 +385,7 @@ def test_probed_host_check_matches_the_materialization_literals() -> None:
         )
     assert _task(HOST)["ansible.builtin.assert"]["that"] == [
         inventory,
+        batch,
         *probed,
         f"{FROZEN_REVISION} is string",
         f"{FROZEN_REVISION} is match('^[0-9a-f]{{40}}$')",
@@ -410,7 +427,7 @@ REFUSED_UNIT_LINES = [
 
 def test_live_unit_refusal_is_an_allow_list_over_the_materialization_listing() -> None:
     names = [task["name"] for task in _remove()]
-    assert names[4:6] == [LISTING, LIVE]
+    assert names[5:7] == [LISTING, LIVE]
     listing = _task(LISTING)
     original = _task(LISTING, MATERIALIZE)
     assert listing["ansible.builtin.command"] == original["ansible.builtin.command"]
@@ -436,7 +453,8 @@ def test_unit_state_is_rechecked_after_removal() -> None:
     assert relist["ansible.builtin.command"]["argv"] == LISTING_ARGV
     assert relist["register"] == f"{PREFIX}units_after_removal"
     assert relist["check_mode"] is False and relist["changed_when"] is False
-    assert names.index(RELIST) == names.index(REMOVAL) + 1
+    assert names.index(RELIST) == names.index(VANISHED) + 1
+    assert names.index(VANISHED) == names.index(REMOVAL) + 2
     assert names.index(LIVE_AFTER) == names.index(RELIST) + 1
     assert _live_check(_task(LIVE_AFTER)) == _expected_live_check(
         f"{PREFIX}units_after_removal"
@@ -550,6 +568,7 @@ def test_targets_and_owners_equal_the_materialization_write_loop() -> None:
 
 def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
     assert [task["name"] for task in _remove()] == [
+        RAW_GATE,
         PRESET,
         FREEZE_INPUTS,
         IDENTITY,
@@ -561,6 +580,8 @@ def test_lstat_safety_checks_precede_removal_and_never_read_contents() -> None:
         COPY_STAT,
         COPY_CHECK,
         REMOVAL,
+        RECORD,
+        VANISHED,
         RELIST,
         LIVE_AFTER,
         AFTER_STAT,
@@ -636,7 +657,12 @@ _JINJA_WORDS = {"and", "or", "not", "in", "is", "if", "else", "true", "false", "
 _JINJA_WORDS |= {"True", "False", "None"}
 # Magic variables extra vars cannot override on ansible-core 2.21.2, unlike host
 # variables such as inventory_hostname and group_names.
-NON_OVERRIDABLE_MAGIC = {"groups", "ansible_play_hosts_all", "ansible_check_mode"}
+NON_OVERRIDABLE_MAGIC = {
+    "groups",
+    "ansible_play_hosts_all",
+    "ansible_play_batch",
+    "ansible_check_mode",
+}
 
 
 def _jinja_roots(expression: str) -> set[str]:
@@ -712,16 +738,32 @@ def test_validated_revision_is_reported_after_the_host_check_only() -> None:
         assert "{{" not in message and message.endswith("."), name
     assert REVISION_MESSAGE in _flat(_task(PARTIAL)["ansible.builtin.fail"]["msg"])
     report = _flat(_task(REPORT)["ansible.builtin.debug"]["msg"])
-    assert report == _flat(
+    # removed=/would_remove= come from the module's returned state, not the
+    # pre-unlink stat, so a copy that survived under a renamed parent is never
+    # claimed removed.
+    expected = (
         "Native Coding PostgreSQL environment cleanup; "
-        f"{REVISION_MESSAGE}; "
-        "{{ 'would_remove' if ansible_check_mode else 'removed' }}={{ "
-        f"{PREFIX}copies.results | selectattr('stat.exists') | "
-        "map(attribute='item.path') | list | to_json }}; already_absent={{ "
-        f"{PREFIX}copies.results | rejectattr('stat.exists') | "
-        "map(attribute='item.path') | list | to_json }}; "
+        + REVISION_MESSAGE
+        + "; {{ 'would_remove' if ansible_check_mode else 'removed' }}={{ "
+        + PREFIX
+        + "removed | sort | to_json }}; already_absent={{ "
+        + PREFIX
+        + "copies.results | map(attribute='item.path') | reject('in', "
+        + PREFIX
+        + "removed) | list | to_json }}; "
         "directories_kept=true; services_stopped=false; password_read=false."
     )
+    assert report == _flat(expected)
+    # The removed/vanished facts are built from the module's per-copy state.
+    facts = _task(RECORD)["ansible.builtin.set_fact"]
+    assert "selectattr('state', 'in', ['removed', 'would_remove'])" in _flat(
+        facts[f"{PREFIX}removed"]
+    )
+    assert "selectattr('state', 'equalto', 'absent')" in _flat(
+        facts[f"{PREFIX}vanished"]
+    )
+    (vanished,) = _task(VANISHED)["ansible.builtin.assert"]["that"]
+    assert vanished == f"{PREFIX}vanished | length == 0"
 
 
 def test_playbook_fixture_ci_and_docs_registration() -> None:
@@ -768,6 +810,9 @@ def test_docs_describe_every_removal_bypass_guard_and_residual() -> None:
         "every refusal is fixed text",
         "`ansible_play_hosts_all`",
         "`ansible_inject_invocation`",
+        "ansible_play_batch",
+        "raw inside the include",
+        "returned state, never the pre-unlink stat",
         "`O_NOFOLLOW`",
         "`unlinkat`",
         "owned by its reader",
@@ -1071,6 +1116,25 @@ def test_unlink_module_removes_through_the_pinned_directory_after_a_parent_swap(
     assert not (moved / "postgres-environment.json").exists()
 
 
+def test_unlink_module_reports_absent_when_the_private_dir_is_renamed_away(
+    tmp_path,
+) -> None:
+    # The report and the vanished guard rely on this: if a reader renames private
+    # away after the copy was seen present, the module opens no directory and
+    # returns "absent", so the report never claims a removal that did not happen.
+    tmp_path = tmp_path.resolve()
+    module = _unlink_module()
+    uid = os.getuid()
+    private = _reader_tree(tmp_path)
+    target = _plant(private)
+    private.rename(private.with_name("private-moved"))
+    assert module.remove_copy(str(target), uid) == "absent"
+    assert (
+        tmp_path
+        / "var/lib/ditto-coding-custody/private-moved/postgres-environment.json"
+    ).read_text() == "[]"
+
+
 def test_unlink_module_never_removes_a_directory_or_link_target_swapped_in_late(
     tmp_path, monkeypatch
 ) -> None:
@@ -1324,6 +1388,9 @@ def _play(rehearsal_pass: str) -> dict:
     }
 
 
+REVIEWED_HOST = "ditto-coding-hosted-v2"
+
+
 def _run(
     tmp_path: Path,
     name: str,
@@ -1333,10 +1400,18 @@ def _run(
     local_identity: bool = True,
     residual: str | None = None,
     outside: dict[str, dict] | None = None,
+    host_name: str | None = None,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
     _build_role(work, local_identity=local_identity)
+    # A single in-group host is named for the reviewed host, so the play targets
+    # exactly it and ansible_play_batch == [REVIEWED_HOST]; multi-host and
+    # outside cases keep their names to prove the batch check refuses them.
+    if host_name is not None:
+        hosts = {host_name: next(iter(hosts.values()))}
+    elif len(hosts) == 1 and not outside:
+        hosts = {REVIEWED_HOST: next(iter(hosts.values()))}
     # Every rehearsal host is in the real group, so only identity can refuse it.
     inventory: dict[str, Any] = {
         "all": {"children": {"role_coding_hosted": {"hosts": hosts}}}
@@ -1586,7 +1661,10 @@ def test_rehearsal_removes_only_the_exact_copies_and_refuses_unsafe_state(
     partial[1].parent.chmod(0o500)
 
     try:
-        _run(tmp_path, "run", hosts)
+        # Each case runs as its own single-host play named for the reviewed host,
+        # so the batch identity check holds while every setup above is preserved.
+        for case, hostvars in hosts.items():
+            _run(tmp_path, f"run_{case}", {case: hostvars})
     finally:
         partial[1].parent.chmod(0o700)
         kept["shared_parent"][1].parent.chmod(0o700)
@@ -1709,7 +1787,8 @@ def test_rehearsal_lazy_and_lookup_inputs_are_frozen_once_without_leaking(
     )
     hosts["revision_newline"][f"{PREFIX}source_revision"] = REVISION + "\n"
 
-    _run(tmp_path, "lazy", hosts)
+    for case, hostvars in hosts.items():
+        _run(tmp_path, f"lazy_{case}", {case: hostvars})
 
     for name in (
         "lazy_enabled",
@@ -1878,6 +1957,57 @@ def test_rehearsal_injected_invocations_print_nothing_sensitive(tmp_path) -> Non
     )
     assert _outcome(root) == {"report": _report(root, "removed", COPIES, [])}
     assert not any(path.exists() for path in pair)
+
+
+@rehearsal
+def test_rehearsal_a_rogue_inventory_host_is_refused_without_limit(tmp_path) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    # A labelled rogue VM that reports the reviewed identity but is a different
+    # inventory host is refused by the batch check, which reads real names.
+    root = tmp_path / "hosts/rogue"
+    hosts = _hosts({"rogue": root}, _local_owners())
+    pair = _tree(root)
+    _run(tmp_path, "rogue", {"rogue": hosts["rogue"]}, host_name="rogue-vm")
+    _assert_refused(root, HOST)
+    assert _kept(pair)
+
+
+@rehearsal
+def test_rehearsal_start_at_a_main_task_cannot_open_the_gate_with_enabled_false(
+    tmp_path,
+) -> None:
+    # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
+    tmp_path = tmp_path.resolve()
+    # --start-at-task at a main.yml task with the frozen gate and registers preset
+    # must not remove: starting at the freeze recomputes it false, and starting at
+    # the include is caught by the raw-enabled assert.
+    presets = json.dumps(
+        {
+            FROZEN_GATE: True,
+            f"{PREFIX}copies": {"results": []},
+            f"{PREFIX}unlinked": {"results": []},
+        }
+    )
+    main_tasks = [task["name"] for task in yaml.safe_load(MAIN)]
+    for task in main_tasks:
+        root = tmp_path / "hosts" / f"start_{task[:8]}"
+        hosts = _hosts({"h": root}, _local_owners())
+        hosts["h"][f"{PREFIX}enabled"] = False
+        pair = _tree(root)
+        _run(
+            tmp_path,
+            f"startm_{task[:8]}",
+            {"h": hosts["h"]},
+            "--start-at-task",
+            task,
+            "-e",
+            presets,
+        )
+        assert _kept(pair), task
+        outcome = _outcome(root)
+        if task == INCLUDE:
+            assert outcome is not None and outcome["task"] == RAW_GATE, outcome
 
 
 @rehearsal

@@ -3,6 +3,18 @@
 # runs exactly once, before anything is removed, and reads only values this run
 # produced.
 
+# The frozen gate could be preset while --start-at-task skips the freeze,
+# opening the include with enabled=false. Re-assert the raw flag here, with the
+# same default(false, true) and no_log as the freeze, so nothing is removed
+# unless enabled is genuinely a boolean true.
+- name: Require the raw enabled flag to be a boolean true inside the include
+  ansible.builtin.assert:
+    that:
+      - (coding_hosted_postgres_environment_cleanup_enabled | default(false, true)) is sameas true
+    fail_msg: Removal runs only when enabled is set to a boolean true. Nothing was removed.
+    quiet: true
+  no_log: true
+
 # Extra vars outrank role defaults, registered results and set_facts alike, so
 # the only defence against a preset internal name is to refuse it before that
 # name is created. varnames lists names without rendering any value. At this
@@ -51,8 +63,10 @@
   register: coding_hosted_postgres_environment_cleanup_identity
 
 # inventory_hostname and group_names are host variables that extra vars
-# override, so group membership is proved from two magic variables they cannot:
-# every host in this play must belong to role_coding_hosted.
+# override, so group membership is proved from magic variables they cannot:
+# every host in this play must belong to role_coding_hosted, and the play must
+# target exactly the reviewed inventory host. ansible_play_batch carries real
+# inventory names, so a labelled rogue VM run without --limit cannot be removed.
 # Every refusal message is fixed text. Only the final report and the
 # partial-removal failure render values, and only the frozen revision after this
 # check has proved it is exactly 40 lowercase hex characters, plus paths from
@@ -62,6 +76,7 @@
   ansible.builtin.assert:
     that:
       - ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) | length == 0
+      - ansible_play_batch == ['ditto-coding-hosted-v2']
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_architecture == 'x86_64'
       - coding_hosted_postgres_environment_cleanup_identity.ansible_facts.ansible_distribution == 'Debian'
@@ -191,8 +206,10 @@
         | selectattr('stat.exists') | map(attribute='item.path') | list)
       register: coding_hosted_postgres_environment_cleanup_unlinked
   rescue:
-    # Every item is attempted even after one fails. Report which unlinks
-    # succeeded and which present copies remain unconfirmed, then fail.
+    # Every item is attempted even after one fails. Report which unlinks the
+    # module confirmed removed and which present copies remain unconfirmed, then
+    # fail. Both lists come from the module's returned state, never the pre-unlink
+    # stat, so a copy the module did not actually remove is never claimed.
     - name: Report the copies unlinked before the removal failure and stop
       ansible.builtin.fail:
         msg: >-
@@ -210,6 +227,33 @@
           | map(attribute='item.path') | list)
           | list | to_json }};
           reinspect both paths and reconcile by hand before re-running.
+
+# The report and the absent check are built from the module's returned state, not
+# the pre-unlink stat. A copy the pre-unlink stat saw present but the module
+# reported absent means a parent was renamed between the inspection and the
+# unlink, so the copy survives under the moved parent: fail loudly rather than
+# claim a removal that did not happen.
+- name: Record which copies the module removed and which vanished before removal
+  ansible.builtin.set_fact:
+    coding_hosted_postgres_environment_cleanup_removed: >-
+      {{ coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
+      | selectattr('state', 'defined')
+      | selectattr('state', 'in', ['removed', 'would_remove'])
+      | map(attribute='item.path') | list }}
+    coding_hosted_postgres_environment_cleanup_vanished: >-
+      {{ coding_hosted_postgres_environment_cleanup_unlinked.results | default([])
+      | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent')
+      | map(attribute='item.path') | list }}
+
+- name: Refuse if a copy present before removal vanished instead of being removed
+  ansible.builtin.assert:
+    that:
+      - coding_hosted_postgres_environment_cleanup_vanished | length == 0
+    fail_msg: >-
+      A PostgreSQL environment copy present before removal is gone but was not
+      removed here; a parent may have been renamed and the copy survives under it.
+      Reconcile by hand. Nothing else was changed.
+    quiet: true
 
 # A unit could start between the pre-removal listing and the unlink and read a
 # copy first. Re-list and refuse loudly if so; the role stops nothing and does
@@ -258,15 +302,20 @@
     label: "{{ item.item }}"
   when: not ansible_check_mode
 
+# removed= and would_remove= list only the paths the module actually removed (or
+# would remove in check mode); already_absent= is every other copy. Both come
+# from the module's returned state, so a copy that survived under a renamed
+# parent is never reported as removed.
 - name: Report only the source revision and exact paths removed or already absent
   ansible.builtin.debug:
     msg: >-
       Native Coding PostgreSQL environment cleanup;
       source_revision={{ coding_hosted_postgres_environment_cleanup_frozen_revision }};
       {{ 'would_remove' if ansible_check_mode else 'removed' }}={{
-      coding_hosted_postgres_environment_cleanup_copies.results
-      | selectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+      coding_hosted_postgres_environment_cleanup_removed | sort | to_json }};
       already_absent={{
       coding_hosted_postgres_environment_cleanup_copies.results
-      | rejectattr('stat.exists') | map(attribute='item.path') | list | to_json }};
+      | map(attribute='item.path')
+      | reject('in', coding_hosted_postgres_environment_cleanup_removed)
+      | list | to_json }};
       directories_kept=true; services_stopped=false; password_read=false.
