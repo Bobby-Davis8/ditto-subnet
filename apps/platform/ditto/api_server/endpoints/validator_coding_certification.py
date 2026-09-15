@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -15,9 +15,6 @@ from ditto.api_models.coding_certification import (
     SubmitCodingCertificationResponse,
     coding_certification_signing_message,
 )
-from ditto.api_models.coding_certification_leases import (
-    CodingCertificationLeaseStatus,
-)
 from ditto.api_server.attestation import verify_signature
 from ditto.api_server.dependencies import get_chain_client, get_session
 from ditto.api_server.endpoints.validator import (
@@ -25,9 +22,18 @@ from ditto.api_server.endpoints.validator import (
     _assert_validator_permitted,
 )
 from ditto.chain import ChainClient
-from ditto.db.models import Agent, CodingCertificationLease
+from ditto.db.models import Agent
+from ditto.db.queries.coding_certification_allowlist import (
+    CODING_CERTIFICATION_NOT_ALLOWLISTED,
+    CodingCertificationAllowlistRefusedError,
+    active_coding_certification_allowlist,
+)
 from ditto.db.queries.coding_certification_leases import (
+    CodingCertificationLeaseNotAvailableError,
+    complete_coding_certification_lease,
+    database_now,
     expire_coding_certification_lease_if_due,
+    lock_coding_certification_lease,
 )
 from ditto.db.queries.coding_certifications import (
     CodingCertificationConflictError,
@@ -45,10 +51,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 ChainDep = Annotated[ChainClient, Depends(get_chain_client)]
 
 _MAX_ISSUED_AT_SKEW = timedelta(minutes=5)
-
-
-class _LeaseDeadlinePassed(Exception):
-    """Internal: leave the receipt transaction so expiry can commit alone."""
+_LEASE_UNAVAILABLE = "coding certification lease is not available"
 
 
 def _aware(value: datetime) -> datetime:
@@ -60,7 +63,8 @@ def _aware(value: datetime) -> datetime:
     response_model=SubmitCodingCertificationResponse,
     responses={
         401: {"description": "Signature invalid or validator not permitted."},
-        404: {"description": "Agent not found."},
+        403: {"description": "The certification allowlist refuses the lease."},
+        404: {"description": "Agent or live lease not found."},
         409: {"description": "Artifact, lease, receipt, or replay conflict."},
     },
 )
@@ -97,7 +101,6 @@ async def submit_coding_certification(
         chain, netuid, payload.validator_hotkey, network=network
     )
 
-    now = datetime.now(UTC)
     try:
         issued_at = datetime.fromtimestamp(receipt.issued_at_unix, UTC)
         expires_at = datetime.fromtimestamp(receipt.expires_at_unix, UTC)
@@ -108,26 +111,18 @@ async def submit_coding_certification(
                 "coding certification receipt timestamps are outside supported bounds"
             ),
         ) from error
-    try:
-        return await _submit_coding_certification(
-            agent_id=agent_id,
-            payload=payload,
-            session=session,
-            now=now,
-            issued_at=issued_at,
-            expires_at=expires_at,
-        )
-    except _LeaseDeadlinePassed:
-        # A receipt that arrives after its lease deadline is refused, and the
-        # lease is expired durably (releasing its in-flight slot and revoking
-        # any live grant) rather than rolled back with the refused receipt.
-        async with session.begin():
-            await expire_coding_certification_lease_if_due(
-                session, lease_id=payload.lease_id
-            )
-        raise HTTPException(
-            status_code=404, detail="coding certification lease is not available"
-        ) from None
+    outcome = await _submit_coding_certification(
+        agent_id=agent_id,
+        payload=payload,
+        session=session,
+        issued_at=issued_at,
+        expires_at=expires_at,
+    )
+    if not isinstance(outcome, SubmitCodingCertificationResponse):
+        # The late receipt is refused, and the lease expiry (releasing its
+        # in-flight slot and revoking any live grant) has already committed.
+        raise HTTPException(status_code=404, detail=_LEASE_UNAVAILABLE)
+    return outcome
 
 
 async def _submit_coding_certification(
@@ -135,12 +130,19 @@ async def _submit_coding_certification(
     agent_id: UUID,
     payload: SubmitCodingCertificationRequest,
     session: AsyncSession,
-    now: datetime,
     issued_at: datetime,
     expires_at: datetime,
-) -> SubmitCodingCertificationResponse:
+) -> SubmitCodingCertificationResponse | Literal["late"]:
+    """Accept one receipt, or expire its late lease and commit that expiry.
+
+    Every deadline decision uses the database clock read after the agent and
+    lease row locks. The shared allowlist lock is taken first, before any row
+    lock, matching the allowlist write's lock order.
+    """
+
     receipt = payload.receipt
     async with session.begin():
+        await active_coding_certification_allowlist(session)
         agent = await session.get(Agent, agent_id, with_for_update=True)
         if agent is None:
             raise HTTPException(status_code=404, detail="agent not found")
@@ -158,6 +160,7 @@ async def _submit_coding_certification(
                 detail="coding receipt screened image is absent or stale",
             )
 
+        now = await database_now(session)
         existing = await get_coding_certification_identity(
             session,
             agent_id=agent_id,
@@ -200,11 +203,6 @@ async def _submit_coding_certification(
                 ),
             )
 
-        if issued_at > now + _MAX_ISSUED_AT_SKEW or expires_at <= now:
-            raise HTTPException(
-                status_code=409,
-                detail="coding certification receipt is not currently active",
-            )
         by_lease = await get_coding_certification_by_lease(
             session, lease_id=payload.lease_id
         )
@@ -213,22 +211,31 @@ async def _submit_coding_certification(
                 status_code=409,
                 detail="coding certification identity names different evidence",
             )
-        lease = await session.get(
-            CodingCertificationLease, payload.lease_id, with_for_update=True
-        )
-        if lease is None or lease.validator_hotkey != payload.validator_hotkey:
+        try:
+            gate = await lock_coding_certification_lease(
+                session,
+                lease_id=payload.lease_id,
+                validator_hotkey=payload.validator_hotkey,
+            )
+        except CodingCertificationLeaseNotAvailableError:
+            raise HTTPException(status_code=404, detail=_LEASE_UNAVAILABLE) from None
+        except CodingCertificationAllowlistRefusedError:
+            # Nothing was written; no receipt row exists for a refused tuple.
             raise HTTPException(
-                status_code=404, detail="coding certification lease is not available"
-            )
-        if (
-            lease.status
-            in (
-                CodingCertificationLeaseStatus.ISSUED.value,
-                CodingCertificationLeaseStatus.CLAIMED.value,
-            )
-            and _aware(lease.deadline) <= now
+                status_code=403, detail=CODING_CERTIFICATION_NOT_ALLOWLISTED
+            ) from None
+        lease, now = gate.lease, gate.now
+        # The one receipt deadline decision: an issued lease is late at its
+        # deadline, a claimed one only after its receipt window.
+        if await expire_coding_certification_lease_if_due(
+            session, lease=lease, now=now
         ):
-            raise _LeaseDeadlinePassed()
+            return "late"
+        if issued_at > now + _MAX_ISSUED_AT_SKEW or expires_at <= now:
+            raise HTTPException(
+                status_code=409,
+                detail="coding certification receipt is not currently active",
+            )
         if not coding_certification_lease_accepts_receipt(
             lease,
             validator_hotkey=payload.validator_hotkey,
@@ -237,7 +244,6 @@ async def _submit_coding_certification(
             screened_image_sha256=payload.screened_image_sha256,
             bench_version=payload.bench_version,
             receipt=receipt,
-            now=now,
         ):
             raise HTTPException(
                 status_code=409,
@@ -271,6 +277,8 @@ async def _submit_coding_certification(
             CodingCertificationSettlementError,
         ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        complete_coding_certification_lease(lease)
+        await session.flush()
 
     return SubmitCodingCertificationResponse(
         agent_id=agent_id,

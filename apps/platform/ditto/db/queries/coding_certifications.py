@@ -348,11 +348,11 @@ def coding_certification_lease_accepts_receipt(
     screened_image_sha256: str,
     bench_version: int,
     receipt: CodingCapabilityCertificationReceipt,
-    now: datetime,
 ) -> bool:
+    """Identity match only; the endpoint owns the one deadline decision."""
+
     return (
         lease.status == "claimed"
-        and _aware(lease.deadline) > _aware(now)
         and lease.validator_hotkey == validator_hotkey
         and lease.agent_id == agent_id
         and lease.artifact_sha256 == artifact_sha256

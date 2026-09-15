@@ -1,8 +1,9 @@
 """Admin controls for the shadow coding-certification canary path.
 
-The allowlist is an append-only restriction; it can only narrow who may start
-certification and never certifies anything itself. The lease listing is a
-read-only audit view that never transitions a row.
+The allowlist is a strict, append-only restriction: it refuses everything by
+default and can admit only exact tuples, never global access, and it never
+certifies anything itself. The lease listing is a read-only audit view that
+never transitions a row.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from ditto.api_server.dependencies import get_session
 from ditto.api_server.endpoints.admin_quarantine import require_admin
 from ditto.db.queries.coding_certification_allowlist import (
     CodingCertificationAllowlistRevisionConflictError,
+    active_coding_certification_allowlist,
     allowlist_revision_from_row,
     default_coding_certification_allowlist,
     insert_coding_certification_allowlist_revision,
@@ -40,7 +42,9 @@ from ditto.db.queries.coding_certification_inference_grants import (
     revoke_unlisted_coding_certification_inference_grants,
 )
 from ditto.db.queries.coding_certification_leases import (
+    abort_unlisted_coding_certification_leases,
     list_coding_certification_leases,
+    receipt_window_ends_at,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -65,7 +69,9 @@ async def _allowlist_control(
         else default_coding_certification_allowlist()
     )
     return AdminCodingCertificationAllowlistResponse(
-        enabled=current.enabled,
+        enabled=current.effective == "exact_tuples",
+        integrity=current.integrity,
+        effective=current.effective,
         current=current,
         history=[allowlist_revision_from_row(row) for row in rows[:history_limit]],
     )
@@ -81,7 +87,7 @@ async def get_coding_certification_allowlist(
     session: SessionDep,
     history_limit: Annotated[int, Query(ge=0, le=200)] = 50,
 ) -> AdminCodingCertificationAllowlistResponse:
-    """Current restriction (revision 0 = built-in disabled) and newest-first history."""
+    """Current restriction (revision 0 = built-in refuse-all) and history."""
 
     response.headers["Cache-Control"] = "no-store"
     return await _allowlist_control(session, history_limit=history_limit)
@@ -101,7 +107,12 @@ async def set_coding_certification_allowlist(
     _admin: AdminDep,
     session: SessionDep,
 ) -> AdminCodingCertificationAllowlistApplyResponse:
-    """Append one complete revision; enabling also revokes unlisted live grants."""
+    """Append one complete revision, then abort and revoke what it refuses.
+
+    In the same transaction as the new revision, every issued or claimed lease
+    the revision does not admit is aborted (recording the revision) and every
+    live certification inference grant it does not admit is revoked.
+    """
 
     response.headers["Cache-Control"] = "no-store"
     expected = coding_certification_allowlist_confirmation(
@@ -122,8 +133,12 @@ async def set_coding_certification_allowlist(
                 reason=payload.reason,
                 actor=payload.actor,
             )
+            allowlist = await active_coding_certification_allowlist(session)
+            aborted = await abort_unlisted_coding_certification_leases(
+                session, allowlist=allowlist
+            )
             revoked = await revoke_unlisted_coding_certification_inference_grants(
-                session
+                session, allowlist=allowlist
             )
     except CodingCertificationAllowlistRevisionConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
@@ -135,6 +150,7 @@ async def set_coding_certification_allowlist(
     control = await _allowlist_control(session, history_limit=50)
     return AdminCodingCertificationAllowlistApplyResponse(
         **control.model_dump(),
+        aborted_lease_count=aborted,
         revoked_inference_grant_count=revoked,
     )
 
@@ -156,7 +172,7 @@ async def list_coding_certification_lease_audit(
     """Newest-first certification lease rows without grant ids or bearer data."""
 
     response.headers["Cache-Control"] = "no-store"
-    rows, total = await list_coding_certification_leases(
+    page = await list_coding_certification_leases(
         session,
         agent_id=agent_id,
         validator_hotkey=validator_hotkey,
@@ -164,9 +180,8 @@ async def list_coding_certification_lease_audit(
         limit=limit,
         offset=offset,
     )
-    now = datetime.now(UTC)
     return AdminCodingCertificationLeaseList(
-        total=total,
+        total=page.total,
         limit=limit,
         offset=offset,
         leases=[
@@ -183,7 +198,10 @@ async def list_coding_certification_lease_audit(
                 claimed_at=row.lease.claimed_at,
                 aborted_at=row.lease.aborted_at,
                 deadline=row.lease.deadline,
-                deadline_passed=_aware(row.lease.deadline) <= now,
+                deadline_passed=_aware(row.lease.deadline) <= page.now,
+                receipt_window_ends_at=receipt_window_ends_at(row.lease),
+                claim_allowlist_revision=row.lease.claim_allowlist_revision,
+                aborted_allowlist_revision=row.lease.aborted_allowlist_revision,
                 inference_grant_status=cast(
                     Literal["pending", "active", "revoked", "exhausted"] | None,
                     row.inference_grant_status,
@@ -194,6 +212,6 @@ async def list_coding_certification_lease_audit(
                     else None
                 ),
             )
-            for row in rows
+            for row in page.rows
         ],
     )

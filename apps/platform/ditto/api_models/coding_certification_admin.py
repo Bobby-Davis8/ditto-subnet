@@ -1,8 +1,10 @@
 """Admin wire models for the shadow coding-certification canary controls.
 
-The allowlist is an append-only operator restriction on who may start the
-contract-v1 certification path. Lease rows are a read-only audit view. Neither
-participates in scoring, weights, or emissions.
+The allowlist is an append-only, strict operator restriction on who may run the
+contract-v1 certification path: with no revision, a refuse-all revision, or a
+corrupt revision, Platform refuses every lease, grant, harness, and receipt.
+Only exact listed tuples are admitted. Lease rows are a read-only audit view.
+Neither participates in scoring, weights, or emissions.
 """
 
 from __future__ import annotations
@@ -96,16 +98,29 @@ def coding_certification_allowlist_confirmation(
     *, enabled: bool, entry_count: int
 ) -> str:
     if not enabled:
-        return "APPLY CODING CERTIFICATION ALLOWLIST DISABLED"
+        return "APPLY CODING CERTIFICATION ALLOWLIST REFUSE ALL"
     return f"APPLY CODING CERTIFICATION ALLOWLIST ENABLED {entry_count}"
 
 
+AllowlistIntegrity = Literal["valid", "invalid"]
+AllowlistEffect = Literal["refuse_all", "exact_tuples"]
+
+
 class CodingCertificationAllowlistRevision(BaseModel):
+    """One stored revision as enforcement sees it.
+
+    ``enabled`` is the stored flag. ``integrity="invalid"`` means the stored
+    entries failed to parse or their checksum does not bind them; such a
+    revision reports no entries and ``effective="refuse_all"``.
+    """
+
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     revision: int
     parent_revision: int
     enabled: bool
+    integrity: AllowlistIntegrity
+    effective: AllowlistEffect
     entries: list[CodingCertificationAllowlistEntry]
     checksum: Annotated[str, Field(pattern=_SHA256)]
     reason: str
@@ -114,9 +129,13 @@ class CodingCertificationAllowlistRevision(BaseModel):
 
 
 class AdminCodingCertificationAllowlistResponse(BaseModel):
+    """Current enforcement. ``enabled`` is true only for valid exact tuples."""
+
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     enabled: bool
+    integrity: AllowlistIntegrity
+    effective: AllowlistEffect
     current: CodingCertificationAllowlistRevision
     history: list[CodingCertificationAllowlistRevision]
     max_entries: int = CODING_CERTIFICATION_ALLOWLIST_MAX_ENTRIES
@@ -126,6 +145,7 @@ class AdminCodingCertificationAllowlistResponse(BaseModel):
 class AdminCodingCertificationAllowlistApplyResponse(
     AdminCodingCertificationAllowlistResponse
 ):
+    aborted_lease_count: Annotated[int, Field(ge=0)]
     revoked_inference_grant_count: Annotated[int, Field(ge=0)]
 
 
@@ -160,14 +180,25 @@ class AdminCodingCertificationAllowlistRequest(BaseModel):
     @model_validator(mode="after")
     def entries_are_exact(self) -> AdminCodingCertificationAllowlistRequest:
         if not self.enabled and self.entries:
-            raise ValueError("a disabled allowlist must not carry entries")
+            raise ValueError("a refuse-all allowlist must not carry entries")
+        if self.enabled and not self.entries:
+            raise ValueError(
+                "an enabled allowlist needs at least one exact entry; "
+                "use enabled=false to refuse all"
+            )
         if len({entry.key() for entry in self.entries}) != len(self.entries):
             raise ValueError("coding certification allowlist entries must be unique")
         return self
 
 
 class AdminCodingCertificationLeaseRecord(BaseModel):
-    """One lease row. Grant ids, bearer digests, and image locators are omitted."""
+    """One lease row. Grant ids, bearer digests, and image locators are omitted.
+
+    ``completed`` means Platform accepted the lease's receipt; it is terminal
+    and never expires. ``claim_allowlist_revision`` is the allowlist revision
+    that admitted the claim, and ``aborted_allowlist_revision`` the revision
+    whose write aborted the lease.
+    """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
@@ -184,6 +215,9 @@ class AdminCodingCertificationLeaseRecord(BaseModel):
     aborted_at: datetime | None
     deadline: datetime
     deadline_passed: bool
+    receipt_window_ends_at: datetime
+    claim_allowlist_revision: int | None
+    aborted_allowlist_revision: int | None
     inference_grant_status: Literal["pending", "active", "revoked", "exhausted"] | None
     receipt_status: CodingCertificationStatus | None
     weight_eligible: Literal[False] = False

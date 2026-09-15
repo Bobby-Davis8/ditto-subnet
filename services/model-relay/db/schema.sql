@@ -1310,7 +1310,7 @@ CREATE TABLE public.coding_certification_allowlist_revisions (
     CONSTRAINT ck_coding_certification_allowlist_revisions_coding_cert_5186 CHECK (((length(TRIM(BOTH FROM actor)) >= 1) AND (length(TRIM(BOTH FROM actor)) <= 120))),
     CONSTRAINT ck_coding_certification_allowlist_revisions_coding_cert_5319 CHECK (((parent_revision >= 0) AND (parent_revision < revision))),
     CONSTRAINT ck_coding_certification_allowlist_revisions_coding_cert_6f81 CHECK ((length(TRIM(BOTH FROM reason)) >= 8)),
-    CONSTRAINT ck_coding_certification_allowlist_revisions_coding_cert_8052 CHECK (((jsonb_typeof(entries) = 'array'::text) AND (jsonb_array_length(entries) <= 16) AND (enabled OR (jsonb_array_length(entries) = 0))))
+    CONSTRAINT ck_coding_certification_allowlist_revisions_coding_cert_8052 CHECK (((jsonb_typeof(entries) = 'array'::text) AND (jsonb_array_length(entries) <= 16) AND (enabled = (jsonb_array_length(entries) > 0))))
 );
 
 
@@ -1444,14 +1444,17 @@ CREATE TABLE public.coding_certification_leases (
     aborted_at timestamp with time zone,
     authority jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    claim_allowlist_revision integer,
+    aborted_allowlist_revision integer,
     CONSTRAINT ck_coding_certification_leases_coding_certification_lea_012f CHECK ((validator_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{47,48}$'::text)),
     CONSTRAINT ck_coding_certification_leases_coding_certification_lea_066c CHECK (((issued_at < deadline) AND (deadline <= (issued_at + '00:30:00'::interval)))),
     CONSTRAINT ck_coding_certification_leases_coding_certification_lea_5aab CHECK (((coding_contract_version = 1) AND (bench_version >= 7))),
-    CONSTRAINT ck_coding_certification_leases_coding_certification_lea_88ef CHECK ((((status = 'issued'::text) AND (claimed_at IS NULL) AND (aborted_at IS NULL)) OR ((status = 'claimed'::text) AND (claimed_at IS NOT NULL) AND (claimed_at >= issued_at) AND (claimed_at < deadline) AND (aborted_at IS NULL)) OR ((status = 'aborted'::text) AND (aborted_at IS NOT NULL) AND (aborted_at >= issued_at) AND (claimed_at IS NULL)) OR ((status = 'expired'::text) AND (aborted_at IS NULL) AND ((claimed_at IS NULL) OR ((claimed_at >= issued_at) AND (claimed_at < deadline)))))),
+    CONSTRAINT ck_coding_certification_leases_coding_certification_lea_88ef CHECK ((((status = 'issued'::text) AND (claimed_at IS NULL) AND (aborted_at IS NULL) AND (aborted_allowlist_revision IS NULL)) OR ((status = ANY (ARRAY['claimed'::text, 'completed'::text])) AND (claimed_at IS NOT NULL) AND (claimed_at >= issued_at) AND (claimed_at < deadline) AND (aborted_at IS NULL) AND (aborted_allowlist_revision IS NULL)) OR ((status = 'aborted'::text) AND (aborted_at IS NOT NULL) AND (aborted_at >= issued_at) AND ((claimed_at IS NULL) OR ((aborted_allowlist_revision IS NOT NULL) AND (claimed_at >= issued_at) AND (claimed_at < deadline) AND (aborted_at >= claimed_at)))) OR ((status = 'expired'::text) AND (aborted_at IS NULL) AND (aborted_allowlist_revision IS NULL) AND ((claimed_at IS NULL) OR ((claimed_at >= issued_at) AND (claimed_at < deadline)))))),
     CONSTRAINT ck_coding_certification_leases_coding_certification_lea_9708 CHECK ((((octet_length(screened_image_id) >= 1) AND (octet_length(screened_image_id) <= 256)) AND ((octet_length(screened_image_ref) >= 1) AND (octet_length(screened_image_ref) <= 512)) AND (screened_image_id !~ '[[:space:][:cntrl:]]'::text) AND (screened_image_ref !~ '[[:cntrl:]]'::text))),
+    CONSTRAINT ck_coding_certification_leases_coding_certification_lea_bded CHECK (((claim_allowlist_revision IS NULL) OR ((claim_allowlist_revision > 0) AND (claimed_at IS NOT NULL)))),
     CONSTRAINT ck_coding_certification_leases_coding_certification_lea_e585 CHECK ((weight_eligible = false)),
     CONSTRAINT ck_coding_certification_leases_coding_certification_lea_e6b0 CHECK (((artifact_sha256 ~ '^[0-9a-f]{64}$'::text) AND (screened_image_sha256 ~ '^[0-9a-f]{64}$'::text) AND (core_qualification_policy_checksum ~ '^[0-9a-f]{64}$'::text) AND (canary_manifest_sha256 ~ '^[0-9a-f]{64}$'::text) AND (runner_plan_sha256 ~ '^[0-9a-f]{64}$'::text) AND (grader_plan_sha256 ~ '^[0-9a-f]{64}$'::text) AND (resource_profile_sha256 ~ '^[0-9a-f]{64}$'::text) AND (inference_policy_sha256 ~ '^[0-9a-f]{64}$'::text))),
-    CONSTRAINT ck_coding_certification_leases_coding_certification_lea_fe07 CHECK ((status = ANY (ARRAY['issued'::text, 'claimed'::text, 'aborted'::text, 'expired'::text])))
+    CONSTRAINT ck_coding_certification_leases_coding_certification_lea_fe07 CHECK ((status = ANY (ARRAY['issued'::text, 'claimed'::text, 'completed'::text, 'aborted'::text, 'expired'::text])))
 );
 
 
@@ -7980,11 +7983,27 @@ ALTER TABLE ONLY public.coding_certification_inference_requests
 
 
 --
+-- Name: coding_certification_leases coding_certification_leases_aborted_allowlist_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.coding_certification_leases
+    ADD CONSTRAINT coding_certification_leases_aborted_allowlist_fkey FOREIGN KEY (aborted_allowlist_revision) REFERENCES public.coding_certification_allowlist_revisions(revision) ON DELETE RESTRICT;
+
+
+--
 -- Name: coding_certification_leases coding_certification_leases_agent_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.coding_certification_leases
     ADD CONSTRAINT coding_certification_leases_agent_fkey FOREIGN KEY (agent_id) REFERENCES public.agents(agent_id) ON DELETE CASCADE;
+
+
+--
+-- Name: coding_certification_leases coding_certification_leases_claim_allowlist_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.coding_certification_leases
+    ADD CONSTRAINT coding_certification_leases_claim_allowlist_fkey FOREIGN KEY (claim_allowlist_revision) REFERENCES public.coding_certification_allowlist_revisions(revision) ON DELETE RESTRICT;
 
 
 --

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import not_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ditto.api_models.coding_inference import (
@@ -23,14 +23,15 @@ from ditto.db.models import (
     CodingCertificationLease,
 )
 from ditto.db.queries.coding_certification_allowlist import (
+    CodingCertificationAllowlist,
     CodingCertificationAllowlistRefusedError,
-    active_coding_certification_allowlist,
-    require_coding_certification_allowlisted,
 )
 from ditto.db.queries.coding_certification_leases import (
     CodingCertificationLeaseNotAvailableError,
     authorize_coding_certification_harness_delivery,
+    database_now,
     mark_certification_inference_grant_revoked,
+    revoke_live_certification_inference_grants,
 )
 from ditto.db.queries.coding_inference_grants import (
     CodingInferenceGrantConflictError,
@@ -76,47 +77,6 @@ def _canonical_policy(policy: CodingInferencePolicy) -> CodingInferencePolicy:
     )
 
 
-async def _database_now(session: AsyncSession) -> datetime:
-    value = await session.scalar(select(func.clock_timestamp()))
-    if not isinstance(value, datetime):
-        raise RuntimeError("database clock did not return a timestamp")
-    return _aware(value)
-
-
-_revoke = mark_certification_inference_grant_revoked
-
-
-async def _require_lease_allowlisted(
-    session: AsyncSession,
-    *,
-    lease: CodingCertificationLease,
-    now: datetime,
-) -> None:
-    """Refuse, and terminally revoke any live grant, for an unlisted lease."""
-
-    try:
-        await require_coding_certification_allowlisted(
-            session,
-            agent_id=lease.agent_id,
-            artifact_sha256=lease.artifact_sha256,
-            validator_hotkey=lease.validator_hotkey,
-        )
-    except CodingCertificationAllowlistRefusedError:
-        grant = await session.scalar(
-            select(CodingCertificationInferenceGrant)
-            .where(
-                CodingCertificationInferenceGrant.lease_id == lease.lease_id,
-                CodingCertificationInferenceGrant.status.in_(("pending", "active")),
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if grant is not None:
-            _revoke(grant, now=now)
-            await session.flush()
-        raise
-
-
 def _expected_fields(
     *,
     lease: CodingCertificationLease,
@@ -153,17 +113,28 @@ async def _claimed_lease_is_live(
     *,
     lease_id: UUID,
     validator_hotkey: str,
-    now: datetime,
 ) -> CodingCertificationLease:
+    """Pass the shared lease gate (allowlist, claimed, deadline, image) or refuse.
+
+    An allowlist refusal also terminally revokes the lease's live grant, and
+    that revocation commits with the refusal.
+    """
+
     try:
         await authorize_coding_certification_harness_delivery(
             session, lease_id=lease_id, validator_hotkey=validator_hotkey
         )
+    except CodingCertificationAllowlistRefusedError:
+        await revoke_live_certification_inference_grants(
+            session, lease_id=lease_id, now=await database_now(session)
+        )
+        await session.flush()
+        raise
     except CodingCertificationLeaseNotAvailableError as error:
         raise CodingInferenceGrantNotAvailableError(
             "coding certification inference lease is unavailable"
         ) from error
-    lease = await session.get(CodingCertificationLease, lease_id, with_for_update=True)
+    lease = await session.get(CodingCertificationLease, lease_id)
     agent = await session.get(Agent, lease.agent_id) if lease is not None else None
     if (
         lease is None
@@ -171,7 +142,6 @@ async def _claimed_lease_is_live(
         or lease.validator_hotkey != validator_hotkey
         or lease.status != "claimed"
         or lease.weight_eligible
-        or _aware(lease.deadline) <= now
         or lease.artifact_sha256 != agent.sha256
         or lease.screened_image_sha256 != agent.screened_image_sha256
     ):
@@ -196,11 +166,9 @@ async def ensure_coding_certification_inference_grant(
         raise CodingInferenceGrantIntegrityError(
             "coding certification inference policy is malformed"
         ) from error
-    now = await _database_now(session)
     lease = await _claimed_lease_is_live(
-        session, lease_id=lease_id, validator_hotkey=validator_hotkey, now=now
+        session, lease_id=lease_id, validator_hotkey=validator_hotkey
     )
-    await _require_lease_allowlisted(session, lease=lease, now=now)
     expected = _expected_fields(lease=lease, policy=policy)
     grant = await session.scalar(
         select(CodingCertificationInferenceGrant)
@@ -208,19 +176,24 @@ async def ensure_coding_certification_inference_grant(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    now = await database_now(session)
     if grant is not None:
         if any(getattr(grant, field) != value for field, value in expected.items()):
-            _revoke(grant, now=now)
+            mark_certification_inference_grant_revoked(grant, now=now)
             raise CodingInferenceGrantIntegrityError(
                 "stored coding certification inference grant drifted"
             )
         if grant.status in {"revoked", "exhausted"} or _aware(grant.expires_at) <= now:
             if grant.status != "revoked":
-                _revoke(grant, now=now)
+                mark_certification_inference_grant_revoked(grant, now=now)
             raise CodingInferenceGrantNotAvailableError(
                 "coding certification inference grant is terminal"
             )
         return CodingCertificationInferenceGrantResult(grant=grant, idempotent=True)
+    if _aware(lease.deadline) <= now:
+        raise CodingInferenceGrantNotAvailableError(
+            "coding certification inference lease is unavailable"
+        )
     row = CodingCertificationInferenceGrant(
         grant_id=uuid4(),
         **expected,
@@ -269,20 +242,18 @@ async def activate_coding_certification_inference_grant(
         raise CodingInferenceGrantNotAvailableError(
             "coding certification inference grant is unavailable"
         )
-    now = await _database_now(session)
     lease = await _claimed_lease_is_live(
         session,
         lease_id=snapshot.lease_id,
         validator_hotkey=validator_hotkey,
-        now=now,
     )
-    await _require_lease_allowlisted(session, lease=lease, now=now)
     grant = await session.scalar(
         select(CodingCertificationInferenceGrant)
         .where(CodingCertificationInferenceGrant.grant_id == grant_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    now = await database_now(session)
     expected = _expected_fields(lease=lease, policy=policy)
     if (
         grant is None
@@ -293,9 +264,10 @@ async def activate_coding_certification_inference_grant(
         or grant.active_requests != 0
         or grant.generation >= (1 << 31) - 1
         or _aware(grant.expires_at) <= now
+        or _aware(lease.deadline) <= now
     ):
         if grant is not None and grant.status not in {"revoked", "exhausted"}:
-            _revoke(grant, now=now)
+            mark_certification_inference_grant_revoked(grant, now=now)
         raise CodingInferenceGrantNotAvailableError(
             "coding certification inference grant is not live"
         )
@@ -331,7 +303,7 @@ async def revoke_coding_certification_inference_grant(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    now = await _database_now(session)
+    now = await database_now(session)
     if grant is None or grant.validator_hotkey != validator_hotkey:
         raise CodingInferenceGrantNotAvailableError(
             "coding certification inference grant is unavailable"
@@ -354,7 +326,7 @@ async def revoke_coding_certification_inference_grant(
         raise CodingInferenceGrantConflictError(
             "coding certification inference grant still has an active request"
         )
-    _revoke(grant, now=now)
+    mark_certification_inference_grant_revoked(grant, now=now)
     await session.flush()
     return CodingCertificationInferenceGrantRevocation(grant=grant, idempotent=False)
 
@@ -391,7 +363,7 @@ async def revoke_coding_certification_inference_grant_by_capability(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    now = await _database_now(session)
+    now = await database_now(session)
     if (
         grant is None
         or grant.lease_id != lease_id
@@ -406,48 +378,62 @@ async def revoke_coding_certification_inference_grant_by_capability(
         raise CodingInferenceGrantConflictError(
             "coding certification inference grant is not active"
         )
-    _revoke(grant, now=now)
+    mark_certification_inference_grant_revoked(grant, now=now)
     await session.flush()
     return CodingCertificationInferenceGrantRevocation(grant=grant, idempotent=False)
 
 
 async def revoke_unlisted_coding_certification_inference_grants(
     session: AsyncSession,
+    *,
+    allowlist: CodingCertificationAllowlist,
 ) -> int:
-    """Terminally revoke every live canary grant the current allowlist refuses.
+    """Terminally revoke every live canary grant the given allowlist refuses.
 
     Called in the same transaction that appends an allowlist revision, after
-    the exclusive allowlist lock is held, so tightening the restriction also
-    cuts off Platform-paid inference already minted for unlisted tuples.
+    the exclusive allowlist lock is held and in-flight leases were aborted, so
+    tightening the restriction also cuts off Platform-paid inference already
+    minted for unlisted tuples. The tuple filter runs in SQL, so only refused
+    grants are locked.
     """
 
-    allowed = await active_coding_certification_allowlist(session)
-    if allowed is None:
-        return 0
-    rows = (
-        await session.execute(
-            select(CodingCertificationInferenceGrant, CodingCertificationLease)
-            .join(
-                CodingCertificationLease,
-                CodingCertificationLease.lease_id
-                == CodingCertificationInferenceGrant.lease_id,
+    statement = (
+        select(CodingCertificationInferenceGrant)
+        .join(
+            CodingCertificationLease,
+            CodingCertificationLease.lease_id
+            == CodingCertificationInferenceGrant.lease_id,
+        )
+        .where(CodingCertificationInferenceGrant.status.in_(("pending", "active")))
+    )
+    if allowlist.tuples:
+        statement = statement.where(
+            not_(
+                tuple_(
+                    CodingCertificationLease.agent_id,
+                    CodingCertificationLease.artifact_sha256,
+                    CodingCertificationInferenceGrant.validator_hotkey,
+                ).in_(
+                    [
+                        (UUID(agent_id), artifact_sha256, validator_hotkey)
+                        for agent_id, artifact_sha256, validator_hotkey in sorted(
+                            allowlist.tuples
+                        )
+                    ]
+                )
             )
-            .where(CodingCertificationInferenceGrant.status.in_(("pending", "active")))
-            .order_by(CodingCertificationInferenceGrant.grant_id)
+        )
+    grants = (
+        await session.scalars(
+            statement.order_by(CodingCertificationInferenceGrant.grant_id)
             .with_for_update(of=CodingCertificationInferenceGrant)
             .execution_options(populate_existing=True)
         )
     ).all()
-    now = await _database_now(session)
-    revoked = 0
-    for grant, lease in rows:
-        if (
-            str(lease.agent_id),
-            lease.artifact_sha256,
-            grant.validator_hotkey,
-        ) in allowed:
-            continue
-        _revoke(grant, now=now)
-        revoked += 1
+    if not grants:
+        return 0
+    now = await database_now(session)
+    for grant in grants:
+        mark_certification_inference_grant_revoked(grant, now=now)
     await session.flush()
-    return revoked
+    return len(grants)

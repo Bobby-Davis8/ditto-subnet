@@ -1,15 +1,22 @@
-"""Append-only operator allowlist for the shadow coding-certification path.
+"""Strict, append-only operator allowlist for the shadow certification path.
 
-No revision means disabled: lease issue and certification inference grants keep
-their existing eligibility rules. An enabled revision admits only its exact
-``(agent_id, artifact_sha256, validator_hotkey)`` tuples, and an enabled
-revision with no entries refuses all of them. A stored revision that cannot be
-parsed or whose checksum disagrees refuses everything (fail closed).
+Refuse-all is the default. With no revision, a refuse-all (``enabled=false``)
+revision, or a stored revision that cannot be parsed or whose checksum
+disagrees, Platform refuses every certification lease issue, claim, harness
+launch, inference grant, and receipt. Only an intact enabled revision admits
+anything, and then only its exact ``(agent_id, artifact_sha256,
+validator_hotkey)`` tuples. No revision can reopen global access.
+
+Lock order: every transaction that authorizes on the allowlist takes the shared
+transaction advisory lock before it locks any lease, agent, or grant row, and a
+revision write takes it exclusively before it locks leases and grants. That
+serializes writes with authorizing reads and cannot deadlock against them.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -32,7 +39,7 @@ _LOCK_KEY = "ditto:coding-certification-allowlist"
 
 
 class CodingCertificationAllowlistRefusedError(RuntimeError):
-    """The enabled operator allowlist does not name this exact tuple."""
+    """The current allowlist does not admit this exact tuple."""
 
     def __init__(self) -> None:
         super().__init__(CODING_CERTIFICATION_NOT_ALLOWLISTED)
@@ -47,6 +54,20 @@ class CodingCertificationAllowlistRevisionConflictError(RuntimeError):
             f"expected_revision={current_revision}"
         )
         self.current_revision = current_revision
+
+
+@dataclass(frozen=True)
+class CodingCertificationAllowlist:
+    """The enforced allowlist for the rest of one transaction."""
+
+    revision: int
+    """Latest stored revision, or ``0`` when none exists (refuse all)."""
+    tuples: frozenset[tuple[str, str, str]]
+
+    def admits(
+        self, *, agent_id: UUID, artifact_sha256: str, validator_hotkey: str
+    ) -> bool:
+        return (str(agent_id), artifact_sha256, validator_hotkey) in self.tuples
 
 
 async def _lock(session: AsyncSession, *, shared: bool) -> None:
@@ -85,7 +106,7 @@ async def list_coding_certification_allowlist_revisions(
 def allowlist_entries_from_row(
     row: CodingCertificationAllowlistRevisionRow,
 ) -> list[CodingCertificationAllowlistEntry] | None:
-    """Parse and verify one stored revision, or ``None`` if it is not exact."""
+    """Parse and verify one stored revision, or ``None`` if it is not intact."""
 
     if (
         not isinstance(row.entries, list)
@@ -111,15 +132,29 @@ def allowlist_entries_from_row(
     return entries
 
 
+def _admitted_entries(
+    row: CodingCertificationAllowlistRevisionRow,
+) -> list[CodingCertificationAllowlistEntry]:
+    """The tuples a stored revision admits; anything not intact admits none."""
+
+    entries = allowlist_entries_from_row(row)
+    if entries is None or not row.enabled:
+        return []
+    return entries
+
+
 def allowlist_revision_from_row(
     row: CodingCertificationAllowlistRevisionRow,
 ) -> CodingCertificationAllowlistRevision:
-    entries = allowlist_entries_from_row(row)
+    intact = allowlist_entries_from_row(row) is not None
+    admitted = _admitted_entries(row)
     return CodingCertificationAllowlistRevision(
         revision=row.revision,
         parent_revision=row.parent_revision,
         enabled=row.enabled,
-        entries=entries if entries is not None else [],
+        integrity="valid" if intact else "invalid",
+        effective="exact_tuples" if admitted else "refuse_all",
+        entries=admitted,
         checksum=row.checksum,
         reason=row.reason,
         actor=row.actor,
@@ -132,9 +167,11 @@ def default_coding_certification_allowlist() -> CodingCertificationAllowlistRevi
         revision=0,
         parent_revision=0,
         enabled=False,
+        integrity="valid",
+        effective="refuse_all",
         entries=[],
         checksum=coding_certification_allowlist_checksum(enabled=False, entries=[]),
-        reason="Built-in default: coding certification allowlist disabled",
+        reason="Built-in default: coding certification refused for every tuple",
         actor="platform",
         created_at=None,
     )
@@ -142,38 +179,22 @@ def default_coding_certification_allowlist() -> CodingCertificationAllowlistRevi
 
 async def active_coding_certification_allowlist(
     session: AsyncSession,
-) -> frozenset[tuple[str, str, str]] | None:
-    """Return the enforced tuple set, or ``None`` when the restriction is off.
+) -> CodingCertificationAllowlist:
+    """Return the enforced allowlist, refusing everything unless intact and enabled.
 
     Takes the shared allowlist lock for the rest of the transaction, so a
     concurrent revision cannot commit between this read and the caller's write.
+    Call it before locking any lease, agent, or grant row.
     """
 
     await _lock(session, shared=True)
     row = await latest_coding_certification_allowlist(session)
     if row is None:
-        return None
-    entries = allowlist_entries_from_row(row)
-    if entries is None:
-        # A corrupt or drifted revision must never widen access.
-        return frozenset()
-    if not row.enabled:
-        return None
-    return frozenset(entry.key() for entry in entries)
-
-
-async def require_coding_certification_allowlisted(
-    session: AsyncSession,
-    *,
-    agent_id: UUID,
-    artifact_sha256: str,
-    validator_hotkey: str,
-) -> None:
-    allowed = await active_coding_certification_allowlist(session)
-    if allowed is None:
-        return
-    if (str(agent_id), artifact_sha256, validator_hotkey) not in allowed:
-        raise CodingCertificationAllowlistRefusedError()
+        return CodingCertificationAllowlist(revision=0, tuples=frozenset())
+    return CodingCertificationAllowlist(
+        revision=row.revision,
+        tuples=frozenset(entry.key() for entry in _admitted_entries(row)),
+    )
 
 
 async def insert_coding_certification_allowlist_revision(
@@ -185,7 +206,11 @@ async def insert_coding_certification_allowlist_revision(
     reason: str,
     actor: str,
 ) -> CodingCertificationAllowlistRevisionRow:
-    """Append one complete revision under the exclusive allowlist lock."""
+    """Append one complete revision under the exclusive allowlist lock.
+
+    The caller must, in the same transaction, abort the in-flight leases and
+    revoke the live grants the new revision refuses.
+    """
 
     await _lock(session, shared=False)
     current = await latest_coding_certification_allowlist(session)

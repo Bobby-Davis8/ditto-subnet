@@ -1253,6 +1253,30 @@ class CodingCapabilityCertification(Base):
     )
 
 
+CODING_CERTIFICATION_LEASE_LIFECYCLE = (
+    "(status = 'issued' AND claimed_at IS NULL AND aborted_at IS NULL "
+    "AND aborted_allowlist_revision IS NULL) "
+    "OR (status IN ('claimed', 'completed') AND claimed_at IS NOT NULL "
+    "AND claimed_at >= issued_at AND claimed_at < deadline "
+    "AND aborted_at IS NULL AND aborted_allowlist_revision IS NULL) "
+    "OR (status = 'aborted' AND aborted_at IS NOT NULL "
+    "AND aborted_at >= issued_at AND (claimed_at IS NULL "
+    "OR (aborted_allowlist_revision IS NOT NULL "
+    "AND claimed_at >= issued_at AND claimed_at < deadline "
+    "AND aborted_at >= claimed_at))) "
+    "OR (status = 'expired' AND aborted_at IS NULL "
+    "AND aborted_allowlist_revision IS NULL "
+    "AND (claimed_at IS NULL "
+    "OR (claimed_at >= issued_at AND claimed_at < deadline)))"
+)
+"""One-way certification lease lifecycle.
+
+``issued -> claimed | aborted | expired`` and ``claimed -> completed | expired``,
+plus ``claimed -> aborted`` only by an allowlist revision. ``completed`` (an
+accepted receipt) is terminal.
+"""
+
+
 class CodingCertificationLease(Base):
     """One shadow public-canary lease minted from current core qualification."""
 
@@ -1295,6 +1319,13 @@ class CodingCertificationLease(Base):
     aborted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )
+    # The allowlist revision that admitted the claim. Only admitted claims
+    # count toward the per-identity attempt budget.
+    claim_allowlist_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The allowlist revision whose write aborted this in-flight lease.
+    aborted_allowlist_revision: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     authority: Mapped[dict] = mapped_column(_JSON_VARIANT, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
@@ -1306,6 +1337,18 @@ class CodingCertificationLease(Base):
             ["agents.agent_id"],
             ondelete="CASCADE",
             name="coding_certification_leases_agent_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["claim_allowlist_revision"],
+            ["coding_certification_allowlist_revisions.revision"],
+            ondelete="RESTRICT",
+            name="coding_certification_leases_claim_allowlist_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["aborted_allowlist_revision"],
+            ["coding_certification_allowlist_revisions.revision"],
+            ondelete="RESTRICT",
+            name="coding_certification_leases_aborted_allowlist_fkey",
         ),
         ForeignKeyConstraint(
             ["core_qualification_observation_id"],
@@ -1333,7 +1376,7 @@ class CodingCertificationLease(Base):
             name="coding_certification_leases_version_check",
         ),
         CheckConstraint(
-            "status IN ('issued', 'claimed', 'aborted', 'expired')",
+            "status IN ('issued', 'claimed', 'completed', 'aborted', 'expired')",
             name="coding_certification_leases_status_check",
         ),
         CheckConstraint(
@@ -1352,16 +1395,13 @@ class CodingCertificationLease(Base):
             name="coding_certification_leases_image_identity_check",
         ),
         CheckConstraint(
-            "(status = 'issued' AND claimed_at IS NULL AND aborted_at IS NULL) "
-            "OR (status = 'claimed' AND claimed_at IS NOT NULL "
-            "AND claimed_at >= issued_at AND claimed_at < deadline "
-            "AND aborted_at IS NULL) "
-            "OR (status = 'aborted' AND aborted_at IS NOT NULL "
-            "AND aborted_at >= issued_at AND claimed_at IS NULL) "
-            "OR (status = 'expired' AND aborted_at IS NULL "
-            "AND (claimed_at IS NULL "
-            "OR (claimed_at >= issued_at AND claimed_at < deadline)))",
+            CODING_CERTIFICATION_LEASE_LIFECYCLE,
             name="coding_certification_leases_lifecycle_check",
+        ),
+        CheckConstraint(
+            "claim_allowlist_revision IS NULL "
+            "OR (claim_allowlist_revision > 0 AND claimed_at IS NOT NULL)",
+            name="coding_certification_leases_claim_allowlist_check",
         ),
         Index(
             "coding_certification_leases_inflight_idx",
@@ -1382,12 +1422,12 @@ class CodingCertificationLease(Base):
 
 
 class CodingCertificationAllowlistRevision(Base):
-    """Append-only operator restriction on who may start coding certification.
+    """Append-only, strict operator restriction on coding certification.
 
-    No row means the restriction is disabled. An enabled revision admits only
-    its exact ``(agent_id, artifact_sha256, validator_hotkey)`` tuples; an
-    enabled revision with no entries refuses every certification lease and
-    certification inference grant.
+    No row, or a latest ``enabled=false`` revision, refuses every certification
+    lease, claim, harness launch, inference grant, and receipt. An enabled
+    revision admits only its 1-16 exact ``(agent_id, artifact_sha256,
+    validator_hotkey)`` tuples.
     """
 
     __tablename__ = "coding_certification_allowlist_revisions"
@@ -1411,7 +1451,7 @@ class CodingCertificationAllowlistRevision(Base):
         CheckConstraint(
             "jsonb_typeof(entries) = 'array' "
             "AND jsonb_array_length(entries) <= 16 "
-            "AND (enabled OR jsonb_array_length(entries) = 0)",
+            "AND enabled = (jsonb_array_length(entries) > 0)",
             name="coding_certification_allowlist_entries_check",
         ),
         CheckConstraint(

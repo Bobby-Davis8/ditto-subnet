@@ -1,4 +1,10 @@
-"""Issue, claim, and abort shadow coding-certification leases."""
+"""Issue, claim, abort, and audit shadow coding-certification leases.
+
+Every deadline decision reads the database clock after the relevant row locks
+are held. Claim, harness launch, inference grants, and receipts share one
+authority gate, :func:`lock_coding_certification_lease`, which also enforces
+the strict operator allowlist.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +12,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, not_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ditto.api_models.coding_certification_leases import (
+    CODING_CERTIFICATION_RECEIPT_GRACE_SECONDS,
     CodingCertificationLeaseAuthority,
     CodingCertificationLeaseStatus,
 )
@@ -24,7 +31,9 @@ from ditto.db.models import (
     CodingCertificationLease,
 )
 from ditto.db.queries.coding_certification_allowlist import (
-    require_coding_certification_allowlisted,
+    CodingCertificationAllowlist,
+    CodingCertificationAllowlistRefusedError,
+    active_coding_certification_allowlist,
 )
 from ditto.db.queries.core_qualification import (
     latest_complete_core_qualification_observation,
@@ -37,11 +46,13 @@ _INFLIGHT = (
     CodingCertificationLeaseStatus.ISSUED.value,
     CodingCertificationLeaseStatus.CLAIMED.value,
 )
-# A claimed lease that passes its deadline now releases its identity, so bound
-# how often one exact identity can be re-run (and re-granted Platform-paid
-# inference) inside a rolling window.
+# A claimed lease without a receipt releases its identity once its receipt
+# window passes, so bound how often one exact identity can be re-run (and
+# re-granted Platform-paid inference) inside a rolling window. Only claims an
+# allowlist revision admitted count.
 MAX_CLAIMED_ATTEMPTS_PER_IDENTITY = 3
 CLAIMED_ATTEMPT_WINDOW = timedelta(hours=24)
+RECEIPT_GRACE = timedelta(seconds=CODING_CERTIFICATION_RECEIPT_GRACE_SECONDS)
 
 
 class CodingCertificationLeaseNotAvailableError(RuntimeError):
@@ -64,10 +75,26 @@ class CodingCertificationLeaseResult:
 
 
 @dataclass(frozen=True)
+class CodingCertificationLeaseGate:
+    """A locked lease that the current allowlist admits, and the DB time."""
+
+    lease: CodingCertificationLease
+    allowlist: CodingCertificationAllowlist
+    now: datetime
+
+
+@dataclass(frozen=True)
 class CodingCertificationLeaseAuditRow:
     lease: CodingCertificationLease
     inference_grant_status: str | None
     receipt_status: str | None
+
+
+@dataclass(frozen=True)
+class CodingCertificationLeaseAuditPage:
+    rows: list[CodingCertificationLeaseAuditRow]
+    total: int
+    now: datetime
 
 
 @dataclass(frozen=True)
@@ -89,13 +116,37 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-async def _database_now(session: AsyncSession) -> datetime:
+async def database_now(session: AsyncSession) -> datetime:
+    """Database ``clock_timestamp()``; read it after taking the row locks."""
+
     now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(now, datetime):  # pragma: no cover - DB invariant
         raise CodingCertificationLeaseUnavailableError(
             "database clock did not return a timestamp"
         )
     return _aware(now)
+
+
+def receipt_window_ends_at(lease: CodingCertificationLease) -> datetime:
+    """Last instant (exclusive) at which a claimed lease accepts its receipt."""
+
+    return _aware(lease.deadline) + RECEIPT_GRACE
+
+
+def lease_is_due(lease: CodingCertificationLease, *, now: datetime) -> bool:
+    """Whether an in-flight lease has run out of time on the database clock.
+
+    An issued lease is due at its deadline. A claimed lease is due only when
+    its receipt window has passed, because its receipt may still arrive after
+    the deadline that already ended harness and inference access. Completed,
+    aborted, and expired leases are terminal and never due.
+    """
+
+    if lease.status == CodingCertificationLeaseStatus.ISSUED.value:
+        return _aware(lease.deadline) <= now
+    if lease.status == CodingCertificationLeaseStatus.CLAIMED.value:
+        return receipt_window_ends_at(lease) <= now
+    return False
 
 
 def _screened_image_is_complete(agent: Agent) -> bool:
@@ -157,6 +208,27 @@ async def _expire_due_leases(
     await session.flush()
 
 
+async def revoke_live_certification_inference_grants(
+    session: AsyncSession, *, lease_id: UUID, now: datetime
+) -> int:
+    """Terminally revoke a lease's pending or active grant; return how many."""
+
+    grants = (
+        await session.scalars(
+            select(CodingCertificationInferenceGrant)
+            .where(
+                CodingCertificationInferenceGrant.lease_id == lease_id,
+                CodingCertificationInferenceGrant.status.in_(("pending", "active")),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    for grant in grants:
+        mark_certification_inference_grant_revoked(grant, now=now)
+    return len(grants)
+
+
 def mark_certification_inference_grant_revoked(
     grant: CodingCertificationInferenceGrant, *, now: datetime
 ) -> None:
@@ -177,28 +249,18 @@ async def _expire_if_due(
     *,
     now: datetime,
 ) -> bool:
-    """Expire one locked in-flight lease past its deadline and revoke its grant.
+    """Expire one locked, due in-flight lease and revoke its live grant.
 
     ``claimed_at`` is kept, so an expired row still shows whether the attempt
-    was claimed. Nothing is deleted.
+    was claimed. A completed (receipted) lease is never due. Nothing is deleted.
     """
 
-    if row.status not in _INFLIGHT or _aware(row.deadline) > now:
+    if not lease_is_due(row, now=now):
         return False
     row.status = CodingCertificationLeaseStatus.EXPIRED.value
-    grants = (
-        await session.scalars(
-            select(CodingCertificationInferenceGrant)
-            .where(
-                CodingCertificationInferenceGrant.lease_id == row.lease_id,
-                CodingCertificationInferenceGrant.status.in_(("pending", "active")),
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).all()
-    for grant in grants:
-        mark_certification_inference_grant_revoked(grant, now=now)
+    await revoke_live_certification_inference_grants(
+        session, lease_id=row.lease_id, now=now
+    )
     await session.flush()
     return True
 
@@ -206,20 +268,114 @@ async def _expire_if_due(
 async def expire_coding_certification_lease_if_due(
     session: AsyncSession,
     *,
-    lease_id: UUID,
+    lease: CodingCertificationLease,
+    now: datetime,
 ) -> bool:
-    """Commit-side helper for callers that must refuse a lease past its deadline."""
+    """Expire a lease the caller already locked, on the caller's database time."""
 
-    now = await _database_now(session)
-    row = await session.get(
+    return await _expire_if_due(session, lease, now=now)
+
+
+async def lock_coding_certification_lease(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    validator_hotkey: str,
+) -> CodingCertificationLeaseGate:
+    """Shared authority gate for claim, harness launch, grants, and receipts.
+
+    Takes the shared allowlist lock before the lease row lock (the allowlist
+    write locks leases after its exclusive lock), then reads the database clock
+    after both locks so a lock wait can never make a late request look early.
+    Refuses an unknown lease, another validator's lease, or a tuple the current
+    allowlist does not admit, before any write.
+    """
+
+    allowlist = await active_coding_certification_allowlist(session)
+    lease = await session.get(
         CodingCertificationLease,
         lease_id,
         with_for_update=True,
         populate_existing=True,
     )
-    if row is None:
-        return False
-    return await _expire_if_due(session, row, now=now)
+    now = await database_now(session)
+    if lease is None or lease.validator_hotkey != validator_hotkey:
+        raise CodingCertificationLeaseNotAvailableError(
+            "coding certification lease is not available"
+        )
+    if not allowlist.admits(
+        agent_id=lease.agent_id,
+        artifact_sha256=lease.artifact_sha256,
+        validator_hotkey=lease.validator_hotkey,
+    ):
+        raise CodingCertificationAllowlistRefusedError()
+    return CodingCertificationLeaseGate(lease=lease, allowlist=allowlist, now=now)
+
+
+def complete_coding_certification_lease(lease: CodingCertificationLease) -> None:
+    """Make a claimed lease terminal in the transaction that accepts its receipt."""
+
+    if lease.status != CodingCertificationLeaseStatus.CLAIMED.value:
+        raise CodingCertificationLeaseNotAvailableError(
+            "coding certification lease is not available"
+        )
+    lease.status = CodingCertificationLeaseStatus.COMPLETED.value
+
+
+async def abort_unlisted_coding_certification_leases(
+    session: AsyncSession,
+    *,
+    allowlist: CodingCertificationAllowlist,
+) -> int:
+    """Abort every in-flight lease the new allowlist refuses; revoke its grants.
+
+    Runs in the allowlist write transaction, after the exclusive allowlist lock
+    and the new revision row exist. The tuple filter runs in SQL, so only the
+    refused leases are locked. Each aborted lease keeps ``claimed_at`` and names
+    the revision that aborted it.
+    """
+
+    if allowlist.revision < 1:  # pragma: no cover - a write always has a row
+        raise ValueError("coding certification allowlist abort needs a revision")
+    statement = select(CodingCertificationLease).where(
+        CodingCertificationLease.status.in_(_INFLIGHT)
+    )
+    if allowlist.tuples:
+        statement = statement.where(
+            not_(
+                tuple_(
+                    CodingCertificationLease.agent_id,
+                    CodingCertificationLease.artifact_sha256,
+                    CodingCertificationLease.validator_hotkey,
+                ).in_(
+                    [
+                        (UUID(agent_id), artifact_sha256, validator_hotkey)
+                        for agent_id, artifact_sha256, validator_hotkey in sorted(
+                            allowlist.tuples
+                        )
+                    ]
+                )
+            )
+        )
+    rows = (
+        await session.scalars(
+            statement.order_by(CodingCertificationLease.lease_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if not rows:
+        return 0
+    now = await database_now(session)
+    for row in rows:
+        row.status = CodingCertificationLeaseStatus.ABORTED.value
+        row.aborted_at = now
+        row.aborted_allowlist_revision = allowlist.revision
+        await revoke_live_certification_inference_grants(
+            session, lease_id=row.lease_id, now=now
+        )
+    await session.flush()
+    return len(rows)
 
 
 async def issue_coding_certification_lease(
@@ -230,12 +386,18 @@ async def issue_coding_certification_lease(
     bench_version: int,
     coding_contract_version: int = 1,
 ) -> CodingCertificationLeaseResult:
-    """Mint one canary lease if current core qualification still holds."""
+    """Mint one canary lease if current core qualification still holds.
+
+    Domain refusals are raised before a lease row is minted. The only writes
+    that may precede one are deadline expiry and grant revocation, which the
+    caller commits with the refusal rather than rolling back.
+    """
 
     if coding_contract_version != 1:
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease contract is not available"
         )
+    allowlist = await active_coding_certification_allowlist(session)
     agent = await session.get(Agent, agent_id, with_for_update=True)
     if agent is None or not _screened_image_is_complete(agent):
         raise CodingCertificationLeaseNotAvailableError(
@@ -245,12 +407,32 @@ async def issue_coding_certification_lease(
     assert agent.screened_image_id is not None
     assert agent.screened_image_ref is not None
     assert agent.screened_image_upload_id is not None
-    await require_coding_certification_allowlisted(
-        session,
+    if not allowlist.admits(
         agent_id=agent.agent_id,
         artifact_sha256=agent.sha256,
         validator_hotkey=validator_hotkey,
+    ):
+        raise CodingCertificationAllowlistRefusedError()
+    # Contract v1: an accepted receipt (certified, failed, or unsupported) is the
+    # terminal certification result for this exact identity, whichever
+    # validator produced it. Only a run that ended without a receipt may rerun.
+    receipted = await session.scalar(
+        select(CodingCapabilityCertification.certification_row_id)
+        .where(
+            CodingCapabilityCertification.agent_id == agent.agent_id,
+            CodingCapabilityCertification.artifact_sha256 == agent.sha256,
+            CodingCapabilityCertification.screened_image_sha256
+            == agent.screened_image_sha256,
+            CodingCapabilityCertification.bench_version == bench_version,
+            CodingCapabilityCertification.coding_contract_version
+            == coding_contract_version,
+        )
+        .limit(1)
     )
+    if receipted is not None:
+        raise CodingCertificationLeaseNotAvailableError(
+            "coding certification already has a terminal receipt for this artifact"
+        )
     await lock_core_qualification_bench(session, bench_version=bench_version)
     policy = await latest_core_qualification_policy(
         session, bench_version=bench_version
@@ -276,7 +458,7 @@ async def issue_coding_certification_lease(
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease is not available"
         )
-    now = await _database_now(session)
+    now = await database_now(session)
     await _expire_due_leases(
         session,
         agent_id=agent.agent_id,
@@ -321,7 +503,9 @@ async def issue_coding_certification_lease(
                 CodingCertificationLease.bench_version == bench_version,
                 CodingCertificationLease.coding_contract_version
                 == coding_contract_version,
-                CodingCertificationLease.claimed_at.is_not(None),
+                # Only claims an allowlist revision admitted count, so claims
+                # made before the strict allowlist cannot exhaust this budget.
+                CodingCertificationLease.claim_allowlist_revision.is_not(None),
                 CodingCertificationLease.claimed_at > now - CLAIMED_ATTEMPT_WINDOW,
             )
         )
@@ -392,14 +576,12 @@ async def claim_coding_certification_lease(
     validator_hotkey: str,
     lease_id: UUID,
 ) -> CodingCertificationLeaseResult:
-    """Exclusive claim of an issued lease by the named validator."""
+    """Exclusive claim of an issued lease by the named, allowlisted validator."""
 
-    now = await _database_now(session)
-    row = await session.get(CodingCertificationLease, lease_id, with_for_update=True)
-    if row is None or row.validator_hotkey != validator_hotkey:
-        raise CodingCertificationLeaseNotAvailableError(
-            "coding certification lease is not available"
-        )
+    gate = await lock_coding_certification_lease(
+        session, lease_id=lease_id, validator_hotkey=validator_hotkey
+    )
+    row, now = gate.lease, gate.now
     if await _expire_if_due(session, row, now=now):
         return result_from_row(row, idempotent=False)
     if row.status == CodingCertificationLeaseStatus.CLAIMED.value:
@@ -410,6 +592,7 @@ async def claim_coding_certification_lease(
         )
     row.status = CodingCertificationLeaseStatus.CLAIMED.value
     row.claimed_at = now
+    row.claim_allowlist_revision = gate.allowlist.revision
     await session.flush()
     return result_from_row(row, idempotent=False)
 
@@ -422,12 +605,14 @@ async def abort_coding_certification_lease(
 ) -> CodingCertificationLeaseResult:
     """Abort an unclaimed issued lease.
 
-    A claimed lease cannot be aborted before its deadline, so a restart cannot
-    create an immediate clean rerun; after the deadline it only expires.
+    A claimed lease cannot be aborted by its validator, so a restart cannot
+    create an immediate clean rerun; after its receipt window it only expires.
     """
 
-    now = await _database_now(session)
-    row = await session.get(CodingCertificationLease, lease_id, with_for_update=True)
+    row = await session.get(
+        CodingCertificationLease, lease_id, with_for_update=True, populate_existing=True
+    )
+    now = await database_now(session)
     if row is None or row.validator_hotkey != validator_hotkey:
         raise CodingCertificationLeaseNotAvailableError(
             "coding certification lease is not available"
@@ -466,7 +651,7 @@ async def list_coding_certification_leases(
     status: CodingCertificationLeaseStatus | None,
     limit: int,
     offset: int,
-) -> tuple[list[CodingCertificationLeaseAuditRow], int]:
+) -> CodingCertificationLeaseAuditPage:
     """Read-only, newest-first lease audit page. Never transitions a row."""
 
     filters = []
@@ -508,8 +693,8 @@ async def list_coding_certification_leases(
             .offset(offset)
         )
     ).all()
-    return (
-        [
+    return CodingCertificationLeaseAuditPage(
+        rows=[
             CodingCertificationLeaseAuditRow(
                 lease=lease,
                 inference_grant_status=grant_status,
@@ -517,7 +702,8 @@ async def list_coding_certification_leases(
             )
             for lease, grant_status, receipt_status in rows
         ],
-        total,
+        total=total,
+        now=await database_now(session),
     )
 
 
@@ -527,15 +713,19 @@ async def authorize_coding_certification_harness_delivery(
     lease_id: UUID,
     validator_hotkey: str,
 ) -> CodingCertificationHarnessAuthority:
-    """Return the current screened image for one claimed certification lease."""
+    """Return the current screened image for one claimed certification lease.
 
-    lease = await session.get(CodingCertificationLease, lease_id, with_for_update=True)
-    agent = await session.get(Agent, lease.agent_id) if lease is not None else None
-    now = await _database_now(session)
+    Harness access ends at the lease deadline; the receipt window does not
+    extend it.
+    """
+
+    gate = await lock_coding_certification_lease(
+        session, lease_id=lease_id, validator_hotkey=validator_hotkey
+    )
+    lease, now = gate.lease, gate.now
+    agent = await session.get(Agent, lease.agent_id)
     if (
-        lease is None
-        or agent is None
-        or lease.validator_hotkey != validator_hotkey
+        agent is None
         or lease.status != CodingCertificationLeaseStatus.CLAIMED.value
         or lease.weight_eligible
         or _aware(lease.deadline) <= now
