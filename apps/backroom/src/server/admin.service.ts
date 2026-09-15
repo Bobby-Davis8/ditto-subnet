@@ -191,6 +191,8 @@ import {
   hotkeyBanControlSchema,
   hotkeyBanListSchema,
   teamCanaryListSchema,
+  teamCanaryExclusionSchema,
+  setTeamCanaryInputSchema,
   hotkeyBanLookupInputSchema,
   hotkeyUnbanResponseSchema,
   unbanHotkeyInputSchema,
@@ -685,6 +687,44 @@ export async function fetchTeamCanaries(limit: number, offset: number) {
   })
   const payload = await platformAdminRequest(`${TEAM_CANARIES_PATH}?${query}`)
   return teamCanaryListSchema.parse(payload)
+}
+
+// Reserve or bind one audited team canary. The exact shape and confirmation are
+// parsed here before any Platform call, Platform checks the same confirmation
+// again, and the audit actor is always the signed-in operator.
+export async function setTeamCanary(rawInput: unknown, actor: string) {
+  const input = setTeamCanaryInputSchema.parse(rawInput)
+  if (input.action === 'reserve') {
+    type ReserveRequest =
+      PlatformOperations['reserve_api_v1_admin_noncompetitive_canaries_post']['requestBody']['content']['application/json']
+    const body = {
+      miner_hotkey: input.minerHotkey,
+      artifact_sha256: input.artifactSha256,
+      reason: input.reason,
+      confirmation: input.confirmation,
+    } satisfies ReserveRequest
+    const payload = await platformAdminRequest(TEAM_CANARIES_PATH, {
+      method: 'POST',
+      actor,
+      body,
+    })
+    return teamCanaryExclusionSchema.parse(payload)
+  }
+  type BindRequest =
+    PlatformOperations['bind_api_v1_admin_noncompetitive_canaries__exclusion_id__bind_post']['requestBody']['content']['application/json']
+  const body = {
+    agent_id: input.agentId,
+    miner_hotkey: input.minerHotkey,
+    artifact_sha256: input.artifactSha256,
+    screened_image_sha256: input.screenedImageSha256,
+    reason: input.reason,
+    confirmation: input.confirmation,
+  } satisfies BindRequest
+  const payload = await platformAdminRequest(
+    `${TEAM_CANARIES_PATH}/${encodeURIComponent(input.exclusionId)}/bind`,
+    { method: 'POST', actor, body },
+  )
+  return teamCanaryExclusionSchema.parse(payload)
 }
 
 const HOTKEY_BANS_PATH = '/api/v1/admin/hotkey-bans'
