@@ -757,7 +757,8 @@ class _Reload:
     """Records the unit directory listing at the moment daemon-reload runs."""
 
     def __init__(self, unit_dir: Path, *, fail: bool = False) -> None:
-        self.unit_dir, self.fail, self.listings = unit_dir, fail, []
+        self.unit_dir, self.fail = unit_dir, fail
+        self.listings: list[list[str] | None] = []
 
     def __call__(self) -> None:
         self.listings.append(
@@ -1559,6 +1560,12 @@ def _outcome(root: Path, rehearsal_pass: str = "first") -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
+def _recorded(root: Path, rehearsal_pass: str = "first") -> dict:
+    outcome = _outcome(root, rehearsal_pass)
+    assert outcome is not None, root.name
+    return outcome
+
+
 def _units(root: Path) -> list[Path]:
     return [root / p.lstrip("/") for p in UNIT_PATHS]
 
@@ -1608,7 +1615,8 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
     roots: dict[str, Path] = {}
     hosts: dict[str, dict] = {}
 
-    def add(name: str, *, tree: bool = True, **overrides: Any) -> Path:
+    def add(name: str, **overrides: Any) -> Path:
+        tree = overrides.pop("tree", True)
         root = tmp_path / "hosts" / name
         hosts[name] = _host(root, **overrides)
         if tree:
@@ -1735,7 +1743,7 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
     for name in ("went_live_after", "queued_job_after"):
         _assert_refused(roots[name], LIVE_AFTER)
         assert _gone(roots[name])
-        (message,) = _outcome(roots[name])["messages"]
+        (message,) = _recorded(roots[name])["messages"]
         for command in MANUAL_CLEANUP:
             assert command in _flat(message), (name, command)
         assert f"removed={_rooted(roots[name], UNIT_PATHS)}; refused=[]" in _flat(
@@ -1745,7 +1753,7 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
         _assert_refused(roots[name], LOAD_STATES_CHECK)
         assert _gone(roots[name])
     _assert_refused(roots["reload_fails"], UNLINK_CHECK)
-    (message,) = _outcome(roots["reload_fails"])["messages"]
+    (message,) = _recorded(roots["reload_fails"])["messages"]
     assert f"removed={_rooted(roots['reload_fails'], UNIT_PATHS)}" in _flat(message)
     assert 'refused=["daemon-reload failed"]' in _flat(message)
     assert "daemon_reloaded=false" in _flat(message)
@@ -1754,9 +1762,9 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
     for swap in ("symlink", "hardlink", "directory"):
         root = roots[f"swap_{swap}"]
         _assert_refused(root, UNLINK_CHECK)
-        (message,) = _outcome(root)["messages"]
-        worker = f"{root}{WORKER}"
-        assert f'refused=["{worker}: ' in _flat(message), message
+        (message,) = _recorded(root)["messages"]
+        worker_path = f"{root}{WORKER}"
+        assert f'refused=["{worker_path}: ' in _flat(message), message
         assert (
             f"removed=[]; already_absent=[]; not_attempted={_rooted(root, [CUSTODY])}"
             in _flat(message)
@@ -1766,7 +1774,7 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
         assert (root / "daemon-reloaded").exists()
     root = roots["partial"]
     _assert_refused(root, UNLINK_CHECK)
-    (message,) = _outcome(root)["messages"]
+    (message,) = _recorded(root)["messages"]
     assert f"removed={_rooted(root, [WORKER])}" in _flat(message)
     assert (
         f'refused=["{root}{CUSTODY}: is a symlink, directory or special file"]'
@@ -1778,7 +1786,7 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
     # Directory-level refusals remove nothing.
     for name in ("parent_symlink", "dir_writable", "drop_in", "wants_link"):
         _assert_refused(roots[name], UNLINK_CHECK)
-        (message,) = _outcome(roots[name])["messages"]
+        (message,) = _recorded(roots[name])["messages"]
         assert "removed=[]" in _flat(message), (name, message)
     assert all(
         (roots["parent_symlink"] / "real" / p.lstrip("/")).exists() for p in UNIT_PATHS
@@ -1789,11 +1797,11 @@ def test_rehearsal_uninstalls_only_when_every_guard_passes(tmp_path) -> None:
         and _kept(roots["wants_link"])
     )
     assert 'foreign=["ditto-coding-hosted-worker.service.d"]' in _flat(
-        _outcome(roots["drop_in"])["messages"][0]
+        _recorded(roots["drop_in"])["messages"][0]
     )
     assert (
         'foreign=["multi-user.target.wants/ditto-coding-hosted-worker.service"]'
-        in _flat(_outcome(roots["wants_link"])["messages"][0])
+        in _flat(_recorded(roots["wants_link"])["messages"][0])
     )
 
     # Idempotent second run: what the first run removed is now already absent.
@@ -2124,7 +2132,7 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
         mutate_remove=no_reload_check,
     )
     assert _gone(skipped)
-    assert "daemon_reloaded=false" in _outcome(skipped)["report"]
+    assert "daemon_reloaded=false" in _recorded(skipped)["report"]
 
     # Queued-job check removed before removal: a queued start loses its unit.
     queued = _mutant(
@@ -2150,7 +2158,7 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
         ),
         mutate_remove=_drop_that(LIVE_AFTER, 1),
     )
-    assert "report" in _outcome(queued_after)
+    assert "report" in _recorded(queued_after)
 
     # Post-removal live check removed: a unit that went live is reported clean.
     after = _mutant(
@@ -2159,7 +2167,7 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
         _tree_host(tmp_path, "live_after", rehearsal_units_after=live),
         mutate_remove=_drop(LIVE_AFTER),
     )
-    assert "report" in _outcome(after)
+    assert "report" in _recorded(after)
 
     # Positive load-state check weakened to the old empty-output test: an empty
     # answer (what a systemctl or D-Bus error can print) is reported clean.
@@ -2174,7 +2182,7 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
         _tree_host(tmp_path, "load_state_empty", rehearsal_load_states=""),
         mutate_remove=empty_output_check,
     )
-    assert "report" in _outcome(empty)
+    assert "report" in _recorded(empty)
 
     # Load-state check removed: a shadow definition is reported clean.
     shadow = _mutant(
@@ -2183,4 +2191,4 @@ def test_rehearsal_mutations_prove_every_guard_is_load_bearing(tmp_path) -> None
         _tree_host(tmp_path, "shadow", rehearsal_load_states="loaded\n\nnot-found\n"),
         mutate_remove=_drop(LOAD_STATES_CHECK),
     )
-    assert "report" in _outcome(shadow)
+    assert "report" in _recorded(shadow)
