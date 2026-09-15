@@ -564,8 +564,6 @@ describe('MCP scope challenges', () => {
       'get_validator_weight_diagnostics',
       'get_core_qualification_policy',
       'get_agent_core_qualification',
-      'get_coding_certification_allowlist',
-      'list_coding_certification_leases',
     ]) {
       const request = new Request('https://backroom.dittobench.ai/mcp', {
         method: 'POST',
