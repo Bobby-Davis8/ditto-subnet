@@ -65,7 +65,11 @@ def _fixed_settings() -> tuple[dict[str, str], dict[str, str]]:
     # pair whose value is a plain quoted literal (not a secret variable).
     import re
 
-    for body, sink in ((documents["hippius"], hippius), (documents["image"], image)):
+    pairs = (
+        (documents["hippius-environment.json"], hippius),
+        (documents["image-storage.json"], image),
+    )
+    for body, sink in pairs:
         for key, value in re.findall(r"'([^']+)':\s*'([^']*)'", body):
             sink[key] = value
     return hippius, image
