@@ -436,6 +436,13 @@ source tree and revision remain as supporting provenance.
     approvals must equal the index.
   - The rootless CI job checks that the reported digest equals an independent
     `sha256sum` of the binary it built.
+  - The runner's own `/proc/self/exe` digest is a self-report: a modified
+    binary can print the released digest. The record field is therefore only
+    as trustworthy as the collector that writes it. The collector (PR4/PR5)
+    must measure the file it executes from outside the runner, for example by
+    hashing an open descriptor and executing that same descriptor, or by
+    hashing `/proc/<pid>/exe` of the child. It must refuse a runner whose
+    self-report differs. The verifier cannot tell the two apart.
 - **Sources (provenance).** `tools.probe_runner_source_sha256` is the canonical
   hash of the reviewed checkout's `cmd/dittobench-coding-enforcement-probe`,
   `internal/codingenforcement/catalog` and `internal/codingenforcement/probe`
