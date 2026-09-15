@@ -430,10 +430,13 @@
       - >-
         platform_coding_shadow_inference_exchange_url is match(
         '^https://[^/@?#:]+(?::443)?/api/v1/validator/coding-shadow/inference-exchange$')
-      - platform_coding_validator_api_base_url is match('^https://[^/@?#:]+$')
+      # Validators compare the exchange URL byte-for-byte with their
+      # VALIDATOR_PLATFORM_API_URL, the primary vhost. Pin both to that origin
+      # so a split inference origin can never be rendered as the exchange.
+      - platform_coding_validator_api_base_url == 'https://' + platform_domain
       - >-
         platform_coding_shadow_inference_exchange_url ==
-        platform_coding_validator_api_base_url +
+        'https://' + platform_domain +
         '/api/v1/validator/coding-shadow/inference-exchange'
       - >-
         platform_coding_shadow_inference_proxy_url is match(

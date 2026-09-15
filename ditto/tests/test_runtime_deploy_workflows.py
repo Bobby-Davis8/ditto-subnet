@@ -235,17 +235,20 @@ def test_coding_exchange_url_uses_the_validator_facing_platform_api_origin() -> 
     )
 
     exchange_suffix = "/api/v1/validator/coding-shadow/inference-exchange"
+    # One default for every host: the validator-facing primary vhost.
     assert defaults["platform_coding_validator_api_base_url"] == (
-        "{{ platform_inference_public_base_url }}"
+        "https://{{ platform_domain }}"
     )
     assert defaults["platform_coding_shadow_inference_exchange_url"] == (
         "{{ platform_coding_validator_api_base_url }}" + exchange_suffix
     )
     assert "platform_coding_validator_api_base_url" not in dev
+    assert "platform_coding_validator_api_base_url" not in prod
     assert "platform_coding_shadow_enabled" not in prod
 
-    prod_base = prod["platform_coding_validator_api_base_url"]
-    assert prod_base == "https://" + prod["platform_domain"]
+    prod_base = "https://" + prod["platform_domain"]
+    # The split-origin host the assertion exists for: rendering the exchange
+    # from its inference origin would now fail activation.
     assert prod_base != prod["platform_inference_public_base_url"]
     validator_base = validator_stack["validator_stack_platform_api_url"].rstrip("/")
     assert prod_base == validator_base
@@ -261,12 +264,12 @@ def test_coding_exchange_url_uses_the_validator_facing_platform_api_origin() -> 
         "coding-certification-leases/inference-exchange"
     )
     assert (
-        "platform_coding_validator_api_base_url is match('^https://[^/@?#:]+$')"
+        "platform_coding_validator_api_base_url == 'https://' + platform_domain"
         in tasks
     )
     assert (
         "platform_coding_shadow_inference_exchange_url ==\n"
-        "        platform_coding_validator_api_base_url +\n"
+        "        'https://' + platform_domain +\n"
         "        '/api/v1/validator/coding-shadow/inference-exchange'"
     ) in tasks
 
