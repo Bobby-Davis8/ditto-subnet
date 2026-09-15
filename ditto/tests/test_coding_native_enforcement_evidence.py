@@ -47,7 +47,7 @@ DAEMON_IDENTITY_VECTOR = json.loads(
 )
 # Pinned identically in catalog/canonical_test.go.
 GOLDEN_RECORD_SHA256 = (
-    "ff6acb22aab1b6241f3d6790ec6f0fda0c5deeed8fd11a7207745167457c5360"
+    "b079646d740892d2db3eb5ab0599c8e40e3a81d730e863b8d790af1ddff2a8fa"
 )
 CANONICAL_VECTOR_SHA256 = (
     "1948b8f75bd3f0c25825ed268d2390e89ffe1993a37790ee740c19e5cd491a74"
@@ -65,11 +65,58 @@ KERNEL = "6.12.43+deb13-cloud-amd64"
 DAEMON_IDENTITY = DAEMON_IDENTITY_VECTOR["identity"]
 DAEMON = DAEMON_IDENTITY_VECTOR["identity_sha256"]
 REVISION = "0123456789abcdef0123456789abcdef01234567"
-MANIFEST = digest("release-manifest")
 RUNTIME = digest("runtime-archive")
+PROBE_RUNNER_BINARY = digest("release-recorded probe runner binary")
 IMAGES = {
     language: digest(f"{language}-image-approval") for language in EVIDENCE.LANGUAGES
 }
+RELEASE_PROFILES = {
+    "python": "python-call-ast-v2",
+    "node": "node-call-ast-v2",
+    "go": "go-call-ast-v1",
+    "rust": "rust-call-ast-v1",
+}
+
+
+def release_index_value() -> dict:
+    """Shape of build-coding-native-release.py describe() for a v3 release set."""
+
+    return {
+        "schema": "dittobench-coding-native-release-set-v3",
+        "source_revision": REVISION,
+        "images": {
+            language: {
+                "archive": f"{language}/runtime.oci.tar",
+                "approval": f"{language}/approval.json",
+                "approval_sha256": IMAGES[language],
+                "archive_sha256": digest(f"{language}-oci-archive"),
+                "image_ref": f"coding-runtime.invalid/{language}/runtime@sha256:"
+                + digest(language + "-manifest"),
+                "config_digest": "sha256:" + digest(language + "-config"),
+                "driver_profile": RELEASE_PROFILES[language],
+            }
+            for language in EVIDENCE.LANGUAGES
+        },
+        "runtime": {
+            "archive": "native/runtime.tar",
+            "archive_sha256": RUNTIME,
+            "manifest_sha256": digest("runtime-manifest"),
+            "worker_sha256": digest("hosted worker binary"),
+            "probe_runner_sha256": PROBE_RUNNER_BINARY,
+            "python_sha256": digest("python"),
+            "debian_packages": {"libc6": "2.41-12"},
+        },
+        "independent_approval_required": True,
+        "native_imported": False,
+        "runtime_qualification": False,
+        "canary_completed": False,
+        "shadow_only": True,
+        "weight_eligible": False,
+    }
+
+
+RELEASE_INDEX_RAW = EVIDENCE.canonical_bytes(release_index_value())
+MANIFEST = hashlib.sha256(RELEASE_INDEX_RAW).hexdigest()
 SUBORDINATE = {
     "gid_count": 65536,
     "gid_start": 100000,
@@ -82,7 +129,8 @@ FIXED_TOOLS = {
     "collector_sha256": digest("collector"),
     "evidence_tool_sha256": digest("evidence-tool"),
     "fixtures_sha256": digest("fixtures"),
-    "runner_sha256": digest("runner"),
+    "probe_runner_source_sha256": digest("probe runner sources"),
+    "probe_runner_binary_sha256": PROBE_RUNNER_BINARY,
 }
 FORBIDDEN_KEY = re.compile(r"(^|_)(approved|ready|readiness|qualified)(_|$)|^approval$")
 TOOL_NAMES = (
@@ -526,7 +574,12 @@ class World:
         self.store = tmp_path / "store"
         self.store.mkdir()
         self.store.chmod(0o700)
-        self.tools = EVIDENCE.Checkout(self.checkout).tools()
+        self.tools = {
+            **EVIDENCE.Checkout(self.checkout).tools(),
+            "probe_runner_binary_sha256": PROBE_RUNNER_BINARY,
+        }
+        self.release_index = tmp_path / "release.json"
+        self.release_index.write_bytes(RELEASE_INDEX_RAW)
         self.pre_raw = stdout_bytes(preflight_value(self.preflight_tools, T0))
         self.pre_sha = self.put(self.pre_raw)
         self.records = {
@@ -547,8 +600,11 @@ class World:
     def profiles(self) -> dict:
         return EVIDENCE.load_profiles(self.profile_paths)
 
+    def release(self) -> dict:
+        return EVIDENCE.load_release_index(self.release_index)
+
     def profile_arguments(self) -> list[str]:
-        arguments = []
+        arguments = ["--release-index", str(self.release_index)]
         for name, path in self.profile_paths.items():
             arguments += [
                 "--" + name.removesuffix("_sha256").replace("_", "-"),
@@ -581,7 +637,11 @@ class World:
         store, checkout = self.open()
         with store:
             return EVIDENCE.review(
-                store, checkout, self.selection(**overrides), self.profiles()
+                store,
+                checkout,
+                self.selection(**overrides),
+                self.profiles(),
+                self.release(),
             )
 
     def verify(self, record_shas, preflight_sha=None):
@@ -589,7 +649,7 @@ class World:
         preflight = preflight_sha or self.selection()["host_preflight"]
         with store:
             return EVIDENCE.verify(
-                store, checkout, preflight, record_shas, self.profiles()
+                store, checkout, preflight, record_shas, self.profiles(), self.release()
             )
 
     def verify_record(self, record: dict) -> str | None:
@@ -1554,7 +1614,7 @@ RECORD_REFUSALS = [
     ),
     (
         network(set_path("release", "release_manifest_sha256", value=digest("x"))),
-        "release_manifest_sha256 differs",
+        "release manifest differs from the release index",
     ),
     (
         network(set_path("release", "runtime_archive_sha256", value=digest("x"))),
@@ -2048,6 +2108,7 @@ def test_records_need_their_profile_documents(world):
             world.selection()["host_preflight"],
             [sha],
             world.profiles(),
+            world.release(),
         )
     assert not ok
     assert (
@@ -2190,8 +2251,8 @@ def test_reviewed_checkout_tool_drift_fails_the_record(world):
 def test_records_bind_the_reviewed_go_runner_sources(world, root):
     record_sha = world.selection()["cleanup_recovery"]
     assert (
-        world.tools["runner_sha256"]
-        == EVIDENCE.Checkout(world.checkout).tools()["runner_sha256"]
+        world.tools["probe_runner_source_sha256"]
+        == EVIDENCE.Checkout(world.checkout).tools()["probe_runner_source_sha256"]
     )
     # A runner changed after review, even by one source file, no longer matches
     # the runner hash the record carries.
@@ -2200,6 +2261,132 @@ def test_records_bind_the_reviewed_go_runner_sources(world, root):
     added.chmod(0o644)
     result, ok = world.verify([record_sha])
     assert not ok and "tool hashes differ" in result["records"][0]["failure"]
+
+
+# B5 PR 3b: the probe runner binary that ran is bound to the release record.
+
+
+def test_records_accept_only_the_release_recorded_probe_runner_binary(world):
+    record = copy.deepcopy(world.records["cleanup_recovery"])
+    assert record["tools"]["probe_runner_binary_sha256"] == PROBE_RUNNER_BINARY
+    assert world.verify_record(record) is None
+    for value in (
+        digest("an operator-built probe runner"),
+        # Source provenance is not an accepted substitute for the binary.
+        record["tools"]["probe_runner_source_sha256"],
+        world.release()["runtime_archive_sha256"],
+    ):
+        changed = copy.deepcopy(record)
+        changed["tools"]["probe_runner_binary_sha256"] = value
+        failure = world.verify_record(changed)
+        assert failure is not None and "differs from the release-recorded binary" in (
+            failure
+        )
+
+
+def test_the_ambiguous_runner_hash_name_is_gone(world):
+    record = copy.deepcopy(world.records["cleanup_recovery"])
+    record["tools"]["runner_sha256"] = record["tools"].pop("probe_runner_source_sha256")
+    failure = world.verify_record(record)
+    assert failure is not None and "keys are not the closed set" in failure
+    assert "runner_sha256" not in EVIDENCE.TOOL_KEYS
+    # approval.runner_sha256 keeps naming run.py only.
+    assert "runner_sha256" in EVIDENCE.APPROVAL_KEYS
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            lambda v: v["runtime"].update(probe_runner_sha256=digest("other build")),
+            "release manifest differs from the release index",
+        ),
+        (
+            lambda v: v["runtime"].update(archive_sha256=digest("other runtime")),
+            "release manifest differs from the release index",
+        ),
+    ],
+)
+def test_records_bind_the_exact_release_index(world, change, reason):
+    value = release_index_value()
+    change(value)
+    world.release_index.write_bytes(EVIDENCE.canonical_bytes(value))
+    failure = world.verify_record(copy.deepcopy(world.records["cleanup_recovery"]))
+    assert failure is not None and reason in failure
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("runtime_archive_sha256", digest("x"), "runtime_archive_sha256 differs"),
+        ("source_revision", "f" * 40, "source_revision differs"),
+    ],
+)
+def test_record_release_fields_must_equal_the_release_index(
+    world, field, value, reason
+):
+    record = copy.deepcopy(world.records["cleanup_recovery"])
+    record["release"][field] = value
+    failure = world.verify_record(record)
+    assert failure is not None and reason in failure
+    record = copy.deepcopy(world.records["cleanup_recovery"])
+    record["release"]["image_approval_sha256"]["rust"] = digest("x")
+    failure = world.verify_record(record)
+    assert failure is not None and "image_approval_sha256 differs" in failure
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            lambda v: v.update(schema="dittobench-coding-native-release-set-v2"),
+            "identity is malformed",
+        ),
+        (lambda v: v["runtime"].pop("probe_runner_sha256"), "closed set"),
+        (
+            lambda v: v["runtime"].update(
+                probe_runner_sha256=v["runtime"]["worker_sha256"]
+            ),
+            "runtime digests are malformed",
+        ),
+        (lambda v: v["runtime"].update(probe_runner_sha256="0" * 64), "malformed"),
+        (lambda v: v.update(native_imported=True), "identity is malformed"),
+        (lambda v: v["images"].pop("go"), "images are malformed"),
+    ],
+)
+def test_release_index_refusals(change, reason):
+    value = release_index_value()
+    change(value)
+    with pytest.raises(EVIDENCE.Refusal, match=reason):
+        EVIDENCE.parse_release_index(EVIDENCE.canonical_bytes(value))
+
+
+def test_release_index_must_be_canonical_and_is_required(world, capsys):
+    with pytest.raises(EVIDENCE.Refusal, match="not canonical"):
+        EVIDENCE.parse_release_index(
+            json.dumps(release_index_value(), indent=2).encode()
+        )
+    arguments = [
+        "verify",
+        "--store",
+        str(world.store),
+        "--checkout",
+        str(world.checkout),
+        "--host-preflight",
+        world.selection()["host_preflight"],
+        "--record",
+        world.selection()["cleanup_recovery"],
+    ]
+    with pytest.raises(SystemExit):
+        EVIDENCE.main(arguments)
+    assert "--release-index" in capsys.readouterr().err
+
+
+def test_release_builder_records_what_the_verifier_reads():
+    builder = (ROOT / "infra/scripts/build-coding-native-release.py").read_text()
+    assert f'"schema": "{EVIDENCE.RELEASE_INDEX_SCHEMA}"' in builder
+    assert '"probe_runner_sha256": manifest["files"]' in builder
+    assert '"bin/dittobench-coding-enforcement-probe"' in builder
 
 
 def test_runner_hash_covers_the_real_runner_command_and_library():
@@ -2701,6 +2888,7 @@ class Approval:
                 store=store,
                 checkout=checkout,
                 profiles=self.world.profiles(),
+                release_index=self.world.release(),
                 profile_pins=dict(PINS) if pins is None else pins,
                 review_raw=(review or self.review).read_bytes(),
                 approval_raw=approval.read_bytes(),
