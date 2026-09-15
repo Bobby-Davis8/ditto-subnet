@@ -1696,9 +1696,21 @@ def test_rehearsal_start_at_task_cannot_skip_the_guards(tmp_path) -> None:
     # Components are opened with O_NOFOLLOW, so the tree must not sit behind a link.
     tmp_path = tmp_path.resolve()
     owners = _local_owners()
-    for name, task in (("unlink", UNLINK), ("preset", PRESET), ("include", INCLUDE)):
+    # Starting at the copy inspection would skip the preset, identity and
+    # live-unit guards yet still reach the unlink in a statically visible task
+    # list, so that host also lists a live unit.
+    starts = (
+        ("unlink", UNLINK),
+        ("copy_stat", COPY_STAT),
+        ("preset", PRESET),
+        ("include", INCLUDE),
+    )
+    for name, task in starts:
         root = tmp_path / "hosts" / name
         hosts = _hosts({name: root}, owners)
+        hosts[name]["rehearsal_units"] = (
+            STOPPED_UNITS + LIVE_UNITS["live_custody"] + "\n"
+        )
         pair = _tree(root)
         _run(tmp_path, name, hosts, "--start-at-task", task)
         assert _kept(pair), name
