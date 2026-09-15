@@ -123,7 +123,7 @@ def test_native_approval_is_exact_bounded_and_not_an_activation(field, value):
 def test_release_index_and_each_image_pin_must_match():
     value = approval()
     release = {
-        "schema": "dittobench-coding-native-release-set-v2",
+        "schema": "dittobench-coding-native-release-set-v3",
         "source_revision": SOURCE,
         "images": copy.deepcopy(value["images"]),
         "independent_approval_required": True,
