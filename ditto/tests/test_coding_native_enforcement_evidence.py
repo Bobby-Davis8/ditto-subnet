@@ -294,6 +294,9 @@ def observed_for(probe: dict, language: str | None) -> dict:
     if kind == "bounded":
         value = expected_limit(probe["bind"]["limit"], container, language)
         return {"enforced": True, "limit": value, "measured": value}
+    if kind == "zero_retained":
+        value = expected_limit(probe["bind"]["limit"], container, language)
+        return {"emitted_bytes": value, "limit": value, "retained_bytes": 0}
     if kind == "supervisor_timeout":
         group = probe["id"].rsplit(".", 1)[1]
         deadline = GROUP_TIMEOUTS_MS[group]
@@ -905,6 +908,50 @@ def resource_probe(value, probe_id):
                 scope="router_endpoint"
             ),
             "needs router_endpoint roles",
+        ),
+        (
+            lambda c: resource_probe(c, "executor_grading.log_bound").update(
+                expect={
+                    "floor": "log_min_permille_of_limit",
+                    "tolerance": "log_max_permille_of_limit",
+                    "type": "bounded",
+                }
+            ),
+            "zero-byte retention fits only grading output",
+        ),
+        (
+            lambda c: resource_probe(c, "executor_grading.log_bound").update(
+                expect={"type": "exact", "value": {"retained_bytes": 0}}, bind={}
+            ),
+            "zero-byte retention fits only grading output",
+        ),
+        (
+            lambda c: resource_probe(c, "harness.log_bound").update(
+                expect={"type": "zero_retained"}
+            ),
+            "zero-byte retention fits only grading output",
+        ),
+        (
+            lambda c: resource_probe(c, "executor_grading.log_bound").update(bind={}),
+            "bind keys are not the closed set",
+        ),
+        (
+            lambda c: resource_probe(c, "executor_grading.log_bound").update(
+                bind={"limit": "pids_limit"}
+            ),
+            "must bind the output limit",
+        ),
+        (
+            lambda c: resource_probe(c, "executor_grading.log_bound")["expect"].update(
+                floor="log_min_permille_of_limit"
+            ),
+            "keys are not the closed set",
+        ),
+        (
+            lambda c: c["kinds"]["resource_enforcement"]["probes"].remove(
+                resource_probe(c, "executor_grading.log_bound")
+            ),
+            "not an exact zero-byte assertion",
         ),
     ],
 )
@@ -3123,6 +3170,82 @@ def test_endpoint_set_digest_survives_reissue_but_not_endpoint_changes(world, ca
         assert entry["address"] not in printed
 
 
+def test_endpoint_hashes_are_domain_separated():
+    """Peyton, 2026-09-15: endpoint hashing must stay domain-separated."""
+
+    tags = [
+        value.encode() if isinstance(value, str) else value
+        for name, value in vars(EVIDENCE).items()
+        if name.endswith(("_SCHEMA", "_DOMAIN")) and isinstance(value, str | bytes)
+    ]
+    assert EVIDENCE.ENDPOINT_DOMAIN == ENDPOINT_DOMAIN
+    assert tags.count(EVIDENCE.ENDPOINT_DOMAIN) == 1
+    entry = CONNECTIVITY_PROFILE["trusted_tcp"][0]
+    address, port = entry["address"], entry["port"]
+    hashed = EVIDENCE._endpoint_sha256(
+        ENDPOINT_SET_SHA256, "trusted_tcp", address, port
+    )
+    assert hashed == endpoint_hash("trusted_tcp", entry)
+    # The preimage starts with the tag, so it is never a canonical JSON object
+    # digest (profile, endpoint set, record or review), and never an untagged
+    # hash of the same fields.
+    preimage = b"\x00".join(
+        [
+            ENDPOINT_DOMAIN,
+            ENDPOINT_SET_SHA256.encode(),
+            b"trusted_tcp",
+            f"{address}:{port}".encode(),
+        ]
+    )
+    assert (
+        not preimage.startswith(b"{") and hashed == hashlib.sha256(preimage).hexdigest()
+    )
+    for untagged in (
+        preimage[len(ENDPOINT_DOMAIN) + 1 :],
+        f"{address}:{port}".encode(),
+        EVIDENCE.canonical_bytes(entry),
+    ):
+        assert hashlib.sha256(untagged).hexdigest() != hashed
+    # Role labels and endpoint sets separate otherwise equal endpoints.
+    assert hashed != EVIDENCE._endpoint_sha256(
+        ENDPOINT_SET_SHA256, "candidate_tcp", address, port
+    )
+    assert hashed != EVIDENCE._endpoint_sha256(
+        digest("other set"), "trusted_tcp", address, port
+    )
+    assert hashed not in (ENDPOINT_SET_SHA256, CONNECTIVITY_SHA256)
+
+
+def test_full_connectivity_profile_digest_is_retained_and_checked(world):
+    """The endpoint set is the approval pin; the full profile digest still binds."""
+
+    selection = world.selection()
+    review, ok = world.review()
+    assert ok
+    assert review["inputs"]["connectivity_profile_sha256"] == CONNECTIVITY_SHA256
+    assert review["endpoint_set_sha256"] == ENDPOINT_SET_SHA256 != CONNECTIVITY_SHA256
+    stored = json.loads((world.store / selection["network_enforcement"]).read_bytes())
+    assert stored["inputs"]["connectivity_profile_sha256"] == CONNECTIVITY_SHA256
+    # A reissued profile has the same endpoint set, so every endpoint hash
+    # matches, but its full digest differs from the record's and is refused.
+    reissued = {
+        **CONNECTIVITY_PROFILE,
+        "issued_at_unix": CONNECTIVITY_PROFILE["issued_at_unix"] - 1,
+    }
+    assert (
+        EVIDENCE.parse_connectivity_profile(json.dumps(reissued).encode())[
+            "endpoint_set_sha256"
+        ]
+        == ENDPOINT_SET_SHA256
+    )
+    world.profile_paths["connectivity_profile_sha256"].write_text(json.dumps(reissued))
+    failure = world.verify_record(copy.deepcopy(world.records["network_enforcement"]))
+    assert (
+        failure is not None
+        and "connectivity_profile_sha256 differs from the supplied document" in failure
+    )
+
+
 def test_a_consistent_router_proxy_swap_is_the_documented_residual(world):
     record = copy.deepcopy(world.records["network_enforcement"])
     swap_endpoint_roles(record)
@@ -3157,7 +3280,8 @@ FLOOR_REFUSALS = [
     ("executor_authoring.scratch_enospc", "go", {"measured": 1}),
     ("harness.nofile_cap", "rust", {"measured": 3}),
     ("harness.nofile_cap", "rust", {"measured": 1013}),
-    ("executor_grading.log_bound", "go", {"measured": 1}),
+    ("harness.log_bound", "go", {"measured": 1}),
+    ("executor_authoring.log_bound", "node", {"measured": 24576 // 2 - 1}),
 ]
 
 
@@ -3169,6 +3293,56 @@ def test_idle_or_crashed_burners_never_count_as_enforcement(
     edit_observed(probe_id, language, **observed)(record)
     failure = world.verify_record(record)
     assert failure is not None and f"{probe_id} matched value is misreported" in failure
+
+
+GRADING_LOG = 24576
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        {"retained_bytes": 1},
+        {"retained_bytes": GRADING_LOG // 2},
+        {"retained_bytes": GRADING_LOG},
+        {"emitted_bytes": 0},
+        {"emitted_bytes": GRADING_LOG - 1},
+    ],
+)
+def test_grading_output_retention_is_exactly_zero_bytes(world, observed):
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    edit_observed("executor_grading.log_bound", "rust", **observed)(record)
+    failure = world.verify_record(record)
+    assert (
+        failure is not None
+        and "executor_grading.log_bound matched value is misreported" in failure
+    )
+
+
+def test_grading_output_retention_refuses_shape_and_limit_drift(world):
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    edit_observed("executor_grading.log_bound", "go", limit=1)(record)
+    failure = world.verify_record(record)
+    assert failure is not None and "log_bound limit differs" in failure
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    edit_observed("executor_grading.log_bound", "go", retained_bytes=False)(record)
+    failure = world.verify_record(record)
+    assert failure is not None and "observed value is malformed" in failure
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    probe = find_probe(record, "executor_grading.log_bound", "python")
+    probe["observed"] = {"enforced": True, "limit": GRADING_LOG, "measured": 1}
+    failure = world.verify_record(record)
+    assert failure is not None and "keys are not the closed set" in failure
+
+
+def test_grading_output_retention_counts_only_exact_zero(world):
+    record = copy.deepcopy(world.records["resource_enforcement"])
+    edit_observed("executor_grading.log_bound", "node", emitted_bytes=GRADING_LOG * 8)(
+        record
+    )
+    assert world.verify_record(record) is None
+    probe = find_probe(record, "executor_grading.log_bound", "node")
+    assert probe["expect"] == {"type": "zero_retained"}
+    assert probe["observed"]["retained_bytes"] == 0
 
 
 def test_burners_at_their_floor_count(world):
