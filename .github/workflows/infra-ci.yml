@@ -8,6 +8,8 @@ on:
       - .github/workflows/infra-ci.yml
       - .github/workflows/infra-plan-apply.yml
       - ditto/tests/test_coding_hosted_postgres_environment.py
+      - pyproject.toml
+      - uv.lock
   push:
     branches: [main]
     paths:
@@ -16,6 +18,8 @@ on:
       - .github/workflows/infra-ci.yml
       - .github/workflows/infra-plan-apply.yml
       - ditto/tests/test_coding_hosted_postgres_environment.py
+      - pyproject.toml
+      - uv.lock
 
 permissions:
   contents: read
@@ -126,7 +130,7 @@ jobs:
         env:
           DITTO_ANSIBLE_REHEARSAL: "1"
         run: >-
-          uv run --locked --only-group dev --with pyyaml==6.0.3
+          uv run --locked --only-group dev
           pytest -p no:cacheprovider -rs
           ditto/tests/test_coding_hosted_postgres_environment.py
 
