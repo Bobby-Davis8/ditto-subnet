@@ -44,6 +44,13 @@ DATABASE_HOST = "10.30.0.5"
 CAPTURED_GATE = f"{PFX}captured_enabled"
 GATE = f"{CAPTURED_GATE} is sameas true"
 REHEARSAL_GATE = "DITTO_ANSIBLE_REHEARSAL"
+# inventory_hostname and group_names are host variables extra vars override;
+# groups and ansible_play_hosts_all are magic variables they cannot.
+GROUP_CHECK = (
+    "ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) "
+    "| length == 0"
+)
+NON_OVERRIDABLE_MAGIC = {"groups", "ansible_play_hosts_all"}
 
 CUSTODY = "/var/lib/ditto-coding-custody/private/postgres-environment.json"
 HOSTED = "/var/lib/ditto-coding-hosted/private/postgres-environment.json"
@@ -188,13 +195,19 @@ def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() ->
     before = tasks[: tasks.index(_task(PRESET))]
     assert not any("register" in t or "ansible.builtin.set_fact" in t for t in before)
 
+    # Names are tested with varnames, which never renders a value; 'is defined'
+    # would render a raising template and print its error.
     assert _task(PASSWORD_VARIABLE)["ansible.builtin.assert"]["that"] == [
-        f"{PFX}password is not defined"
+        f"lookup('ansible.builtin.varnames', '^{PFX}password$', wantlist=True) == []"
     ]
+    assert "is defined" not in PARSED and "is not defined" not in PARSED
     that = _task(PRESET)["ansible.builtin.assert"]["that"]
-    # A single condition: the varnames equality is the one source of truth, with
-    # no duplicate per-name "is not defined" lines.
-    assert len(that) == 1
+    # The varnames equality is the one source of truth for the prefix, with no
+    # per-name "is not defined" lines; the loop item is refused by name too.
+    assert len(that) == 2
+    assert (
+        that[1] == "lookup('ansible.builtin.varnames', '^item$', wantlist=True) == []"
+    )
     allowed = sorted([*INPUTS, CAPTURED_GATE])
     assert _flat(that[0]) == _flat(
         f"lookup('ansible.builtin.varnames', '^{PFX}', wantlist=True) "
@@ -212,6 +225,104 @@ def test_preset_and_password_guards_run_first_as_the_single_source_of_truth() ->
     assert "Nothing was written" in _task(PRESET)["ansible.builtin.assert"]["fail_msg"]
 
 
+_JINJA_WORDS = {"and", "or", "not", "in", "is", "if", "else", "true", "false", "none"}
+_JINJA_WORDS |= {"True", "False", "None"}
+
+
+def _jinja_roots(expression: str) -> set[str]:
+    """Top-level variable names an expression reads: no attributes, filters,
+    tests, keyword arguments, string literals or Jinja keywords."""
+    code = re.sub(r"'[^']*'|\"[^\"]*\"", "''", expression)
+    roots = set()
+    for match in re.finditer(r"[A-Za-z_]\w*", code):
+        before = code[: match.start()].rstrip()
+        after = code[match.end() :].lstrip()
+        name = match.group()
+        if name in _JINJA_WORDS or before.endswith((".", "|")):
+            continue
+        if re.search(r"\bis(\s+not)?$", before) or re.match(r"=(?!=)", after):
+            continue
+        roots.add(name)
+    return roots
+
+
+def _task_roots(task: dict) -> set[str]:
+    roots: set[str] = set()
+
+    def visit(value: object, expression: bool) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(item, key in ("when", "that", "changed_when", "failed_when"))
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, expression)
+        elif isinstance(value, str):
+            if expression:
+                roots.update(_jinja_roots(value))
+            for template in re.findall(r"{{(.*?)}}", value, re.S):
+                roots.update(_jinja_roots(template))
+
+    visit({k: v for k, v in task.items() if k != "name"}, False)
+    return roots
+
+
+def test_every_variable_read_is_an_input_a_refused_name_or_unforgeable() -> None:
+    # Extra vars override registered results, set_facts, include vars and host
+    # variables such as inventory_hostname and group_names. Every variable these
+    # tasks read must therefore be a documented input, a prefixed name the preset
+    # guard refuses, the loop item it also refuses, or a magic variable extra vars
+    # cannot override.
+    created = {
+        name
+        for task in _walk(_main() + _materialize())
+        for name in [task.get("register"), *task.get("ansible.builtin.set_fact", {})]
+        if name
+    }
+    assert all(name.startswith(PFX) for name in created)
+    for task in _walk(_main() + _materialize()):
+        for root in _task_roots(task):
+            assert (
+                root in INPUTS
+                or root in created
+                or root in {"item", "lookup"}
+                or root in NON_OVERRIDABLE_MAGIC
+            ), (task["name"], root)
+    assert "inventory_hostname" not in PARSED and "group_names" not in PARSED
+    # Every message is fixed text: nothing a variable could replace is rendered.
+    for task in _walk(_materialize()):
+        for arguments in task.values():
+            if isinstance(arguments, dict):
+                for key in ("fail_msg", "msg"):
+                    assert "{{" not in str(arguments.get(key, "")), task["name"]
+
+
+def test_target_modules_that_touch_the_password_run_under_no_log() -> None:
+    # A module invoked without no_log writes "Invoked with <params>" to the
+    # target's journal and returns its invocation under ansible_inject_invocation.
+    # Every target-side module whose arguments, loop or result carry the password,
+    # the document, a captured input or a checksum therefore runs under no_log.
+    controller = {
+        "ansible.builtin.assert",
+        "ansible.builtin.set_fact",
+        "ansible.builtin.debug",
+        "ansible.builtin.include_tasks",
+    }
+    sensitive = [
+        "DITTO_CODING_PG_PASSWORD",
+        f"{PFX}document",
+        f"{PFX}entries",
+        f"{PFX}captured_",
+        f"{PFX}files",
+        "get_checksum",
+    ]
+    for task in _walk(_materialize()):
+        if controller & set(task):
+            continue
+        if any(marker in json.dumps(task) for marker in sensitive):
+            assert task.get("no_log") is True, task["name"]
+    assert _task(WRITE)["no_log"] is True and _task(REINSPECT)["no_log"] is True
+
+
 def test_identity_and_accounts_come_from_registered_probes_no_facts_gathered() -> None:
     identity = _task(IDENTITY)
     assert identity["ansible.builtin.setup"] == {
@@ -224,7 +335,7 @@ def test_identity_and_accounts_come_from_registered_probes_no_facts_gathered() -
 
     that = _task(HOST)["ansible.builtin.assert"]["that"]
     assert that[:5] == [
-        "inventory_hostname in groups.get('role_coding_hosted', [])",
+        GROUP_CHECK,
         *(
             f"{PFX}identity.ansible_facts.ansible_{key} == '{value}'"
             for key, value in PROBED_IDENTITY.items()
@@ -498,6 +609,9 @@ def test_docs_describe_every_forgery_guard() -> None:
         "deprecation warning",
         "`exception`",
         "imported statically",
+        "`varnames`",
+        "`ansible_play_hosts_all`",
+        "`ansible_inject_invocation`",
         "SHA-1, MD5 and SHA-256",
         f"`{REHEARSAL_GATE}=1`",
     ):
@@ -773,6 +887,7 @@ def _run(
     mock_accounts: bool = True,
     wrong_mode: bool = False,
     residual: str | None = None,
+    outside: dict[str, dict] | None = None,
 ) -> str:
     work = tmp_path / name
     work.mkdir()
@@ -782,7 +897,12 @@ def _run(
         mock_accounts=mock_accounts,
         wrong_mode=wrong_mode,
     )
-    inventory = {"all": {"children": {"role_coding_hosted": {"hosts": hosts}}}}
+    inventory: dict[str, Any] = {
+        "all": {"children": {"role_coding_hosted": {"hosts": hosts}}}
+    }
+    if outside:
+        # Hosts outside role_coding_hosted that the rehearsal play still targets.
+        inventory["all"]["hosts"] = outside
     (work / "inventory.yml").write_text(yaml.safe_dump(inventory))
     (work / "play.yml").write_text(yaml.safe_dump([_play()], sort_keys=False))
     # The repo's own ansible.cfg, verbatim: its default callback with yaml results,
@@ -927,6 +1047,8 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
         "preset_result",
         "undocumented_input",
         "password_variable",
+        "password_raising",
+        "preset_item",
     ]
     roots = {name: tmp_path / "hosts" / name for name in inventory_cases}
     hosts = {name: _hostvars(roots[name]) for name in inventory_cases}
@@ -965,6 +1087,14 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
     hosts["preset_result"][f"{PFX}units"] = {"stdout": "", "stdout_lines": []}
     hosts["undocumented_input"][f"{PFX}user"] = "postgres"
     hosts["password_variable"][f"{PFX}password"] = "rehearsal-variable"
+    # Refused by name: 'is defined' would render this and print its error.
+    hosts["password_raising"][f"{PFX}password"] = (
+        '{{ lookup("file", lookup("env", "DITTO_CODING_PG_PASSWORD")) }}'
+    )
+    hosts["preset_item"]["item"] = {
+        "path": str(tmp_path / "elsewhere"),
+        "owner": "root",
+    }
 
     _run(tmp_path, "inventory", hosts)
 
@@ -990,6 +1120,8 @@ def test_rehearsal_materializes_and_refuses_every_forged_inventory_input(
         "preset_result": PRESET,
         "undocumented_input": PRESET,
         "password_variable": PASSWORD_VARIABLE,
+        "password_raising": PASSWORD_VARIABLE,
+        "preset_item": PRESET,
     }
     for name, task in refusals.items():
         _refused_at(roots[name], task)
@@ -1028,6 +1160,43 @@ def test_rehearsal_extra_vars_cannot_forge_the_gate_facts_or_accounts(
         mock_accounts=False,
     )
     _refused_at(forged_accounts, ACCOUNT_CHECK)
+
+
+@rehearsal
+def test_rehearsal_extra_vars_cannot_forge_group_membership(tmp_path) -> None:
+    # inventory_hostname and group_names are host variables extra vars override.
+    # Forging both for a host outside role_coding_hosted must not pass the group
+    # check, which reads only groups and ansible_play_hosts_all.
+    roots = {name: tmp_path / "hosts" / name for name in ("inside", "outside")}
+    _run(
+        tmp_path,
+        "forged_group",
+        {"inside": _hostvars(roots["inside"])},
+        "-e",
+        json.dumps(
+            {"inventory_hostname": "inside", "group_names": ["role_coding_hosted"]}
+        ),
+        outside={"outside": _hostvars(roots["outside"])},
+    )
+    for root in roots.values():
+        _refused_at(root, HOST)
+
+
+@rehearsal
+def test_rehearsal_injected_invocations_never_carry_the_password(tmp_path) -> None:
+    # -e ansible_inject_invocation=true returns every module's arguments in its
+    # result and -vvv prints them; no_log on every password-bearing module keeps
+    # the password, the document and its checksums out of both.
+    root = tmp_path / "hosts/invocation"
+    _run(
+        tmp_path,
+        "invocation",
+        {"invocation": _hostvars(root)},
+        "-vvv",
+        "-e",
+        json.dumps({"ansible_inject_invocation": True}),
+    )
+    _materialized(root)
 
 
 @rehearsal

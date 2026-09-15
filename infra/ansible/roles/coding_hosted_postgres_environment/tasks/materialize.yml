@@ -12,11 +12,17 @@
 # would show up and is refused. Presetting the captured gate itself only enables
 # materialization, which every guard below still decides. The separate removal
 # role's coding_hosted_postgres_environment_cleanup_* names are excluded so its
-# presence never produces a misleading refusal here.
+# presence never produces a misleading refusal here. The loops' item is the only
+# other name these tasks read that extra vars could supply; loop values win over
+# extra vars today, but a preset item is refused rather than trusted. Every
+# other variable read below is a non-overridable magic variable (groups,
+# ansible_play_hosts_all). Both guards test names with varnames, which lists
+# variables without rendering them: 'is defined' renders the value first, so a
+# variable templated to raise an error would print that error.
 - name: Refuse a password supplied as an Ansible variable
   ansible.builtin.assert:
     that:
-      - coding_hosted_postgres_environment_password is not defined
+      - lookup('ansible.builtin.varnames', '^coding_hosted_postgres_environment_password$', wantlist=True) == []
     fail_msg: >-
       Never pass the PostgreSQL password with -e, inventory or vars files. Export
       DITTO_CODING_PG_PASSWORD in the controller's local environment instead.
@@ -33,9 +39,10 @@
         'coding_hosted_postgres_environment_enabled',
         'coding_hosted_postgres_environment_host',
         'coding_hosted_postgres_environment_source_revision']
+      - lookup('ansible.builtin.varnames', '^item$', wantlist=True) == []
     fail_msg: >-
       Only the enabled, confirmation, source_revision and host inputs are accepted; a
-      registered result name, a captured or document variable, or another
+      registered result name, a captured or document variable, a loop item, or another
       coding_hosted_postgres_environment_ variable is preset. Nothing was written.
     quiet: true
 
@@ -65,6 +72,9 @@
     coding_hosted_postgres_environment_captured_revision: "{{ coding_hosted_postgres_environment_source_revision | default('', true) }}"
   no_log: true
 
+# inventory_hostname and group_names are host variables that extra vars
+# override, so group membership is proved from two magic variables they cannot:
+# every host in this play must belong to role_coding_hosted.
 # A single trailing newline satisfies a '$' anchor, so the revision also needs
 # its exact length and the host must survive trimming unchanged. The captured
 # values are inert strings by now, so this assert cannot render an operator
@@ -72,7 +82,7 @@
 - name: Require the exact host, source, database address and confirmation
   ansible.builtin.assert:
     that:
-      - inventory_hostname in groups.get('role_coding_hosted', [])
+      - ansible_play_hosts_all | difference(groups.get('role_coding_hosted', [])) | length == 0
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_hostname == 'ditto-coding-hosted-v2'
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_architecture == 'x86_64'
       - coding_hosted_postgres_environment_identity.ansible_facts.ansible_distribution == 'Debian'
