@@ -15,28 +15,69 @@ def load() -> tuple[str, dict]:
     return text, yaml.load(text, Loader=yaml.BaseLoader)
 
 
+API = ROOT / "services/dittobench-api"
+MODULE = "github.com/ditto-assistant/dittobench-api/"
+IMPORT = re.compile(
+    r'"(github\.com/ditto-assistant/dittobench-(?:api|datagen)[a-z0-9_/.-]*)"'
+)
+
+
+def transitive_monorepo_paths() -> set[str]:
+    """Monorepo trees the runner and its tagged tests import, transitively.
+
+    Roots include their test files; dependencies contribute only production
+    files, matching go list -deps -test for the runner packages.
+    """
+
+    roots = [
+        "cmd/dittobench-coding-enforcement-probe",
+        "internal/codingenforcement/probe",
+    ]
+    pending = [(root, True) for root in roots]
+    seen: set[str] = set()
+    paths: set[str] = set()
+    while pending:
+        package, include_tests = pending.pop()
+        if package in seen:
+            continue
+        seen.add(package)
+        for source in (API / package).glob("*.go"):
+            if source.name.endswith("_test.go") and not include_tests:
+                continue
+            for imported in IMPORT.findall(source.read_text()):
+                if imported.startswith("github.com/ditto-assistant/dittobench-datagen"):
+                    paths.add("research/dittobench-datagen/**")
+                elif imported.startswith(MODULE):
+                    pending.append((imported[len(MODULE) :], False))
+    for package in seen:
+        paths.add(f"services/dittobench-api/{package}/**")
+    return paths
+
+
+def covered(path: str, filters: list[str]) -> bool:
+    return any(
+        path == item or (item.endswith("/**") and path.startswith(item[:-2]))
+        for item in filters
+    )
+
+
 def test_probe_job_is_path_filtered_bounded_and_credential_free():
     text, workflow = load()
     assert set(workflow["on"]) == {"pull_request", "workflow_dispatch"}
     paths = workflow["on"]["pull_request"]["paths"]
     assert "services/dittobench-api/**" not in paths
-    assert ".github/workflows/coding-native-enforcement-probe.yml" in paths
-    # Every monorepo package the runner and its integration test import triggers it.
-    sources = [
-        *PROBE.glob("*.go"),
-        *(
-            ROOT / "services/dittobench-api/cmd/dittobench-coding-enforcement-probe"
-        ).glob("*.go"),
-    ]
-    for source in sources:
-        for imported in re.findall(
-            r'"github\.com/ditto-assistant/dittobench-api/(internal/[a-z0-9_/]+)"',
-            source.read_text(),
-        ):
-            package = f"services/dittobench-api/{imported}/"
-            assert any(
-                path.endswith("/**") and package.startswith(path[:-2]) for path in paths
-            ), imported
+    required = transitive_monorepo_paths() | {
+        "services/dittobench-api/go.mod",
+        "services/dittobench-api/go.sum",
+        "infra/scripts/coding-native-evidence.py",
+        "ditto/tests/test_coding_native_probe_runner.py",
+        "pyproject.toml",
+        "uv.lock",
+        ".github/workflows/coding-native-enforcement-probe.yml",
+    }
+    assert "services/dittobench-api/internal/codinghostedworker/**" in required
+    missing = sorted(path for path in required if not covered(path, paths))
+    assert not missing, missing
     assert workflow["permissions"] == {"contents": "read"}
     for forbidden in ("secrets.", "id-token", "environment:", "self-hosted", "gcloud"):
         assert forbidden not in text
@@ -59,13 +100,23 @@ def test_probe_job_pins_docker_delegates_cgroups_and_runs_the_exact_tests():
     assert "io.heyditto.dittobench.isolated=true" in text
     assert "docker pull" not in text and "registry:" not in text
     assert "-tags native_probe_integration" in text
-    test_name = "TestExecutorResourceEnforcementIsMeasuredThroughTheProductionLaunch"
+    test_name = "TestHostedGradingRequestedConfigMatchesTheApprovedProfile"
     assert f"-test.run '^{test_name}$'" in text
-    assert "DITTOBENCH_NATIVE_PROBE_OUTPUT" in text
+    assert "observe-requested-config" in text
+    assert "testdata/ci-grading-profile.json" in text
+    # Hosted grading refuses certification fixtures, so the image is not one.
+    assert "coding-supervisor-fixture" not in text
+    for variable in (
+        "DITTOBENCH_NATIVE_PROBE_REPORT",
+        "DITTOBENCH_REQUIRE_PROBE_RUNNER",
+        "DITTOBENCH_REQUIRE_LIVE_PROBE_REPORT",
+    ):
+        assert variable in text
     assert "ditto/tests/test_coding_native_probe_runner.py" in text
     integration = (PROBE / "resource_integration_linux_test.go").read_text()
     assert integration.startswith("//go:build native_probe_integration\n")
     assert "t.Skip" not in integration
+    assert "AllowCertificationImage" not in integration
 
 
 def test_probe_runner_is_never_wired_to_a_host_workflow():
