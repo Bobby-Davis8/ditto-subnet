@@ -259,6 +259,10 @@ def test_disabled_platform_converge_never_reaches_the_seed_path() -> None:
         "import_tasks",
         "import_tasks",
     ]
+    # Both imports run unconditionally inside the enabled guard: no `when`,
+    # loop or tag may skip the stat guard or the live Docker check.
+    for imported in signer[1:]:
+        assert set(imported) == {"name", "ansible.builtin.import_tasks", "vars"}
     # The live Docker check runs after the stat guard with literal inputs.
     assert signer[2]["ansible.builtin.import_tasks"] == "deploy_docker_access.yml"
     assert signer[2]["vars"] == {
