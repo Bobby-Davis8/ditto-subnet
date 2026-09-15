@@ -12,17 +12,21 @@ from __future__ import annotations
 
 import argparse
 import base64
+import builtins
 import contextlib
+import errno
 import hashlib
-import importlib.util
+import ipaddress
 import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +40,14 @@ CUSTODY_SCHEMA = "dittobench-coding-native-custody-binding-v1"
 CHECK_SCHEMA = "dittobench-coding-native-evidence-approval-check-v1"
 PREFLIGHT_SCHEMA = "dittobench-coding-native-host-preflight-v2"
 APPROVAL_SCHEMA = "dittobench-coding-native-controls-approval-v2"
+EXECUTION_PROFILE_SCHEMA = "dittobench-coding-hosted-authoring-profile-v2"
+GRADING_PROFILE_SCHEMA = "dittobench-coding-hosted-grading-profile-v2"
+CONNECTIVITY_SCHEMAS = (
+    "dittobench-coding-hosted-connectivity-v2",
+    "dittobench-coding-hosted-connectivity-v3",
+)
 
+# Collection order is fixed and records never overlap: each claims an idle host.
 KINDS = (
     "network_enforcement",
     "resource_enforcement",
@@ -48,9 +59,16 @@ LANGUAGES = ("go", "node", "python", "rust")
 ROUTER_NAMESPACES = ("host", "rootless-netns")
 COVERAGE = "same_boot"
 NOT_COVERED = ("daemon_restart_recovery", "reboot_recovery")
+PROFILE_INPUTS = (
+    "connectivity_profile_sha256",
+    "execution_profile_sha256",
+    "grading_profile_sha256",
+)
 # Peyton, 2026-09-15: every collection record falls within six hours of the
 # approval's issued_at, on one machine and one boot.
 FRESHNESS_SECONDS = 21600
+# A record's pre-collection preflight is at most this old when collection starts.
+PRE_COLLECTION_PREFLIGHT_MAX_AGE_SECONDS = 900
 # Versioned tolerances. A change is a new version in both the catalog and here.
 TOLERANCES = {
     "version": "dittobench-coding-native-enforcement-tolerances-v1",
@@ -62,6 +80,50 @@ TOLERANCES = {
     "log_max_permille_of_limit": 1000,
     "timeout_elapsed_max_permille_of_deadline": 1100,
 }
+# Where each resource container's limits come from. Runtime constants are the
+# sandbox (--ulimit nofile=1024, --log-opt max-size=8m) and executor (24 KiB
+# model-visible output, Rust /out carve-out) values in services/dittobench-api.
+RESOURCE_CONTAINERS = {
+    "harness": {
+        "profile": "execution_profile_sha256",
+        "scratch": "full",
+        "nofile_limit": 1024,
+        "log_limit_bytes": 8388608,
+    },
+    "executor_authoring": {
+        "profile": "execution_profile_sha256",
+        "scratch": "executor",
+        "nofile_limit": 1024,
+        "log_limit_bytes": 24576,
+    },
+    "executor_grading": {
+        "profile": "grading_profile_sha256",
+        "scratch": "executor",
+        "nofile_limit": 1024,
+        "log_limit_bytes": 24576,
+    },
+}
+BIND_SOURCES = (
+    "memory_limit_bytes",
+    "cpu_quota_millis",
+    "pids_limit",
+    "scratch_limit_bytes",
+    "nofile_limit",
+    "log_limit_bytes",
+    "command_timeout_ms",
+)
+BIND_FIELDS = {
+    "profile_equal": "profile",
+    "bounded": "limit",
+    "supervisor_timeout": "deadline_ms",
+}
+# Rootless Docker maps container uid 0 to the daemon user and uid c >= 1 to
+# subordinate id start + c - 1.
+SUBORDINATE_MIN_START = 100000
+SUBORDINATE_MIN_COUNT = 65536
+ENDPOINT_DOMAIN = b"dittobench-coding-native-endpoint-v1"
+ENDPOINT_LISTS = {"trusted_tcp": "trusted", "trusted_dns": "trusted_dns"}
+HOSTED_TEST_GROUPS = ("hidden", "visible")
 
 CATALOG_FILE = (
     "services/dittobench-api/internal/codingenforcement/catalog/catalog-v1.json"
@@ -88,13 +150,17 @@ PREFLIGHT_PENDING = [
 ]
 NATIVE_BINDING_FILE = "services/dittobench-api/coding_runtime/qualification/native.py"
 NATIVE_RUNNER_FILE = "services/dittobench-api/coding_runtime/qualification/run.py"
+DEFAULT_OPENSSL = Path("/usr/bin/openssl")
 
 MAX_OBJECT = 1 << 20
 MAX_TOOL = 8 << 20
+MAX_PROFILE = 64 << 10
+MAX_CONNECTIVITY = 16384
 MAX_APPROVAL = 65536
 MAX_PUBLIC_KEY = 4096
 SIGNATURE_BYTES = 64
 MAX_DEPTH = 16
+MAX_INTEGER_TEXT = 20
 INT64_MAX = (1 << 63) - 1
 
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -103,11 +169,12 @@ BOOT_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")
 KERNEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}")
 PROBE_ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,3}")
 NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")
 # Observed strings are short lowercase names such as interface names. Digits
 # cannot lead, so no address or host:port can be recorded.
 OBSERVED_STRING = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 RELATIVE_PATH = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
-SURROGATE = re.compile("[\ud800-\udfff]")
+SURROGATE = re.compile("[\\ud800-\\udfff]")
 
 PRECONDITIONS = {
     "custody_active": False,
@@ -198,7 +265,16 @@ REVIEW_KEYS = {
     "consistency",
     "verified",
 }
-REVIEW_PASS_KEYS = {*REVIEW_KEYS, "evidence_sha256", "host", "release", "window"}
+REVIEW_PASS_KEYS = {
+    *REVIEW_KEYS,
+    "evidence_sha256",
+    "host",
+    "release",
+    "inputs",
+    "endpoints",
+    "endpoint_counts",
+    "window",
+}
 WINDOW_KEYS = {
     "earliest_started_at_unix",
     "latest_completed_at_unix",
@@ -214,6 +290,8 @@ CATALOG_KEYS = {
     "coverage",
     "not_covered",
     "freshness_max_seconds",
+    "pre_collection_preflight_max_age_seconds",
+    "resource_containers",
     "tolerances",
     "outcomes",
     "kinds",
@@ -224,13 +302,64 @@ EXPECT_KEYS = {
     "profile_equal": {"type"},
     "bounded": {"type", "tolerance"},
     "supervisor_timeout": {"type", "tolerance"},
-    "tests": {"type", "result"},
-    "subordinate_uid": {"type"},
+    "control": {"type", "result"},
+    "subordinate_ids": {"type", "uid", "gid"},
 }
 SCOPES = ("host", "language", "trusted_endpoint")
+EXECUTION_PROFILE_KEYS = {"schema", "image_digest", "resource_policy", "budgets"}
+GRADING_PROFILE_KEYS = {
+    "schema",
+    "image_digest",
+    "grader_contract_sha256",
+    "grader_bundle_sha256",
+    "resource_policy",
+    "build",
+    "test_groups",
+    "execution_timeout",
+}
+RESOURCE_POLICY_KEYS = {
+    "CandidateLimits",
+    "ProtectedLimits",
+    "MaxCombinedDiskBytes",
+    "MemoryLimitBytes",
+    "ScratchLimitBytes",
+    "PidsLimit",
+    "CPUQuotaMillis",
+}
+LIMIT_KEYS = {
+    "MaxBundleBytes",
+    "MaxWorkspaceBytes",
+    "MaxFileBytes",
+    "MaxPatchBytes",
+    "MaxEntries",
+    "MaxToolCalls",
+    "MaxReadBytes",
+    "MaxResponseBytes",
+    "MaxSearchResults",
+    "MaxReplayCacheBytes",
+    "MaxTranscriptBytes",
+}
+BUDGET_KEYS = {
+    "model_input_tokens",
+    "model_output_tokens",
+    "workspace_tool_calls",
+    "wall_time_seconds",
+}
+CONNECTIVITY_KEYS = {
+    "schema",
+    "shadow_only",
+    "weight_eligible",
+    "issued_at_unix",
+    "expires_at_unix",
+    "trusted_tcp",
+    "trusted_dns",
+    "trusted_loopback_tcp",
+    "candidate_tcp",
+}
 SPKI_ED25519_PREFIX = bytes.fromhex("302a300506032b6570032100")
 PEM_BEGIN = b"-----BEGIN PUBLIC KEY-----\n"
 PEM_END = b"\n-----END PUBLIC KEY-----\n"
+RENAME_NOREPLACE = 1
 
 
 class Refusal(ValueError):
@@ -238,7 +367,14 @@ class Refusal(ValueError):
 
 
 # Shape errors a hostile record could still trigger are refusals, never crashes.
-MALFORMED = (TypeError, KeyError, AttributeError, IndexError, RecursionError)
+MALFORMED = (
+    TypeError,
+    KeyError,
+    AttributeError,
+    IndexError,
+    RecursionError,
+    ValueError,
+)
 
 
 def reason(error: Exception) -> str:
@@ -260,8 +396,26 @@ def is_digest(value: object) -> bool:
     )
 
 
-def is_int(value: object, minimum: int = 0) -> bool:
-    return type(value) is int and minimum <= value <= INT64_MAX
+def is_int(value: object, minimum: int = 0, maximum: int = INT64_MAX) -> bool:
+    return type(value) is int and minimum <= value <= maximum
+
+
+def same(left: object, right: object) -> bool:
+    """JSON equality with exact types: False is not 0 and 1 is not True."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        assert isinstance(right, dict)
+        return left.keys() == right.keys() and all(
+            same(item, right[key]) for key, item in left.items()
+        )
+    if isinstance(left, list):
+        assert isinstance(right, list)
+        return len(left) == len(right) and all(
+            same(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return left == right
 
 
 def closed(value: object, keys: set[str], label: str) -> dict[str, Any]:
@@ -283,6 +437,12 @@ def _reject_constant(_text: str) -> None:
     raise Refusal("JSON numbers must be finite integers")
 
 
+def _bounded_int(text: str) -> int:
+    # int() on thousands of digits is slow and raises past Python's limit.
+    require(len(text) <= MAX_INTEGER_TEXT, "integer is outside int64")
+    return int(text)
+
+
 def parse_json(raw: bytes, label: str) -> Any:
     def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -298,6 +458,7 @@ def parse_json(raw: bytes, label: str) -> Any:
             text,
             object_pairs_hook=unique,
             parse_float=_reject_float,
+            parse_int=_bounded_int,
             parse_constant=_reject_constant,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
@@ -330,10 +491,10 @@ def canonical_bytes(value: object) -> bytes:
     """Native-qualification form: sorted keys, compact, ASCII-escaped, no newline.
 
     This is the ``json.dumps(value, sort_keys=True, separators=(",", ":"))`` form
-    that ``run.py``, ``prepare.py`` and the image/release tools already hash.
-    ``ensure_ascii`` escapes every non-ASCII character, including U+2028 and
-    U+2029, as lowercase ``\\uXXXX``. Floats, NaN and non-int64 integers are
-    refused so the Go encoder produces identical bytes.
+    that ``run.py``, ``prepare.py``, the image/release tools and the connectivity
+    rollout digest already hash. ``ensure_ascii`` escapes every non-ASCII
+    character, including U+2028 and U+2029, as a lowercase escape. Floats, NaN
+    and non-int64 integers are refused so the Go encoder produces identical bytes.
     """
 
     _canonical_value(value, 0)
@@ -357,18 +518,48 @@ def parse_canonical(raw: bytes, label: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Content-addressed store
+# Paths, store and reviewed checkout
 
 
-def _protected_ancestors(path: Path) -> None:
+def _protected_ancestors(path: Path, label: str) -> None:
     for parent in path.parents:
         info = parent.lstat()
-        require(stat.S_ISDIR(info.st_mode), "store ancestor is not a directory")
-        require(info.st_uid in (0, os.geteuid()), "store ancestor has another owner")
+        require(stat.S_ISDIR(info.st_mode), f"{label} ancestor is not a directory")
+        require(info.st_uid in (0, os.geteuid()), f"{label} ancestor has another owner")
         require(
             not info.st_mode & 0o022 or bool(info.st_mode & stat.S_ISVTX),
-            "store ancestor is writable by others",
+            f"{label} ancestor is writable by others",
         )
+
+
+def _rename_noreplace(directory: int, source: str, target: str) -> bool | None:
+    """renameat2(RENAME_NOREPLACE): True renamed, False exists, None unsupported."""
+
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        function = libc.renameat2
+    except (OSError, AttributeError):
+        return None
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    if function(
+        directory, os.fsencode(source), directory, os.fsencode(target), RENAME_NOREPLACE
+    ):
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
+            return False
+        if code in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            return None
+        raise OSError(code, os.strerror(code))
+    return True
 
 
 class Store:
@@ -378,7 +569,7 @@ class Store:
         require(path.is_absolute(), "store path must be absolute")
         try:
             require(path.resolve() == path, "store path must be canonical")
-            _protected_ancestors(path)
+            _protected_ancestors(path, "store")
             fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError:
             raise Refusal("store is not an existing directory") from None
@@ -401,8 +592,40 @@ class Store:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    def recover(self, digest: str) -> None:
+        """Finish an interrupted link-then-unlink retain for this digest.
+
+        A crash between linking the digest name and unlinking the temporary
+        leaves two links to one complete fsynced object. Only a partial of this
+        digest, owned by us and on the same inode, is removed.
+        """
+
+        try:
+            info = os.stat(digest, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not (
+            stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 2
+            and info.st_uid == os.geteuid()
+        ):
+            return
+        for name in os.listdir(self.fd):
+            if not name.startswith(f".partial-{digest}-"):
+                continue
+            partial = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            if (
+                stat.S_ISREG(partial.st_mode)
+                and partial.st_uid == os.geteuid()
+                and (partial.st_dev, partial.st_ino) == (info.st_dev, info.st_ino)
+            ):
+                os.unlink(name, dir_fd=self.fd)
+                os.fsync(self.fd)
+                return
+
     def put(self, raw: bytes) -> str:
         digest = sha256(raw)
+        self.recover(digest)
         temporary = f".partial-{digest}-{secrets.token_hex(8)}"
         fd = os.open(
             temporary,
@@ -410,22 +633,28 @@ class Store:
             0o400,
             dir_fd=self.fd,
         )
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o400)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
         try:
-            with os.fdopen(fd, "wb") as stream:
-                os.fchmod(stream.fileno(), 0o400)
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                os.link(
-                    temporary,
-                    digest,
-                    src_dir_fd=self.fd,
-                    dst_dir_fd=self.fd,
-                    follow_symlinks=False,
-                )
-            except FileExistsError:
-                raise Refusal("object is already retained") from None
+            renamed = _rename_noreplace(self.fd, temporary, digest)
+            if renamed is None:
+                try:
+                    os.link(
+                        temporary,
+                        digest,
+                        src_dir_fd=self.fd,
+                        dst_dir_fd=self.fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    renamed = False
+                else:
+                    os.unlink(temporary, dir_fd=self.fd)
+                    renamed = True
+            require(renamed, "object is already retained")
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary, dir_fd=self.fd)
@@ -435,6 +664,7 @@ class Store:
     def get(self, digest: object, maximum: int = MAX_OBJECT) -> bytes:
         require(is_digest(digest), "object digest is malformed")
         assert isinstance(digest, str)
+        self.recover(digest)
         try:
             fd = os.open(
                 digest,
@@ -458,20 +688,24 @@ class Store:
         return raw
 
 
-# ---------------------------------------------------------------------------
-# Reviewed checkout
+def _not_writable(info: os.stat_result, label: str) -> None:
+    require(info.st_uid in (0, os.geteuid()), f"{label} has another owner")
+    require(not info.st_mode & 0o022, f"{label} is writable by others")
 
 
 class Checkout:
-    """Reads tool bytes from a reviewed checkout without following links."""
+    """Reads tool bytes from a reviewed checkout without links or shared writes."""
 
     def __init__(self, path: Path) -> None:
         require(path.is_absolute(), "checkout path must be absolute")
         try:
             require(path.resolve() == path, "checkout path must be canonical")
-            require(stat.S_ISDIR(path.lstat().st_mode), "checkout is not a directory")
+            _protected_ancestors(path, "checkout")
+            info = path.lstat()
         except OSError:
             raise Refusal("checkout is not an existing directory") from None
+        require(stat.S_ISDIR(info.st_mode), "checkout is not a directory")
+        _not_writable(info, "checkout")
         self.root = path
 
     def _path(self, relative: str) -> Path:
@@ -488,6 +722,7 @@ class Checkout:
             except OSError:
                 raise Refusal(f"checkout is missing {relative}") from None
             require(not stat.S_ISLNK(info.st_mode), f"checkout {relative} is a link")
+            _not_writable(info, f"checkout {relative}")
         return current
 
     def read(self, relative: str) -> bytes:
@@ -496,6 +731,7 @@ class Checkout:
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(fd)
             require(stat.S_ISREG(info.st_mode), f"checkout {relative} is not a file")
+            _not_writable(info, f"checkout {relative}")
             require(info.st_size <= MAX_TOOL, f"checkout {relative} is too large")
             return stream.read(MAX_TOOL + 1)
 
@@ -518,6 +754,7 @@ class Checkout:
                 name = f"{prefix}{entry.name}"
                 info = entry.stat(follow_symlinks=False)
                 if stat.S_ISDIR(info.st_mode):
+                    _not_writable(info, f"fixture {name}")
                     walk(Path(entry.path), name + "/")
                 else:
                     require(stat.S_ISREG(info.st_mode), f"fixture {name} is not a file")
@@ -536,6 +773,241 @@ class Checkout:
         return result
 
 
+def read_input(path: Path, maximum: int, label: str) -> bytes:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise Refusal(f"{label} is missing") from None
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode), f"{label} is not a regular file")
+        require(info.st_size <= maximum, f"{label} is too large")
+        return stream.read(maximum + 1)
+
+
+# ---------------------------------------------------------------------------
+# Approved profile documents
+
+
+def _go_canonical(value: object, raw: bytes, label: str) -> None:
+    """Go codingcontract canonical bytes: sorted compact JSON plus a newline.
+
+    Profiles are ASCII without HTML characters, so Go's HTML escaping and
+    Platform's coding_canonical_json_bytes agree on these bytes.
+    """
+
+    require(
+        raw.isascii() and not re.search(rb"[<>&\x00-\x1f\x7f]", raw[:-1]),
+        f"{label} has characters outside its canonical form",
+    )
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    require((encoded + "\n").encode() == raw, f"{label} is not canonical JSON")
+
+
+def _resource_policy(value: object, label: str) -> dict[str, Any]:
+    policy = closed(value, RESOURCE_POLICY_KEYS, f"{label} resource policy")
+    for name in ("CandidateLimits", "ProtectedLimits"):
+        limits = closed(policy[name], LIMIT_KEYS, f"{label} limits")
+        require(
+            all(is_int(item, 1) for item in limits.values()),
+            f"{label} limits are malformed",
+        )
+    require(
+        is_int(policy["MaxCombinedDiskBytes"], 1, 8 << 30)
+        and is_int(policy["MemoryLimitBytes"], 256 << 20, 64 << 30)
+        and is_int(policy["ScratchLimitBytes"], 1, 8 << 30)
+        and is_int(policy["PidsLimit"], 1, 4096)
+        and is_int(policy["CPUQuotaMillis"], 100, 64000),
+        f"{label} resource policy is outside hard bounds",
+    )
+    return policy
+
+
+def parse_execution_profile(raw: bytes) -> dict[str, Any]:
+    value = closed(
+        parse_json(raw, "execution profile"),
+        EXECUTION_PROFILE_KEYS,
+        "execution profile",
+    )
+    _go_canonical(value, raw, "execution profile")
+    require(
+        value["schema"] == EXECUTION_PROFILE_SCHEMA
+        and type(value["image_digest"]) is str
+        and value["image_digest"].startswith("sha256:")
+        and is_digest(value["image_digest"][7:]),
+        "execution profile identity is malformed",
+    )
+    policy = _resource_policy(value["resource_policy"], "execution profile")
+    budgets = closed(value["budgets"], BUDGET_KEYS, "execution profile budgets")
+    require(
+        all(is_int(item, 1) for item in budgets.values())
+        and budgets["wall_time_seconds"] <= 3600,
+        "execution profile budgets are malformed",
+    )
+    return {"sha256": sha256(raw), "policy": policy}
+
+
+def _command_timeout_ms(value: object, label: str) -> int:
+    command = closed(value, {"ID", "Argv", "Timeout"}, f"{label} command")
+    require(
+        type(command["ID"]) is str
+        and IDENTIFIER.fullmatch(command["ID"]) is not None
+        and type(command["Argv"]) is list
+        and 0 < len(command["Argv"]) <= 64
+        and all(type(item) is str for item in command["Argv"])
+        and is_int(command["Timeout"], 1_000_000, 600_000_000_000)
+        and command["Timeout"] % 1_000_000 == 0,
+        f"{label} command is malformed",
+    )
+    return command["Timeout"] // 1_000_000
+
+
+def parse_grading_profile(raw: bytes) -> dict[str, Any]:
+    value = parse_json(raw, "grading profile")
+    # Main still carries test_manifest_sha256; the hosted-v2 profile work drops it.
+    require(
+        type(value) is dict
+        and set(value)
+        in (GRADING_PROFILE_KEYS, GRADING_PROFILE_KEYS | {"test_manifest_sha256"}),
+        "grading profile keys are not the closed set",
+    )
+    _go_canonical(value, raw, "grading profile")
+    require(
+        value["schema"] == GRADING_PROFILE_SCHEMA
+        and type(value["image_digest"]) is str
+        and value["image_digest"].startswith("sha256:")
+        and is_digest(value["image_digest"][7:])
+        and is_int(value["execution_timeout"], 1_000_000, 3_600_000_000_000)
+        and value["execution_timeout"] % 1_000_000 == 0,
+        "grading profile identity is malformed",
+    )
+    policy = _resource_policy(value["resource_policy"], "grading profile")
+    build = closed(value["build"], {"Required", "Command"}, "grading profile build")
+    require(type(build["Required"]) is bool, "grading profile build is malformed")
+    _command_timeout_ms(build["Command"], "grading profile build")
+    groups = value["test_groups"]
+    require(
+        type(groups) is list and len(groups) == len(HOSTED_TEST_GROUPS),
+        "grading profile test groups are malformed",
+    )
+    timeouts = {}
+    for group, name in zip(groups, HOSTED_TEST_GROUPS, strict=True):
+        group = closed(group, {"Group", "Command", "ExpectedTotal"}, "test group")
+        require(
+            same(group["Group"], name) and is_int(group["ExpectedTotal"], 1, 1_000_000),
+            "grading profile test groups are malformed",
+        )
+        timeouts[name] = _command_timeout_ms(group["Command"], "grading test group")
+    return {"sha256": sha256(raw), "policy": policy, "group_timeouts_ms": timeouts}
+
+
+def _endpoint_sha256(profile_sha256: str, label: str, address: str, port: int) -> str:
+    return sha256(
+        b"\x00".join(
+            (
+                ENDPOINT_DOMAIN,
+                profile_sha256.encode(),
+                label.encode(),
+                f"{address}:{port}".encode(),
+            )
+        )
+    )
+
+
+def _endpoint_pairs(value: object, label: str, *, maximum: int) -> list[tuple]:
+    require(
+        type(value) is list and len(value) <= maximum,
+        f"connectivity {label} is malformed",
+    )
+    assert isinstance(value, list)
+    pairs = []
+    for item in value:
+        item = closed(item, {"address", "port"}, f"connectivity {label} entry")
+        address, port = item["address"], item["port"]
+        require(
+            type(address) is str and is_int(port, 1, 65535),
+            f"connectivity {label} entry is malformed",
+        )
+        try:
+            ip = ipaddress.IPv4Address(address)
+        except ValueError:
+            raise Refusal(f"connectivity {label} entry is malformed") from None
+        require(
+            str(ip) == address
+            and not (
+                ip.is_multicast
+                or ip.is_unspecified
+                or ip.is_link_local
+                or ip.is_reserved
+            ),
+            f"connectivity {label} entry is malformed",
+        )
+        if label == "trusted_dns":
+            require(port == 53, "connectivity trusted_dns entry is malformed")
+        if label == "candidate_tcp":
+            require(ip.is_private and port >= 1024, "connectivity candidate is public")
+        require((address, port) not in pairs, f"connectivity {label} repeats")
+        pairs.append((address, port))
+    return sorted(pairs)
+
+
+def parse_connectivity_profile(raw: bytes) -> dict[str, Any]:
+    """The worker connectivity profile; only derived hashes ever leave here."""
+
+    value = closed(
+        parse_json(raw, "connectivity profile"),
+        CONNECTIVITY_KEYS,
+        "connectivity profile",
+    )
+    require(
+        value["schema"] in CONNECTIVITY_SCHEMAS
+        and value["shadow_only"] is True
+        and value["weight_eligible"] is False
+        and type(value["trusted_loopback_tcp"]) is bool
+        and is_int(value["issued_at_unix"], 1)
+        and is_int(value["expires_at_unix"], 1)
+        and 0 < value["expires_at_unix"] - value["issued_at_unix"] <= 86400,
+        "connectivity profile identity is malformed",
+    )
+    digest = canonical_sha256(value)
+    trusted = _endpoint_pairs(value["trusted_tcp"], "trusted_tcp", maximum=32)
+    dns = _endpoint_pairs(value["trusted_dns"], "trusted_dns", maximum=2)
+    candidate = _endpoint_pairs(value["candidate_tcp"], "candidate_tcp", maximum=2)
+    # Peyton, 2026-09-15: the refusing proxy is running and listed beside the
+    # router, so the candidate list holds exactly those two endpoints.
+    require(bool(trusted), "connectivity profile lists no trusted endpoint")
+    require(len(candidate) == 2, "connectivity profile must list router and proxy")
+    return {
+        "sha256": digest,
+        "endpoints": {
+            "trusted": sorted(
+                _endpoint_sha256(digest, "trusted_tcp", *pair) for pair in trusted
+            ),
+            "trusted_dns": sorted(
+                _endpoint_sha256(digest, "trusted_dns", *pair) for pair in dns
+            ),
+            "candidate": sorted(
+                _endpoint_sha256(digest, "candidate_tcp", *pair) for pair in candidate
+            ),
+        },
+    }
+
+
+def load_profiles(paths: dict[str, Path | None]) -> dict[str, dict[str, Any]]:
+    parsers: dict[str, tuple[Callable[[bytes], dict[str, Any]], int]] = {
+        "connectivity_profile_sha256": (parse_connectivity_profile, MAX_CONNECTIVITY),
+        "execution_profile_sha256": (parse_execution_profile, MAX_PROFILE),
+        "grading_profile_sha256": (parse_grading_profile, MAX_PROFILE),
+    }
+    result = {}
+    for name, path in paths.items():
+        if path is not None:
+            parser, maximum = parsers[name]
+            label = name.removesuffix("_sha256").replace("_", " ")
+            result[name] = parser(read_input(path, maximum, label))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Probe catalog and expectation semantics
 
@@ -551,6 +1023,7 @@ def _validate_expect(expect: object, outcomes: set[str], label: str) -> None:
         require(
             type(accept) is list
             and bool(accept)
+            and all(type(item) is str for item in accept)
             and accept == sorted(set(accept))
             and set(accept) <= outcomes,
             f"{label} accepted outcomes are malformed",
@@ -580,37 +1053,89 @@ def _validate_expect(expect: object, outcomes: set[str], label: str) -> None:
         )
     elif kind == "supervisor_timeout":
         require(
-            expect["tolerance"] == "timeout_elapsed_max_permille_of_deadline",
+            same(expect["tolerance"], "timeout_elapsed_max_permille_of_deadline"),
             f"{label} tolerance is unknown",
         )
-    elif kind == "tests":
+    elif kind == "control":
         require(
-            expect["result"] in ("all_pass", "some_fail"), f"{label} result unknown"
+            type(expect["result"]) is str
+            and expect["result"] in ("all_pass", "some_fail", "timeout"),
+            f"{label} result unknown",
         )
+    elif kind == "subordinate_ids":
+        require(
+            is_int(expect["uid"], 1, SUBORDINATE_MIN_COUNT - 1)
+            and is_int(expect["gid"], 1, SUBORDINATE_MIN_COUNT - 1),
+            f"{label} candidate ids are malformed",
+        )
+
+
+def _validate_bind(probe: dict[str, Any], kind: str) -> None:
+    bind = probe["bind"]
+    require(type(bind) is dict, f"{probe['id']} bind is malformed")
+    field = BIND_FIELDS.get(probe["expect"]["type"])
+    if kind != "resource_enforcement" or field is None:
+        require(not bind, f"{probe['id']} must not bind limits")
+        return
+    container = probe["id"].split(".")[0]
+    require(container in RESOURCE_CONTAINERS, f"{probe['id']} container is unknown")
+    closed(bind, {field}, f"{probe['id']} bind")
+    source = bind[field]
+    require(
+        type(source) is str and source in BIND_SOURCES,
+        f"{probe['id']} bind source is unknown",
+    )
+    require(
+        (source == "command_timeout_ms")
+        == (probe["expect"]["type"] == "supervisor_timeout"),
+        f"{probe['id']} bind source does not fit its type",
+    )
+    require(
+        source != "command_timeout_ms"
+        or RESOURCE_CONTAINERS[container]["profile"] == "grading_profile_sha256",
+        f"{probe['id']} has no approved command timeout",
+    )
 
 
 def load_catalog(raw: bytes) -> dict[str, Any]:
     catalog = closed(parse_json(raw, "catalog"), CATALOG_KEYS, "catalog")
-    require(catalog["schema"] == CATALOG_SCHEMA, "catalog schema is unknown")
-    require(catalog["record_schema"] == RECORD_SCHEMA, "catalog record schema differs")
-    require(catalog["review_schema"] == REVIEW_SCHEMA, "catalog review schema differs")
-    require(catalog["languages"] == list(LANGUAGES), "catalog languages differ")
+    require(same(catalog["schema"], CATALOG_SCHEMA), "catalog schema is unknown")
     require(
-        catalog["router_namespaces"] == list(ROUTER_NAMESPACES),
+        same(catalog["record_schema"], RECORD_SCHEMA), "catalog record schema differs"
+    )
+    require(
+        same(catalog["review_schema"], REVIEW_SCHEMA), "catalog review schema differs"
+    )
+    require(same(catalog["languages"], list(LANGUAGES)), "catalog languages differ")
+    require(
+        same(catalog["router_namespaces"], list(ROUTER_NAMESPACES)),
         "catalog router namespaces differ",
     )
-    require(catalog["coverage"] == COVERAGE, "catalog coverage differs")
-    require(catalog["not_covered"] == list(NOT_COVERED), "catalog not_covered differs")
+    require(same(catalog["coverage"], COVERAGE), "catalog coverage differs")
     require(
-        catalog["freshness_max_seconds"] == FRESHNESS_SECONDS,
+        same(catalog["not_covered"], list(NOT_COVERED)), "catalog not_covered differs"
+    )
+    require(
+        same(catalog["freshness_max_seconds"], FRESHNESS_SECONDS),
         "catalog freshness differs",
     )
-    require(catalog["tolerances"] == TOLERANCES, "catalog tolerances differ")
+    require(
+        same(
+            catalog["pre_collection_preflight_max_age_seconds"],
+            PRE_COLLECTION_PREFLIGHT_MAX_AGE_SECONDS,
+        ),
+        "catalog preflight age differs",
+    )
+    require(
+        same(catalog["resource_containers"], RESOURCE_CONTAINERS),
+        "catalog resource containers differ",
+    )
+    require(same(catalog["tolerances"], TOLERANCES), "catalog tolerances differ")
     outcomes = catalog["outcomes"]
     require(
         type(outcomes) is list
-        and outcomes == sorted(set(outcomes))
-        and all(type(item) is str and NAME.fullmatch(item) for item in outcomes),
+        and all(type(item) is str and NAME.fullmatch(item) for item in outcomes)
+        and outcomes == sorted(set(outcomes)),
         "catalog outcomes are malformed",
     )
     kinds = catalog["kinds"]
@@ -621,11 +1146,10 @@ def load_catalog(raw: bytes) -> dict[str, Any]:
         )
         require(
             type(entry["inputs"]) is list
-            and entry["inputs"] == sorted(set(entry["inputs"]))
             and all(
-                type(name) is str and NAME.fullmatch(name) and name.endswith("_sha256")
-                for name in entry["inputs"]
-            ),
+                type(name) is str and name in PROFILE_INPUTS for name in entry["inputs"]
+            )
+            and entry["inputs"] == sorted(set(entry["inputs"])),
             f"{kind} inputs are malformed",
         )
         roles = entry["endpoint_roles"]
@@ -634,16 +1158,16 @@ def load_catalog(raw: bytes) -> dict[str, Any]:
             bounds = closed(bounds, {"min", "max"}, f"{kind} endpoint role")
             require(
                 NAME.fullmatch(role) is not None
-                and is_int(bounds["min"], 1)
-                and is_int(bounds["max"], bounds["min"]),
+                and is_int(bounds["min"], 0)
+                and is_int(bounds["max"], max(1, bounds["min"])),
                 f"{kind} endpoint role is malformed",
             )
         phases = entry["phases"]
         require(
             type(phases) is list
             and bool(phases)
-            and len(set(phases)) == len(phases)
-            and all(type(name) is str and NAME.fullmatch(name) for name in phases),
+            and all(type(name) is str and NAME.fullmatch(name) for name in phases)
+            and len(set(phases)) == len(phases),
             f"{kind} phases are malformed",
         )
         probes = entry["probes"]
@@ -651,7 +1175,9 @@ def load_catalog(raw: bytes) -> dict[str, Any]:
         seen = set()
         used_phases = set()
         for probe in probes:
-            probe = closed(probe, {"id", "phase", "scope", "expect"}, f"{kind} probe")
+            probe = closed(
+                probe, {"id", "phase", "scope", "expect", "bind"}, f"{kind} probe"
+            )
             require(
                 type(probe["id"]) is str
                 and PROBE_ID.fullmatch(probe["id"]) is not None
@@ -673,6 +1199,7 @@ def load_catalog(raw: bytes) -> dict[str, Any]:
                 f"{probe['id']} needs trusted endpoints",
             )
             _validate_expect(probe["expect"], set(outcomes), probe["id"])
+            _validate_bind(probe, kind)
         require(used_phases == set(phases), f"{kind} has a phase without probes")
     return catalog
 
@@ -697,8 +1224,7 @@ def evaluate(
         expected = expect["value"]
         value = closed(observed, set(expected), "observed")
         for key, item in value.items():
-            want = expected[key]
-            if type(want) is list:
+            if type(expected[key]) is list:
                 require(
                     type(item) is list
                     and all(
@@ -709,10 +1235,11 @@ def evaluate(
                 )
             else:
                 require(
-                    type(item) is type(want) and (type(item) is bool or is_int(item)),
+                    type(item) is type(expected[key])
+                    and (type(item) is bool or is_int(item)),
                     "observed value is malformed",
                 )
-        return value == expected
+        return same(value, expected)
     if kind == "profile_equal":
         value = closed(observed, {"cgroup", "profile"}, "observed")
         require(
@@ -739,11 +1266,14 @@ def evaluate(
     if kind == "supervisor_timeout":
         value = closed(
             observed,
-            {"deadline_ms", "elapsed_ms", "exit_code", "live_processes"},
+            {"deadline_ms", "elapsed_ms", "exit_code", "live_processes", "test_group"},
             "observed",
         )
         require(
-            all(is_int(item) for item in value.values()) and value["exit_code"] <= 255,
+            all(is_int(value[name]) for name in value if name != "test_group")
+            and value["exit_code"] <= 255
+            and type(value["test_group"]) is str
+            and value["test_group"] in HOSTED_TEST_GROUPS,
             "observed value is malformed",
         )
         permille = TOLERANCES[expect["tolerance"]]
@@ -755,25 +1285,74 @@ def evaluate(
             and value["elapsed_ms"] >= value["deadline_ms"]
             and value["elapsed_ms"] * 1000 <= value["deadline_ms"] * permille
         )
-    if kind == "tests":
-        value = closed(observed, {"passed", "total"}, "observed")
+    if kind == "control":
+        value = closed(
+            observed, {"passed", "suite_sha256", "timed_out", "total"}, "observed"
+        )
         require(
             is_int(value["passed"])
             and is_int(value["total"])
-            and value["passed"] <= value["total"],
+            and value["passed"] <= value["total"]
+            and is_digest(value["suite_sha256"])
+            and type(value["timed_out"]) is bool,
             "observed value is malformed",
         )
-        if value["total"] == 0:
-            return False  # an empty suite never proves anything
+        if expect["result"] == "timeout":
+            return value["timed_out"] is True
+        # A suite of fewer than two tests, or a wrong control that passes no
+        # test, is what a crashed grader also reports; neither proves anything.
+        if value["timed_out"] or value["total"] < 2:
+            return False
         if expect["result"] == "all_pass":
             return value["passed"] == value["total"]
-        return value["passed"] < value["total"]
-    if kind == "subordinate_uid":
-        value = closed(observed, {"host_uid"}, "observed")
-        require(is_int(value["host_uid"]), "observed value is malformed")
-        start, count = subordinate["uid_start"], subordinate["uid_count"]
-        return value["host_uid"] != 0 and start <= value["host_uid"] < start + count
+        return 1 <= value["passed"] < value["total"]
+    if kind == "subordinate_ids":
+        value = closed(observed, {"host_gid", "host_uid"}, "observed")
+        require(
+            is_int(value["host_uid"]) and is_int(value["host_gid"]),
+            "observed value is malformed",
+        )
+        return (
+            expect["uid"] < subordinate["uid_count"]
+            and expect["gid"] < subordinate["gid_count"]
+            and value["host_uid"] == subordinate["uid_start"] + expect["uid"] - 1
+            and value["host_gid"] == subordinate["gid_start"] + expect["gid"] - 1
+        )
     raise Refusal("expect type is unknown")
+
+
+def resolve_bind(
+    source: str,
+    container: str,
+    language: str,
+    observed: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+) -> int:
+    """The approved value a resource probe must report, never the record's own."""
+
+    spec = RESOURCE_CONTAINERS[container]
+    if source in ("nofile_limit", "log_limit_bytes"):
+        value = spec[source]
+        assert isinstance(value, int)
+        return value
+    profile_name = spec["profile"]
+    assert isinstance(profile_name, str)
+    require(profile_name in profiles, f"record needs the {profile_name} document")
+    profile = profiles[profile_name]
+    policy = profile["policy"]
+    if source == "memory_limit_bytes":
+        return policy["MemoryLimitBytes"]
+    if source == "cpu_quota_millis":
+        return policy["CPUQuotaMillis"]
+    if source == "pids_limit":
+        return policy["PidsLimit"]
+    if source == "scratch_limit_bytes":
+        limit = policy["ScratchLimitBytes"]
+        if spec["scratch"] == "executor" and language == "rust":
+            return limit - min(limit // 2, 128 << 20)
+        return limit
+    require(source == "command_timeout_ms", "bind source is unknown")
+    return profile["group_timeouts_ms"][observed["test_group"]]
 
 
 # ---------------------------------------------------------------------------
@@ -791,10 +1370,10 @@ def parse_preflight(raw: bytes, checkout: Checkout | None) -> dict[str, Any]:
         (json.dumps(value, sort_keys=True) + "\n").encode() == raw,
         "host preflight is not verbatim preflight stdout",
     )
-    require(value["schema"] == PREFLIGHT_SCHEMA, "host preflight schema is unknown")
+    require(same(value["schema"], PREFLIGHT_SCHEMA), "host preflight schema is unknown")
     require(value["host_preflight_passed"] is True, "host preflight did not pass")
     require(
-        value["pending_host_qualification"] == PREFLIGHT_PENDING,
+        same(value["pending_host_qualification"], PREFLIGHT_PENDING),
         "host preflight pending list differs",
     )
     require(
@@ -854,7 +1433,7 @@ def parse_custody_binding(raw: bytes) -> dict[str, Any]:
     value = closed(
         parse_canonical(raw, "custody binding"), CUSTODY_KEYS, "custody binding"
     )
-    require(value["schema"] == CUSTODY_SCHEMA, "custody binding schema is unknown")
+    require(same(value["schema"], CUSTODY_SCHEMA), "custody binding schema is unknown")
     require(
         is_digest(value["custody_evidence_sha256"])
         and is_digest(value["machine_id_sha256"])
@@ -874,7 +1453,7 @@ def parse_record_envelope(raw: bytes) -> dict[str, Any]:
     """Catalog-free structure: canonical bytes, schema, closed keys and kind."""
 
     value = closed(parse_canonical(raw, "record"), RECORD_KEYS, "record")
-    require(value["schema"] == RECORD_SCHEMA, "record schema is unknown")
+    require(same(value["schema"], RECORD_SCHEMA), "record schema is unknown")
     require(
         type(value["kind"]) is str and value["kind"] in KINDS, "record kind is unknown"
     )
@@ -898,15 +1477,14 @@ def _host(value: object, catalog: dict[str, Any]) -> dict[str, Any]:
         "record router namespace is unknown",
     )
     ids = closed(host["subordinate_ids"], SUBORDINATE_KEYS, "subordinate ids")
-    require(
-        is_int(ids["uid_start"], 1)
-        and is_int(ids["gid_start"], 1)
-        and is_int(ids["uid_count"], 65536)
-        and is_int(ids["gid_count"], 65536)
-        and ids["uid_start"] + ids["uid_count"] <= 1 << 32
-        and ids["gid_start"] + ids["gid_count"] <= 1 << 32,
-        "subordinate ids are malformed",
-    )
+    for prefix in ("uid", "gid"):
+        start, count = ids[f"{prefix}_start"], ids[f"{prefix}_count"]
+        require(
+            is_int(start, SUBORDINATE_MIN_START)
+            and is_int(count, SUBORDINATE_MIN_COUNT)
+            and start + count <= 1 << 32,
+            "subordinate ids are malformed",
+        )
     return host
 
 
@@ -930,12 +1508,15 @@ def _release(value: object) -> dict[str, Any]:
     return release
 
 
-def _endpoints(value: object, entry: dict[str, Any]) -> list[str]:
+def _endpoints(
+    value: object, entry: dict[str, Any], profiles: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Endpoints must be exactly the hashes derived from the connectivity profile."""
+
     require(type(value) is list, "record endpoints are malformed")
     assert isinstance(value, list)
     roles = entry["endpoint_roles"]
-    counts = dict.fromkeys(roles, 0)
-    hashes = []
+    grouped: dict[str, list[str]] = {role: [] for role in roles}
     keys = []
     for item in value:
         endpoint = closed(item, ENDPOINT_KEYS, "record endpoint")
@@ -944,21 +1525,31 @@ def _endpoints(value: object, entry: dict[str, Any]) -> list[str]:
             "record endpoint role is not allowed",
         )
         require(is_digest(endpoint["endpoint_sha256"]), "endpoint hash is malformed")
-        counts[endpoint["role"]] += 1
-        hashes.append(endpoint["endpoint_sha256"])
+        grouped[endpoint["role"]].append(endpoint["endpoint_sha256"])
         keys.append((endpoint["role"], endpoint["endpoint_sha256"]))
     require(keys == sorted(keys), "record endpoints are not sorted")
+    hashes = [key[1] for key in keys]
     require(len(set(hashes)) == len(hashes), "record endpoint hash is repeated")
     for role, bounds in roles.items():
         require(
-            bounds["min"] <= counts[role] <= bounds["max"],
+            bounds["min"] <= len(grouped[role]) <= bounds["max"],
             f"record needs {bounds['min']}..{bounds['max']} {role} endpoints",
         )
-    return [
-        item["endpoint_sha256"]
-        for item in value
-        if type(item) is dict and item.get("role") == "trusted"
-    ]
+    if not roles:
+        return []
+    name = "connectivity_profile_sha256"
+    require(name in profiles, f"record needs the {name} document")
+    derived = profiles[name]["endpoints"]
+    require(
+        same(grouped["trusted"], derived["trusted"])
+        and same(grouped["trusted_dns"], derived["trusted_dns"]),
+        "record trusted endpoints differ from the connectivity profile",
+    )
+    require(
+        sorted(grouped["router"] + grouped["refusing_proxy"]) == derived["candidate"],
+        "record router and proxy differ from the connectivity profile",
+    )
+    return grouped["trusted"]
 
 
 Instance = tuple[str, str | None, str | None]
@@ -984,6 +1575,24 @@ def _order_key(probe: dict[str, Any]) -> tuple[str, str, str]:
     return (probe["id"], probe["language"] or "", probe["endpoint_sha256"] or "")
 
 
+def _controls(observations: dict[Instance, Any]) -> None:
+    """Pass, wrong and hang controls come from one suite per language image."""
+
+    for language in LANGUAGES:
+        passed = observations[("control.pass", language, None)]
+        wrong = observations[("control.wrong", language, None)]
+        hang = observations[("control.hang", language, None)]
+        require(
+            same(passed["suite_sha256"], wrong["suite_sha256"])
+            and same(passed["suite_sha256"], hang["suite_sha256"]),
+            f"{language} controls come from different suites",
+        )
+        require(
+            same(passed["total"], wrong["total"]),
+            f"{language} wrong control ran a different test count",
+        )
+
+
 def verify_record(
     raw: bytes,
     *,
@@ -991,6 +1600,7 @@ def verify_record(
     tools: dict[str, str],
     store: Store,
     checkout: Checkout,
+    profiles: dict[str, dict[str, Any]],
     host_preflight: dict[str, Any],
     host_preflight_sha256: str,
 ) -> dict[str, Any]:
@@ -1000,24 +1610,31 @@ def verify_record(
     kind = record["kind"]
     entry = catalog["kinds"][kind]
     require(
-        record["coverage"] == COVERAGE and record["not_covered"] == list(NOT_COVERED),
+        same(record["coverage"], COVERAGE)
+        and same(record["not_covered"], list(NOT_COVERED)),
         "record claims coverage beyond the same boot",
     )
     require(
-        record["tolerances_version"] == TOLERANCES["version"],
+        same(record["tolerances_version"], TOLERANCES["version"]),
         "record tolerances version differs",
     )
     host = _host(record["host"], catalog)
     release = _release(record["release"])
     inputs = closed(record["inputs"], set(entry["inputs"]), "record inputs")
-    require(all(is_digest(item) for item in inputs.values()), "record input malformed")
-    trusted = _endpoints(record["endpoints"], entry)
+    for name, value in inputs.items():
+        require(is_digest(value), "record input malformed")
+        require(name in profiles, f"record needs the {name} document")
+        require(
+            same(value, profiles[name]["sha256"]),
+            f"record {name} differs from the supplied document",
+        )
+    trusted = _endpoints(record["endpoints"], entry, profiles)
     require(
-        closed(record["tools"], TOOL_KEYS, "record tools") == tools,
+        same(closed(record["tools"], TOOL_KEYS, "record tools"), tools),
         "record tool hashes differ from the reviewed checkout",
     )
-    require(record["preconditions"] == PRECONDITIONS, "record preconditions failed")
-    require(record["residue"] == RESIDUE, "record residue is not empty")
+    require(same(record["preconditions"], PRECONDITIONS), "record preconditions failed")
+    require(same(record["residue"], RESIDUE), "record residue is not empty")
     started, completed = record["started_at_unix"], record["completed_at_unix"]
     require(
         is_int(started, 1) and is_int(completed, 1), "record timestamps are malformed"
@@ -1026,13 +1643,16 @@ def verify_record(
     phases = record["phases"]
     require(type(phases) is list, "record phases are malformed")
     require(
-        [phase.get("name") if type(phase) is dict else None for phase in phases]
-        == entry["phases"],
+        same(
+            [phase.get("name") if type(phase) is dict else None for phase in phases],
+            entry["phases"],
+        ),
         "record phases differ from the catalog order",
     )
     required = _required_instances(entry, trusted)
     outcomes = set(catalog["outcomes"])
     seen: set[Instance] = set()
+    observations: dict[Instance, Any] = {}
     unmatched: list[str] = []
     cursor = started
     for phase in phases:
@@ -1069,11 +1689,11 @@ def verify_record(
             seen.add(key)
             definition = required[key]
             require(
-                definition["phase"] == phase["name"],
+                same(definition["phase"], phase["name"]),
                 f"probe {probe['id']} is in the wrong phase",
             )
             require(
-                probe["expect"] == definition["expect"],
+                same(probe["expect"], definition["expect"]),
                 f"probe {probe['id']} expectation differs from the catalog",
             )
             require(type(probe["matched"]) is bool, "record matched is not a boolean")
@@ -1086,10 +1706,23 @@ def verify_record(
                 )
             except Refusal as error:
                 raise Refusal(f"probe {probe['id']} {error}") from None
+            for field, source in definition["bind"].items():
+                expected = resolve_bind(
+                    source,
+                    probe["id"].split(".")[0],
+                    probe["language"],
+                    probe["observed"],
+                    profiles,
+                )
+                require(
+                    same(probe["observed"][field], expected),
+                    f"probe {probe['id']} {field} differs from the approved profile",
+                )
             require(
                 probe["matched"] is matched,
                 f"probe {probe['id']} matched value is misreported",
             )
+            observations[key] = probe["observed"]
             if not matched:
                 unmatched.append(probe["id"])
         require(
@@ -1101,6 +1734,8 @@ def verify_record(
     missing = sorted({key[0] for key in required.keys() - seen})
     require(not missing, f"record is missing probe {missing[0] if missing else ''}")
     require(not unmatched, f"probe {unmatched[0] if unmatched else ''} did not match")
+    if kind == "preexec_confinement":
+        _controls(observations)
 
     require(
         record["pre_collection_preflight_sha256"] != host_preflight_sha256,
@@ -1111,28 +1746,38 @@ def verify_record(
     )
     for preflight, label in ((pre, "pre-collection"), (host_preflight, "host")):
         require(
-            preflight["host"]["machine_id_sha256"] == host["machine_id_sha256"],
+            same(preflight["host"]["machine_id_sha256"], host["machine_id_sha256"]),
             f"{label} preflight machine differs",
         )
         require(
-            preflight["host"]["boot_id"] == host["boot_id"],
+            same(preflight["host"]["boot_id"], host["boot_id"]),
             f"{label} preflight boot differs",
         )
         require(
-            preflight["host"]["kernel_release"] == host["kernel_release"],
+            same(preflight["host"]["kernel_release"], host["kernel_release"]),
             f"{label} preflight kernel differs",
         )
         require(
-            preflight["daemon_identity_sha256"] == host["daemon_identity_sha256"],
+            same(preflight["daemon_identity_sha256"], host["daemon_identity_sha256"]),
             f"{label} preflight daemon differs",
         )
         for name in RELEASE_KEYS:
             require(
-                preflight[name] == release[name], f"{label} preflight {name} differs"
+                same(preflight[name], release[name]),
+                f"{label} preflight {name} differs",
             )
+    for name in ("nft_snapshot_sha256", "config_sha256"):
+        require(
+            same(pre[name], host_preflight[name]),
+            f"pre-collection preflight {name} differs from the host preflight",
+        )
     require(
         pre["checked_at_unix"] <= started,
         "pre-collection preflight is later than collection",
+    )
+    require(
+        started - pre["checked_at_unix"] <= PRE_COLLECTION_PREFLIGHT_MAX_AGE_SECONDS,
+        "pre-collection preflight is too old",
     )
     require(
         host_preflight["checked_at_unix"] >= completed,
@@ -1147,14 +1792,15 @@ def verify_record(
         "host": host,
         "release": release,
         "inputs": inputs,
+        "endpoints": record["endpoints"],
         "tools": record["tools"],
         "started_at_unix": started,
         "completed_at_unix": completed,
     }
 
 
-def consistency(summaries: list[dict[str, Any]]) -> None:
-    """All records share one machine, boot, daemon, release and router mode."""
+def consistency(summaries: list[dict[str, Any]], moments: list[int]) -> None:
+    """One machine, boot, daemon, release and router mode; ordered, fresh records."""
 
     if not summaries:
         return
@@ -1162,26 +1808,41 @@ def consistency(summaries: list[dict[str, Any]]) -> None:
     shared_inputs: dict[str, str] = {}
     for summary in summaries:
         require(
-            summary["host"]["router_namespace"] == first["host"]["router_namespace"],
+            same(
+                summary["host"]["router_namespace"], first["host"]["router_namespace"]
+            ),
             "records disagree on the router namespace",
         )
         require(
-            summary["host"]["subordinate_ids"] == first["host"]["subordinate_ids"],
+            same(summary["host"]["subordinate_ids"], first["host"]["subordinate_ids"]),
             "records disagree on subordinate ids",
         )
-        require(summary["host"] == first["host"], "records disagree on the host")
-        require(summary["release"] == first["release"], "records disagree on release")
-        require(summary["tools"] == first["tools"], "records disagree on tools")
+        require(same(summary["host"], first["host"]), "records disagree on the host")
+        require(
+            same(summary["release"], first["release"]), "records disagree on release"
+        )
+        require(same(summary["tools"], first["tools"]), "records disagree on tools")
         for name, value in summary["inputs"].items():
             require(
-                shared_inputs.setdefault(name, value) == value,
+                same(shared_inputs.setdefault(name, value), value),
                 f"records disagree on {name}",
             )
-    earliest = min(item["started_at_unix"] for item in summaries)
-    latest = max(item["completed_at_unix"] for item in summaries)
+    kinds = [summary["kind"] for summary in summaries]
+    require(len(set(kinds)) == len(kinds), "a record kind is repeated")
+    ordered = sorted(summaries, key=lambda summary: KINDS.index(summary["kind"]))
+    for previous, following in zip(ordered, ordered[1:], strict=False):
+        require(
+            previous["completed_at_unix"] < following["started_at_unix"],
+            f"{following['kind']} overlaps or precedes {previous['kind']}",
+        )
+    moments = [
+        *moments,
+        *(item["started_at_unix"] for item in summaries),
+        *(item["completed_at_unix"] for item in summaries),
+    ]
     require(
-        latest - earliest <= FRESHNESS_SECONDS,
-        "records span more than the freshness window",
+        max(moments) - min(moments) <= FRESHNESS_SECONDS,
+        "evidence spans more than the freshness window",
     )
 
 
@@ -1195,7 +1856,11 @@ def _context(checkout: Checkout) -> tuple[dict[str, Any], dict[str, str]]:
 
 
 def verify(
-    store: Store, checkout: Checkout, preflight_sha: str, record_shas: list[str]
+    store: Store,
+    checkout: Checkout,
+    preflight_sha: str,
+    record_shas: list[str],
+    profiles: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], bool]:
     catalog, tools = _context(checkout)
     host_preflight = parse_preflight(store.get(preflight_sha), checkout)
@@ -1209,6 +1874,7 @@ def verify(
                 tools=tools,
                 store=store,
                 checkout=checkout,
+                profiles=profiles,
                 host_preflight=host_preflight,
                 host_preflight_sha256=preflight_sha,
             )
@@ -1222,7 +1888,7 @@ def verify(
     try:
         require(bool(record_shas), "no records were supplied")
         require(len(set(record_shas)) == len(record_shas), "a record is repeated")
-        consistency(summaries)
+        consistency(summaries, [host_preflight["checked_at_unix"]])
         consistent: dict[str, Any] = {"verified": True, "failure": None}
     except (Refusal, *MALFORMED) as error:
         consistent = {"verified": False, "failure": reason(error)}
@@ -1243,11 +1909,15 @@ def verify(
 
 
 def review(
-    store: Store, checkout: Checkout, selection: dict[str, str]
+    store: Store,
+    checkout: Checkout,
+    selection: dict[str, str],
+    profiles: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], bool]:
     """Assemble the review. It carries no digest map unless everything verified."""
 
     require(set(selection) == set(EVIDENCE), "review needs all six evidence digests")
+    require(set(profiles) == set(PROFILE_INPUTS), "review needs all three profiles")
     catalog, tools = _context(checkout)
     verification: dict[str, dict[str, Any]] = {}
     summaries: dict[str, dict[str, Any]] = {}
@@ -1266,7 +1936,7 @@ def review(
             assert host_preflight is not None
             raw = store.get(selection[kind])
             require(
-                parse_record_envelope(raw)["kind"] == kind,
+                same(parse_record_envelope(raw)["kind"], kind),
                 f"record is not {kind}",
             )
             summaries[kind] = verify_record(
@@ -1275,6 +1945,7 @@ def review(
                 tools=tools,
                 store=store,
                 checkout=checkout,
+                profiles=profiles,
                 host_preflight=host_preflight,
                 host_preflight_sha256=selection["host_preflight"],
             )
@@ -1302,24 +1973,23 @@ def review(
         )
         assert host_preflight is not None and custody is not None
         ordered = [summaries[kind] for kind in KINDS]
-        consistency(ordered)
         host = ordered[0]["host"]
         require(
-            custody["machine_id_sha256"] == host["machine_id_sha256"],
+            same(custody["machine_id_sha256"], host["machine_id_sha256"]),
             "custody binding machine differs",
         )
-        require(custody["boot_id"] == host["boot_id"], "custody binding boot differs")
+        require(
+            same(custody["boot_id"], host["boot_id"]), "custody binding boot differs"
+        )
+        consistency(
+            ordered, [host_preflight["checked_at_unix"], custody["bound_at_unix"]]
+        )
         window = {
             "earliest_started_at_unix": min(s["started_at_unix"] for s in ordered),
             "latest_completed_at_unix": max(s["completed_at_unix"] for s in ordered),
             "host_preflight_checked_at_unix": host_preflight["checked_at_unix"],
             "custody_bound_at_unix": custody["bound_at_unix"],
         }
-        moments = list(window.values())
-        require(
-            max(moments) - min(moments) <= FRESHNESS_SECONDS,
-            "evidence spans more than the freshness window",
-        )
         consistent: dict[str, Any] = {"verified": True, "failure": None}
     except (Refusal, *MALFORMED) as error:
         consistent = {"verified": False, "failure": reason(error)}
@@ -1341,9 +2011,16 @@ def review(
     if ok:
         assert window is not None
         first = summaries[KINDS[0]]
+        endpoints = summaries["network_enforcement"]["endpoints"]
         result["evidence_sha256"] = dict(selection)
         result["host"] = first["host"]
         result["release"] = first["release"]
+        result["inputs"] = {name: profiles[name]["sha256"] for name in PROFILE_INPUTS}
+        result["endpoints"] = endpoints
+        result["endpoint_counts"] = {
+            role: sum(1 for item in endpoints if item["role"] == role)
+            for role in catalog["kinds"]["network_enforcement"]["endpoint_roles"]
+        }
         result["window"] = window
     return result, ok
 
@@ -1374,11 +2051,40 @@ def curator_public_key(raw: bytes) -> bytes:
     return der[len(SPKI_ED25519_PREFIX) :]
 
 
+def trusted_executable(path: Path) -> None:
+    """A root-owned executable that no other user can replace or edit."""
+
+    require(path.is_absolute(), "openssl path must be absolute")
+    try:
+        require(path.resolve() == path, "openssl path must be canonical")
+        info = path.lstat()
+        parents = [parent.lstat() for parent in path.parents]
+    except OSError:
+        raise Refusal("openssl is missing") from None
+    require(
+        stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+        "openssl must be a root-owned file not writable by others",
+    )
+    require(
+        all(
+            stat.S_ISDIR(parent.st_mode)
+            and parent.st_uid == 0
+            and not parent.st_mode & 0o022
+            for parent in parents
+        ),
+        "openssl ancestors must be root-owned and not writable by others",
+    )
+
+
 def _write_private(directory: Path, name: str, raw: bytes) -> Path:
     path = directory / name
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+    )
     with os.fdopen(fd, "wb") as stream:
         stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
     return path
 
 
@@ -1387,21 +2093,35 @@ def verify_ed25519(openssl: Path, key: bytes, message: bytes, signature: bytes) 
 
     This is the curator algorithm ``load_curator_signing_public_key`` and
     ``verify_profile_approval`` use: a PEM Ed25519 public key and a raw 64-byte
-    signature over the exact document bytes. OpenSSL only sees the validated
-    key, signature and message bytes copied into a private directory.
+    signature over the exact document bytes. The infra Python has neither
+    ``cryptography`` nor PyNaCl, so a trusted root-owned OpenSSL 3 checks them.
+    OpenSSL sees only the validated key, signature and message, written into a
+    fresh owner-only directory and re-read unchanged afterwards.
     """
 
     require(len(key) == 32, "curator public key must be Ed25519")
     require(len(signature) == SIGNATURE_BYTES, "curator signature is malformed")
-    require(openssl.is_absolute(), "openssl path must be absolute")
+    trusted_executable(openssl)
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
-    with tempfile.TemporaryDirectory(prefix="native-evidence-") as name:
-        directory = Path(name)
-        os.chmod(directory, 0o700)
-        pem = PEM_BEGIN + base64.b64encode(SPKI_ED25519_PREFIX + key) + PEM_END
-        key_path = _write_private(directory, "curator.pem", pem)
-        message_path = _write_private(directory, "approval.json", message)
-        signature_path = _write_private(directory, "approval.sig", signature)
+    pem = PEM_BEGIN + base64.b64encode(SPKI_ED25519_PREFIX + key) + PEM_END
+    directory = Path(tempfile.mkdtemp(prefix="native-evidence-"))
+    try:
+        info = directory.lstat()
+        require(
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and stat.S_IMODE(info.st_mode) == 0o700,
+            "signature workspace is not private",
+        )
+        _protected_ancestors(directory, "signature workspace")
+        inputs = {
+            "curator.pem": pem,
+            "approval.json": message,
+            "approval.sig": signature,
+        }
+        paths = {
+            name: _write_private(directory, name, raw) for name, raw in inputs.items()
+        }
         try:
             version = subprocess.run(
                 [str(openssl), "version"],
@@ -1423,12 +2143,12 @@ def verify_ed25519(openssl: Path, key: bytes, message: bytes, signature: bytes) 
                     "-verify",
                     "-pubin",
                     "-inkey",
-                    str(key_path),
+                    str(paths["curator.pem"]),
                     "-rawin",
                     "-in",
-                    str(message_path),
+                    str(paths["approval.json"]),
                     "-sigfile",
-                    str(signature_path),
+                    str(paths["approval.sig"]),
                 ],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -1439,33 +2159,50 @@ def verify_ed25519(openssl: Path, key: bytes, message: bytes, signature: bytes) 
             )
         except (OSError, subprocess.SubprocessError):
             raise Refusal("curator signature could not be checked") from None
+        for name, raw in inputs.items():
+            require(
+                read_input(paths[name], len(raw), "signature input") == raw,
+                "signature inputs changed while OpenSSL ran",
+            )
+        require(
+            result.returncode == 0
+            and result.stdout == b"Signature Verified Successfully\n",
+            "curator signature does not verify",
+        )
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def load_native_policy(checkout: Checkout, expected_sha256: object) -> Callable:
+    """native.py compiled from exactly the hashed bytes; no loader or pyc cache."""
+
+    source = checkout.read(NATIVE_BINDING_FILE)
     require(
-        result.returncode == 0
-        and result.stdout == b"Signature Verified Successfully\n",
-        "curator signature does not verify",
+        same(expected_sha256, sha256(source)),
+        "approval binding hash differs from the reviewed native.py",
     )
-
-
-def read_input(path: Path, maximum: int, label: str) -> bytes:
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    except OSError:
-        raise Refusal(f"{label} is missing") from None
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode), f"{label} is not a regular file")
-        require(info.st_size <= maximum, f"{label} is too large")
-        return stream.read(maximum + 1)
+    path = str(checkout.root / NATIVE_BINDING_FILE)
+    namespace: dict[str, Any] = {
+        "__name__": "native_controls_policy",
+        "__file__": path,
+        "__builtins__": builtins,
+    }
+    exec(compile(source, path, "exec", dont_inherit=True), namespace)
+    policy = namespace.get("policy")
+    require(callable(policy), "native.py has no policy")
+    assert callable(policy)
+    return policy
 
 
 def parse_review(raw: bytes) -> dict[str, Any]:
     value = parse_canonical(raw, "review")
     require(type(value) is dict, "review must be an object")
     require(set(value) == REVIEW_PASS_KEYS, "review did not verify every record")
-    require(value["schema"] == REVIEW_SCHEMA, "review schema is unknown")
+    require(same(value["schema"], REVIEW_SCHEMA), "review schema is unknown")
     require(value["approval_generated"] is False, "review claims to generate approval")
     require(
-        value["coverage"] == COVERAGE and value["not_covered"] == list(NOT_COVERED),
+        same(value["coverage"], COVERAGE)
+        and same(value["not_covered"], list(NOT_COVERED)),
         "review claims coverage beyond the same boot",
     )
     require(value["verified"] is True, "review did not verify")
@@ -1484,6 +2221,8 @@ def check_approval(
     *,
     store: Store,
     checkout: Checkout,
+    profiles: dict[str, dict[str, Any]],
+    profile_pins: dict[str, str],
     review_raw: bytes,
     approval_raw: bytes,
     signature: bytes,
@@ -1501,34 +2240,37 @@ def check_approval(
     verify_ed25519(openssl, key, approval_raw, signature)
 
     claimed = parse_review(review_raw)
-    rebuilt, ok = review(store, checkout, claimed["evidence_sha256"])
+    rebuilt, ok = review(store, checkout, claimed["evidence_sha256"], profiles)
     require(ok, "review evidence no longer verifies")
     require(
         canonical_bytes(rebuilt) == review_raw,
         "review differs from the evidence it names",
     )
+    # native.policy's closed approval shape cannot carry profile digests. They are
+    # bound through the record digests the approval names, and must also equal
+    # independently reviewed pins (for example the signed profile approval).
+    require(
+        set(profile_pins) == set(PROFILE_INPUTS)
+        and all(is_digest(item) for item in profile_pins.values()),
+        "profile pins are malformed",
+    )
+    for name in PROFILE_INPUTS:
+        require(
+            same(rebuilt["inputs"][name], profile_pins[name]),
+            f"review {name} differs from the reviewed pin",
+        )
 
     approval = parse_json(approval_raw, "approval")
     require(type(approval) is dict, "approval must be an object")
-    require(approval.get("schema") == APPROVAL_SCHEMA, "approval schema is unknown")
+    require(same(approval.get("schema"), APPROVAL_SCHEMA), "approval schema is unknown")
     require(
-        approval.get("binding_sha256") == checkout.file_sha256(NATIVE_BINDING_FILE),
-        "approval binding hash differs from the reviewed native.py",
-    )
-    require(
-        approval.get("runner_sha256") == checkout.file_sha256(NATIVE_RUNNER_FILE),
+        same(approval.get("runner_sha256"), checkout.file_sha256(NATIVE_RUNNER_FILE)),
         "approval runner hash differs from the reviewed run.py",
     )
-    spec = importlib.util.spec_from_file_location(
-        "native_controls_policy", checkout.root / NATIVE_BINDING_FILE
-    )
-    require(spec is not None and spec.loader is not None, "native.py cannot load")
-    assert spec is not None and spec.loader is not None
-    native = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(native)
+    policy = load_native_policy(checkout, approval.get("binding_sha256"))
     issued = approval.get("issued_at_unix")
     try:
-        native.policy(
+        policy(
             approval,
             source=approval.get("source_revision"),
             plan_sha=approval.get("plan_sha256"),
@@ -1539,29 +2281,33 @@ def check_approval(
         )
     except (ValueError, TypeError, KeyError, AttributeError):
         raise Refusal("approval is rejected by native.policy") from None
+    require(type(issued) is int, "approval is rejected by native.policy")
+    assert isinstance(issued, int)
 
     require(
-        approval["evidence_sha256"] == rebuilt["evidence_sha256"],
+        same(approval["evidence_sha256"], rebuilt["evidence_sha256"]),
         "approval evidence digests differ from the review",
     )
     host, release = rebuilt["host"], rebuilt["release"]
     require(
-        approval["machine_id_sha256"] == host["machine_id_sha256"],
+        same(approval["machine_id_sha256"], host["machine_id_sha256"]),
         "approval machine differs from the evidence",
     )
-    require(approval["boot_id"] == host["boot_id"], "approval boot differs")
+    require(same(approval["boot_id"], host["boot_id"]), "approval boot differs")
     require(
-        approval["source_revision"] == release["source_revision"],
+        same(approval["source_revision"], release["source_revision"]),
         "approval source revision differs",
     )
     require(
-        approval["release_manifest_sha256"] == release["release_manifest_sha256"],
+        same(approval["release_manifest_sha256"], release["release_manifest_sha256"]),
         "approval release manifest differs",
     )
     for language in LANGUAGES:
         require(
-            approval["images"][language]["approval_sha256"]
-            == release["image_approval_sha256"][language],
+            same(
+                approval["images"][language]["approval_sha256"],
+                release["image_approval_sha256"][language],
+            ),
             f"approval {language} image approval differs",
         )
     window = rebuilt["window"]
@@ -1583,12 +2329,20 @@ def check_approval(
         "curator_signing_key_sha256": curator_signing_key_sha256,
         "review_sha256": sha256(review_raw),
         "signature_sha256": sha256(signature),
+        "inputs": rebuilt["inputs"],
+        "endpoint_counts": rebuilt["endpoint_counts"],
         "consistent": True,
     }
 
 
 # ---------------------------------------------------------------------------
 # CLI
+
+
+def _profile_paths(args: argparse.Namespace) -> dict[str, Path | None]:
+    return {
+        name: getattr(args, name.removesuffix("_sha256")) for name in PROFILE_INPUTS
+    }
 
 
 def _retain(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
@@ -1605,23 +2359,31 @@ def _retain(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
 
 
 def _verify(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
+    profiles = load_profiles(_profile_paths(args))
     with Store(args.store) as store:
-        return verify(store, Checkout(args.checkout), args.host_preflight, args.record)
+        return verify(
+            store, Checkout(args.checkout), args.host_preflight, args.record, profiles
+        )
 
 
 def _review(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     selection = {name: getattr(args, name) for name in EVIDENCE}
+    profiles = load_profiles(_profile_paths(args))
     with Store(args.store) as store:
-        return review(store, Checkout(args.checkout), selection)
+        return review(store, Checkout(args.checkout), selection, profiles)
 
 
 def _check(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     signature = read_input(args.signature, SIGNATURE_BYTES, "curator signature")
+    profiles = load_profiles(_profile_paths(args))
+    pins = {name: getattr(args, name) for name in PROFILE_INPUTS}
     with Store(args.store) as store:
         return (
             check_approval(
                 store=store,
                 checkout=Checkout(args.checkout),
+                profiles=profiles,
+                profile_pins=pins,
                 review_raw=read_input(args.review, MAX_OBJECT, "review"),
                 approval_raw=read_input(args.approval, MAX_APPROVAL, "approval"),
                 signature=signature,
@@ -1632,6 +2394,14 @@ def _check(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
                 openssl=args.openssl,
             ),
             True,
+        )
+
+
+def _profile_arguments(command: argparse.ArgumentParser, *, required: bool) -> None:
+    for name in PROFILE_INPUTS:
+        flag = "--" + name.removesuffix("_sha256").replace("_", "-")
+        command.add_argument(
+            flag, dest=name.removesuffix("_sha256"), type=Path, required=required
         )
 
 
@@ -1654,6 +2424,7 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--checkout", type=Path, required=True)
     check.add_argument("--host-preflight", required=True)
     check.add_argument("--record", action="append", required=True)
+    _profile_arguments(check, required=False)
     check.set_defaults(handler=_verify)
 
     assemble = commands.add_parser("review", help="assemble the evidence review")
@@ -1661,6 +2432,7 @@ def parser() -> argparse.ArgumentParser:
     assemble.add_argument("--checkout", type=Path, required=True)
     for name in EVIDENCE:
         assemble.add_argument("--" + name.replace("_", "-"), dest=name, required=True)
+    _profile_arguments(assemble, required=True)
     assemble.set_defaults(handler=_review)
 
     approval = commands.add_parser(
@@ -1673,7 +2445,10 @@ def parser() -> argparse.ArgumentParser:
     approval.add_argument("--signature", type=Path, required=True)
     approval.add_argument("--curator-public-key", type=Path, required=True)
     approval.add_argument("--curator-signing-key-sha256", required=True)
-    approval.add_argument("--openssl", type=Path, default=Path("/usr/bin/openssl"))
+    _profile_arguments(approval, required=True)
+    for name in PROFILE_INPUTS:
+        approval.add_argument("--" + name.replace("_", "-"), dest=name, required=True)
+    approval.add_argument("--openssl", type=Path, default=DEFAULT_OPENSSL)
     approval.set_defaults(handler=_check)
     return root
 
@@ -1685,7 +2460,7 @@ def main(argv: list[str] | None = None) -> int:
     except Refusal as error:
         print(f"native enforcement evidence rejected: {error}", file=sys.stderr)
         return 1
-    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+    except (OSError, *MALFORMED):
         print("native enforcement evidence rejected", file=sys.stderr)
         return 1
     sys.stdout.buffer.write(canonical_bytes(output))
