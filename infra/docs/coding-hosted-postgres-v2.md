@@ -146,7 +146,7 @@ unset DITTO_CODING_PG_PASSWORD DITTO_CODING_PG_HOST
 ### Guarded entry point
 
 `infra/scripts/coding-hosted-guarded-run.py` is the only supported way to run
-this playbook. Direct `ansible-playbook`
+this playbook and the removal playbook below. Direct `ansible-playbook`
 invocation is unsupported. The script is shared byte for byte with the worker
 credential roles; each operation is a data file under
 `infra/ansible/guarded-runs/` (here `postgres-environment-materialize.json`),
@@ -408,12 +408,24 @@ the private address the same way the Platform PostgreSQL VM is reached.
 ## Removal and rotation
 
 The default-off `coding_hosted_postgres_environment_cleanup` role removes the
-two copies above. Run
-`playbooks/gcp-coding-hosted-postgres-environment-cleanup.yml` with a 40-hex
-source revision and the exact confirmation
-`REMOVE NATIVE CODING POSTGRES ENVIRONMENT`, passing booleans as JSON extra vars
-(`-e '{"coding_hosted_postgres_environment_cleanup_enabled": true, …}'`). It
-needs no secret and never reads `DITTO_CODING_PG_PASSWORD`: do not export it.
+two copies above. Run it only through the guarded entry point described under
+[Guarded entry point](#guarded-entry-point), with the reviewed revision:
+
+```bash
+# From a fresh, clean checkout of the reviewed revision, with no password exported.
+GCP_OSLOGIN_USER=… uv run --locked --script infra/scripts/coding-hosted-guarded-run.py \
+  postgres-environment-remove <reviewed 40-hex revision>
+```
+
+The guard's `postgres-environment-remove.json` spec builds the JSON boolean
+`coding_hosted_postgres_environment_cleanup_enabled: true`, the exact
+confirmation `REMOVE NATIVE CODING POSTGRES ENVIRONMENT` and the revision
+itself, and refuses to run while `DITTO_CODING_PG_PASSWORD` or
+`DITTO_CODING_PG_HOST` is exported. The role needs no secret and never reads
+`DITTO_CODING_PG_PASSWORD`. Direct `ansible-playbook` invocation is unsupported;
+the role's second included task requires the guard's
+`DITTO_CODING_HOSTED_GUARDED_RUN=postgres-environment-remove` marker, which is
+an accident guard only, since anyone able to run `ansible-playbook` can set it.
 
 It unlinks only the two literal file paths. It never removes, creates or
 changes a directory, sibling file, custody key, receipt or evidence record, and
@@ -517,19 +529,21 @@ copy fails the run loudly. It then verifies that both paths are absent. A re-run
 reports both as already absent. `--check` runs the same descriptor checks and
 lists what would be removed.
 
-One residual is accepted, not closed. `default(..., true)` neutralises a
-template that renders undefined, not one that raises. A template that raises
-with a secret in its message, for example
+One residual is accepted for unsupported direct runs only. `default(..., true)`
+neutralises a template that renders undefined, not one that raises. A template
+that raises with a secret in its message, for example
 `{{ lookup('file', lookup('env', 'DITTO_CODING_PG_PASSWORD')) }}` as `enabled`
 or `source_revision`, fails the run closed at the freeze, but ansible-core
 2.21.2 prints the raised message through the task result's `exception` field,
 which `no_log` deliberately preserves, on the console and in any
 `ANSIBLE_LOG_PATH` log. Core Jinja offers no construct that swallows a raised
 lookup or filter error, and there is no way to read a variable without rendering
-it. Such a template must be written into the operator's own command line or a
-reviewed inventory, and the secret must already be readable on the controller.
-Not exporting `DITTO_CODING_PG_PASSWORD` for cleanup keeps the password itself
-out of reach. The rehearsal pins this residual exactly.
+it. The guarded entry point closes this for the supported path: it accepts no
+`-e`, builds every extra var itself, refuses `ANSIBLE_LOG_PATH` and every other
+`ANSIBLE_*` override, and refuses an exported password outright. A direct run
+still needs the template written into the operator's own command line or a
+reviewed inventory, with the secret already readable on the controller. The
+rehearsal pins this residual exactly.
 
 Root tests check the role structure and exercise the unlink module directly,
 including a parent swapped for a symlink after pinning and a copy swapped for a
@@ -633,11 +647,13 @@ steps 3 to 5 alone only replace two files with the same, still-valid password.
    re-rendered and the apps restart. Existing sessions stay authenticated.
    Schedule it as a maintenance window for both environments. Its own
    verification must show that the previous password no longer authenticates.
-3. **Clean up.** Run the cleanup playbook with the reviewed source revision,
-   without exporting any password.
+3. **Clean up.** Run the guarded `postgres-environment-remove` operation with
+   the reviewed source revision, without exporting any password (the guard
+   refuses one).
 4. **Re-materialize.** Export the new value from `platform-db-password` only in
-   the controller environment as `DITTO_CODING_PG_PASSWORD`, run the
-   materialization playbook and unset it.
+   the controller environment as `DITTO_CODING_PG_PASSWORD`, with
+   `DITTO_CODING_PG_HOST`, run the guarded `postgres-environment-materialize`
+   operation and unset both.
 5. **Verify.** Before starting anything, confirm that the materialization's
    owner, mode and digest checks passed, that the cleanup report names the
    reviewed source revision, that both Platform APIs connect, and that a
