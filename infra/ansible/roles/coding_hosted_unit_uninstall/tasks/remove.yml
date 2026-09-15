@@ -99,56 +99,47 @@
   changed_when: false
   check_mode: false
 
-- name: Refuse to uninstall unless every listed unit is inactive or failed
+# list-units cannot tell a queued job from a description word (JOB is an
+# optional column), so queued jobs are listed separately. With --no-legend an
+# idle job queue prints nothing; any line refuses.
+- name: List queued jobs for the worker and custody units
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, list-jobs, --no-legend, --plain, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
+  register: coding_hosted_unit_uninstall_jobs
+  changed_when: false
+  check_mode: false
+
+- name: Refuse to uninstall unless every listed unit is inactive or failed with no queued job
   ansible.builtin.assert:
     that:
       - >-
         coding_hosted_unit_uninstall_units.stdout_lines
         | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
         | list | length == 0
+      - coding_hosted_unit_uninstall_jobs.stdout | trim | length == 0
     fail_msg: >-
-      Stop the hosted worker and every custody instance before uninstalling their units; each
-      listed unit must be inactive or failed and this role stops nothing. Nothing was removed.
+      Stop the hosted worker and every custody instance, and let any queued job for them finish or
+      cancel it, before uninstalling their units; each listed unit must be inactive or failed with
+      no queued job and this role stops nothing. Nothing was removed.
     quiet: true
 
 # The role-local module opens every component of /etc/systemd/system with
 # O_NOFOLLOW, requires root-owned unit directories, refuses any drop-in,
-# instance or enablement link neither install role creates, and removes only
+# instance or enablement link neither install role creates, removes only
 # ditto-coding-hosted-worker.service and ditto-coding-custody@.service with
-# unlinkat. failed_when is false so a partial removal is still reloaded and then
-# reported by the next assert.
-- name: Remove the two unit files through the symlink-safe module
+# unlinkat, and runs daemon-reload in the same invocation right after the
+# unlinks (daemon-reload starts and stops nothing). Its receipt is true on every
+# path, including an OS error after an earlier unlink. failed_when is false so
+# the unit re-checks below run, and report an orphaned live unit, before the
+# receipt is enforced.
+- name: Remove the two unit files and reload through the symlink-safe module
   coding_hosted_unit_uninstall_unlink:
     unit_dir: /etc/systemd/system
     owner: root
+    daemon_reload: [/usr/bin/systemctl, daemon-reload]
   register: coding_hosted_unit_uninstall_removal
-  failed_when: false
-
-# Reload even after a partial removal so systemd never keeps a definition whose
-# file is gone. daemon-reload starts and stops nothing.
-- name: Reload unit definitions without starting or stopping anything
-  ansible.builtin.command:
-    argv: [/usr/bin/systemctl, daemon-reload]
-  register: coding_hosted_unit_uninstall_reload
   changed_when: coding_hosted_unit_uninstall_removal.removed | default([]) | length > 0
-
-- name: Require the module to have removed or confirmed absent both unit files
-  ansible.builtin.assert:
-    that:
-      - coding_hosted_unit_uninstall_removal.refused | default(['no receipt']) | length == 0
-      - coding_hosted_unit_uninstall_removal.not_attempted | default(['no receipt']) | length == 0
-      - >-
-        ((coding_hosted_unit_uninstall_removal.removed | default([]))
-        + (coding_hosted_unit_uninstall_removal.already_absent | default([])))
-        | length == 2
-    fail_msg: >-
-      The unit uninstall module refused; it names only fixed paths and states.
-      refused={{ coding_hosted_unit_uninstall_removal.refused | default([]) | to_json }};
-      foreign={{ coding_hosted_unit_uninstall_removal.foreign | default([]) | to_json }};
-      removed={{ coding_hosted_unit_uninstall_removal.removed | default([]) | to_json }};
-      already_absent={{ coding_hosted_unit_uninstall_removal.already_absent | default([]) | to_json }};
-      not_attempted={{ coding_hosted_unit_uninstall_removal.not_attempted | default([]) | to_json }}.
-    quiet: true
+  failed_when: false
 
 - name: Re-list live worker and custody units after removal
   ansible.builtin.command:
@@ -157,36 +148,76 @@
   changed_when: false
   check_mode: false
 
-- name: Refuse if any worker or custody unit went live during removal
+- name: Re-list queued jobs for the worker and custody units after removal
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, list-jobs, --no-legend, --plain, --full, ditto-coding-hosted-worker.service, "ditto-coding-custody@*.service"]
+  register: coding_hosted_unit_uninstall_jobs_after
+  changed_when: false
+  check_mode: false
+
+# A unit started after the live check but before the reload keeps running as
+# not-found with no ExecStopPost (the worker's connectivity revoke, custody's
+# per-run release) and no RuntimeMaxSec, so the operator must both stop it and
+# run its cleanup by hand.
+- name: Refuse if any worker or custody unit went live or queued a job during removal
   ansible.builtin.assert:
     that:
       - >-
         coding_hosted_unit_uninstall_units_after.stdout_lines
         | reject('match', '^(ditto-coding-hosted-worker[.]service|ditto-coding-custody@\\S+[.]service)\\s+\\S+\\s+(inactive|failed)(\\s|$)')
         | list | length == 0
+      - coding_hosted_unit_uninstall_jobs_after.stdout | trim | length == 0
     fail_msg: >-
-      A worker or custody unit became live while its unit file was removed. Reconcile the running
-      unit by hand; this role stops nothing.
+      A worker or custody unit went live or queued a job while its unit file was removed. With
+      the file gone systemd no longer runs its cleanup, so do both by hand: for the worker run
+      `sudo systemctl stop ditto-coding-hosted-worker.service` then
+      `sudo /usr/bin/python3 -I /usr/local/lib/ditto-coding-hosted/connectivity-policy.py revoke`;
+      for each custody instance run `sudo systemctl stop ditto-coding-custody@<worker-uuid>.service`
+      then `sudo /usr/bin/python3 -I /usr/local/lib/ditto-coding-custody/custody-run.py release <worker-uuid>`.
+      Module receipt: removed={{ coding_hosted_unit_uninstall_removal.removed | default([]) | to_json }};
+      refused={{ coding_hosted_unit_uninstall_removal.refused | default([]) | to_json }}.
     quiet: true
 
-# After the reload, systemd must know no unit file for either name. A match here
-# is a definition outside /etc/systemd/system (for example /run or /usr/lib)
-# that the install roles never created and this role never removes.
-- name: List unit files systemd still knows for either unit after the reload
-  ansible.builtin.command:
-    argv: [/usr/bin/systemctl, list-unit-files, --no-legend, --plain, --full, ditto-coding-hosted-worker.service, ditto-coding-custody@.service]
-  register: coding_hosted_unit_uninstall_unit_files_after
-  changed_when: false
-  failed_when: coding_hosted_unit_uninstall_unit_files_after.rc not in [0, 1]
-  check_mode: false
-
-- name: Require systemd to know neither unit file after the reload
+- name: Require the module to have removed or confirmed absent both unit files and reloaded
   ansible.builtin.assert:
     that:
-      - coding_hosted_unit_uninstall_unit_files_after.stdout | trim | length == 0
+      - coding_hosted_unit_uninstall_removal.refused | default(['no receipt']) | length == 0
+      - coding_hosted_unit_uninstall_removal.not_attempted | default(['no receipt']) | length == 0
+      - >-
+        ((coding_hosted_unit_uninstall_removal.removed | default([]))
+        + (coding_hosted_unit_uninstall_removal.already_absent | default([])))
+        | length == 2
+      - coding_hosted_unit_uninstall_removal.daemon_reloaded | default(false) is sameas true
     fail_msg: >-
-      systemd still loads a worker or custody unit file from outside /etc/systemd/system; no
-      install role creates it and this role does not remove it. Reconcile it by hand.
+      The unit uninstall module refused; it names only fixed paths and states.
+      refused={{ coding_hosted_unit_uninstall_removal.refused | default([]) | to_json }};
+      foreign={{ coding_hosted_unit_uninstall_removal.foreign | default([]) | to_json }};
+      removed={{ coding_hosted_unit_uninstall_removal.removed | default([]) | to_json }};
+      already_absent={{ coding_hosted_unit_uninstall_removal.already_absent | default([]) | to_json }};
+      not_attempted={{ coding_hosted_unit_uninstall_removal.not_attempted | default([]) | to_json }};
+      daemon_reloaded={{ coding_hosted_unit_uninstall_removal.daemon_reloaded | default(false) | to_json }}.
+    quiet: true
+
+# Confirm absence positively after the reload. A template itself cannot be
+# shown, so the never-issued all-zero instance stands for it: it loads only if a
+# ditto-coding-custody@.service template exists anywhere systemd looks. Any
+# systemctl or D-Bus error fails the command (rc != 0) instead of passing.
+- name: Show the load state systemd reports for both units after the reload
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, show, --property=LoadState, --value, ditto-coding-hosted-worker.service, ditto-coding-custody@00000000-0000-0000-0000-000000000000.service]
+  register: coding_hosted_unit_uninstall_load_states
+  changed_when: false
+  check_mode: false
+
+- name: Require systemd to report both units not-found after the reload
+  ansible.builtin.assert:
+    that:
+      - coding_hosted_unit_uninstall_load_states.rc == 0
+      - coding_hosted_unit_uninstall_load_states.stdout_lines | reject('equalto', '') | list == ['not-found', 'not-found']
+    fail_msg: >-
+      systemd still loads a worker or custody unit definition, or could not report one; no install
+      role creates a definition outside /etc/systemd/system and this role does not remove it.
+      Reconcile it by hand.
     quiet: true
 
 - name: Report only the source revision and which fixed unit paths were removed or already absent
@@ -196,5 +227,6 @@
       source_revision={{ coding_hosted_unit_uninstall_gate_source_revision }};
       removed={{ coding_hosted_unit_uninstall_removal.removed | to_json }};
       already_absent={{ coding_hosted_unit_uninstall_removal.already_absent | to_json }};
-      daemon_reloaded=true; services_stopped=false; services_started=false;
+      daemon_reloaded={{ coding_hosted_unit_uninstall_removal.daemon_reloaded | to_json }};
+      services_stopped=false; services_started=false;
       credentials_touched=false; data_dirs_touched=false.
