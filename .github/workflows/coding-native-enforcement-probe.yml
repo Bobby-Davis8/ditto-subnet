@@ -44,6 +44,7 @@ on:
       - services/dittobench-api/internal/codingsource/**
       - services/dittobench-api/internal/codingsupervisor/**
       - services/dittobench-api/internal/netguard/**
+      - services/dittobench-api/internal/rootlessnetns/**
       - services/dittobench-api/internal/sandbox/**
       - research/dittobench-datagen/**
       - services/dittobench-api/go.mod
