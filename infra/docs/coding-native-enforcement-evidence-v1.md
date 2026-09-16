@@ -37,7 +37,7 @@ there is no approval or readiness key. One record covers one `kind`:
 | `host` | `machine_id_sha256`, `boot_id`, `kernel_release`, `daemon_identity_sha256`, `subordinate_ids` (uid/gid start and count), `router_namespace` (`host` or `rootless-netns`) |
 | `release` | `source_revision`, `release_manifest_sha256`, `runtime_archive_sha256`, `image_approval_sha256` for go, node, python and rust |
 | `pre_collection_preflight_sha256` | The preflight stdout taken before collection, retained in the store |
-| `inputs` | Per kind: the connectivity profile digest (network) or the execution/grading profile digests. Each must equal the document supplied to the verifier |
+| `inputs` | Per kind: the connectivity profile digest (network) or the execution/grading profile digests, plus the enforcement-images and pre-exec-fixtures digests (pre-exec). Each must equal the document supplied to the verifier |
 | `endpoints` | Network only. Roles `router` and `refusing_proxy` (one each, distinct), `trusted` (1 to 32) and `trusted_dns` (0 to 2), each as `endpoint_sha256`. The set must equal the hashes derived from the connectivity profile |
 | `tools` | `catalog_sha256`, `collector_sha256`, `evidence_tool_sha256`, `fixtures_sha256`, `probe_runner_source_sha256` (supporting provenance: the canonical hash of the Go runner command, probe library and catalog package trees in the reviewed checkout) and `probe_runner_binary_sha256` (the probe runner binary that actually ran, measured on the host; it must equal the release index's `runtime.probe_runner_sha256`) |
 | `preconditions`, `residue` | Worker and custody inactive, no custody socket, zero containers, job networks, volumes and processes |
@@ -117,6 +117,9 @@ Resource and pre-exec records carry the set's digest as
   recorded build and test commands equal the profile's.
 
 The signed approval pins the set in `profile_pins.enforcement_images_sha256`.
+The pre-exec fixtures recorded against these images are pinned alongside it in
+`profile_pins.preexec_fixtures_sha256`; see
+[pre-exec confinement](#pre-exec-confinement-fixtures-landed-host-wiring-remains).
 
 The probe runner takes image digests and commands only from this set
 (`--enforcement-images`; `--image` is gone). It builds each language's hosted
@@ -332,7 +335,8 @@ tool never handles a private key. It then checks:
 - The approval's `runner_sha256` matches the checkout's `run.py`.
 - The review's digests equal independently reviewed pins
   (`--execution-profile-sha256`, `--grading-profile-sha256`,
-  `--enforcement-images-sha256`, `--connectivity-endpoint-set-sha256`), for
+  `--enforcement-images-sha256`, `--preexec-fixtures-sha256`,
+  `--connectivity-endpoint-set-sha256`), for
   example from the signed profile approval and the canary's own connectivity
   profile.
   - The signed approval also carries the same pins in `profile_pins` (PR 3a).
@@ -417,7 +421,7 @@ collects now (nothing has been collected on a host yet):
 |---|---|
 | `network_enforcement` (all) | Collected by the [PR4 network collector](#network-collector-b5-pr4) |
 | `resource_enforcement` (all 35 probes × 4 language images) | Collected by the [PR5 resource collector](#resource-collector-b5-pr5) from started containers, measured from outside |
-| `preexec_confinement` (all) | Not collected: per-language fixtures are missing; see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5) |
+| `preexec_confinement` (all) | Public fixtures are authored, recorded and pinned, and a preexec record built from them verifies offline; the host driver-run collector wiring remains. See [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5) |
 | `cleanup_recovery` (all 10 probes) | Collected by the [PR5 cleanup collector](#cleanup-recovery-collected), including SIGKILL reconciliation from the hosted runtime's launch journal and the consumed-attempt rerun |
 
 The PR4 network collector measures preconditions and residue for network
@@ -831,25 +835,54 @@ collector). A record missing a catalog probe never verifies, and no collector
 claims a probe it did not measure. A test checks that this list, the catalog
 and the tables below agree. `cleanup` collects every `cleanup_recovery` probe.
 
-### Pre-exec confinement (nothing collected)
+### Pre-exec confinement (fixtures landed; host wiring remains)
 
-| Probes | Reason |
+The public synthetic fixtures now exist, are recorded, and a preexec record
+built from them is accepted by the offline verifier. What is not yet run on a
+host is the driver-run collector wiring that produces such a record.
+
+**Fixtures (B5 PR6).** `internal/codingenforcement/fixtures/preexec/` holds tiny,
+deterministic, public fixtures for every released language, recorded in
+`fixtures.json` (`dittobench-coding-native-preexec-fixtures-v1`, canonical JSON,
+closed keys). Per language it pins:
+
+- a shared `pass`/`wrong`/`hang` controls suite and each control's candidate,
+  by path and sha256, with the expected total;
+- a hostile candidate for every `hostile.*` probe, each of which attempts the
+  forbidden operation before its API is called and, when the pre-exec
+  confinement denies it, still returns the correct value so the recorded test
+  command passes (`denied`; `credential_env` asserts the secret is `absent`). If
+  the confinement failed, the operation would succeed, the fixture would return
+  a sentinel and the suite would fail, which the verifier records as unmatched;
+- for Rust, a public authority file (`hidden-authority.json`) by path and
+  sha256.
+
+The whole tree is already covered by `tools.fixtures_sha256`; the manifest is
+additionally pinned as `preexec_fixtures_sha256` (see below).
+
+**Recording and pinning.** `preexec_fixtures_sha256` is a preexec-record input
+and a signed-approval pin (`profile_pins`, `native.PROFILE_PINS`), pinned exactly
+where `enforcement_images_sha256` is. The verifier binds a preexec record to it:
+
+- every fixture file is the reviewed checkout's exact bytes;
+- the fixtures cover every catalog `hostile.*` probe;
+- each `control.{pass,wrong,hang}` observation carries the recorded public
+  controls-suite digest;
+- Rust is public only when it is **not** the grading profile's own language, so
+  its pinned fixture authority can never be private grading material, and that
+  authority equals the enforcement image set's recorded Rust command authority.
+
+| Probes | Remaining host wiring |
 |---|---|
-| `control.pass`, `control.wrong`, `control.hang` | Need per-language pass, wrong and hang fixture suites run through each language's recorded test command, with the grading profile's expected totals |
-| `identity.candidate`, `identity.host_ids`, `identity.capabilities`, `identity.no_new_privs`, `identity.seccomp` | Need a live candidate process under the trusted test driver to read `/proc/<pid>/status` from outside; only the hang fixture provides one |
-| `hostile.fork_exec`, `hostile.process_group_escape`, `hostile.setuid`, `hostile.signal_supervisor`, `hostile.capability_use`, `hostile.grader_mount_read`, `hostile.control_file_forge`, `hostile.network`, `hostile.scratch_exec`, `hostile.unshare`, `hostile.mount`, `hostile.ptrace`, `hostile.load_time_escape`, `hostile.credential_env` | Need a per-language hostile test fixture whose denial the driver's receipt reports |
+| `control.pass`, `control.wrong`, `control.hang` | Stage each language's controls suite and candidate and run the recorded test command on the real hosted grading launch; map the receipt to `all_pass`/`some_fail`/`timeout` |
+| `identity.candidate`, `identity.host_ids`, `identity.capabilities`, `identity.no_new_privs`, `identity.seccomp` | Read the live hang-fixture candidate's `/proc/<pid>/status` from outside; only the hang fixture provides one |
+| `hostile.fork_exec`, `hostile.process_group_escape`, `hostile.setuid`, `hostile.signal_supervisor`, `hostile.capability_use`, `hostile.grader_mount_read`, `hostile.control_file_forge`, `hostile.network`, `hostile.scratch_exec`, `hostile.unshare`, `hostile.mount`, `hostile.ptrace`, `hostile.load_time_escape`, `hostile.credential_env` | Run the per-language hostile fixture and map its receipt (`denied`/`absent`, else unmatched) |
 
-The fixtures are the open work. Two constraints shape them:
-
-- **They must fit the recorded commands.** Each language's hidden and visible
-  argv and the profile's expected totals are fixed by the approval.
-- **Rust.** Its test commands pin an authority file by sha256. A public fixture
-  can satisfy that only when Rust is not the grading profile's own language and
-  the set records a public fixture authority. When Rust is the profile's
-  language, the pinned authority is private task material.
-
-The image test stages (`coding_runtime/*/supervisor-probe*`) already carry
-synthetic hostile scenarios for each driver, and are a starting point.
+This host path needs the released driver images and the rootless native host to
+validate its per-language staging, so it lands with the driver-run collector.
+Until then, `preexec` refuses before any host effect, listing every catalog
+probe it does not yet collect with this reason, and no record can claim a probe
+it did not measure.
 
 ### Cleanup recovery (collected)
 
@@ -1048,9 +1081,10 @@ identity is bound into the signed approval and the evidence.
     `server_version` is recorded but not a hard key (Peyton, 2026-09-16): a
     different version is reported in `daemon_identity_observations`, not
     refused. Every other field, including `engine_id`, must match.
-- **Endpoint set in the signed document.** `approval.profile_pins` carries
-  the endpoint-set, execution-profile and grading-profile pins. They must equal
-  the reviewed pins given to `check-approval`.
+- **Endpoint set in the signed document.** `approval.profile_pins` carries the
+  endpoint-set, execution-profile, grading-profile, enforcement-images and
+  pre-exec-fixtures pins. They must equal the reviewed pins given to
+  `check-approval`, and `native.PROFILE_PINS` fixes the same closed key set.
 - **Boot and replay.** The approval pins machine and boot. The host rechecks
   both before every step, and the single-use marker refuses a second run on the
   same boot. An identical daemon after a reboot is still refused.
@@ -1074,7 +1108,9 @@ identity is bound into the signed approval and the evidence.
 - It cannot confirm that `--checkout` is at `source_revision`.
 - The router and proxy roles are the record's own split of the two candidate
   endpoints; only the pair itself is derived from the profile.
-- Pre-exec confinement; see
+- Pre-exec confinement host collection: the fixtures are recorded, pinned and
+  verifier-accepted, but the driver-run collector that produces a record on a
+  host is not wired yet; see
   [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5). Cleanup records do not
   exercise `codinghostedruntime.Run` itself; see
   [what cleanup collection does not show](#what-cleanup-collection-does-not-show).

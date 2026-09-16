@@ -2373,36 +2373,51 @@ NOT_COLLECTED: dict[str, dict[str, str]] = {
     "network_enforcement": {},
     "resource_enforcement": {},
     "preexec_confinement": {
-        "control.pass": "needs per-language pass/wrong/hang fixture suites run "
-        "through each language's recorded test command",
-        "control.wrong": "needs per-language fixture suites (see control.pass)",
-        "control.hang": "needs per-language fixture suites (see control.pass)",
-        "identity.candidate": "needs a live candidate process under the trusted "
-        "test driver, which only the hang fixture provides",
-        "identity.host_ids": "needs the hang fixture (see identity.candidate)",
-        "identity.capabilities": "needs the hang fixture (see identity.candidate)",
-        "identity.no_new_privs": "needs the hang fixture (see identity.candidate)",
-        "identity.seccomp": "needs the hang fixture (see identity.candidate)",
-        **{
-            f"hostile.{name}": "needs a per-language hostile test fixture whose "
-            "denial the driver's receipt reports"
-            for name in (
-                "fork_exec",
-                "process_group_escape",
-                "setuid",
-                "signal_supervisor",
-                "capability_use",
-                "grader_mount_read",
-                "control_file_forge",
-                "network",
-                "scratch_exec",
-                "unshare",
-                "mount",
-                "ptrace",
-                "load_time_escape",
-                "credential_env",
-            )
-        },
+        # The public fixtures now exist, are recorded in
+        # internal/codingenforcement/fixtures/preexec/fixtures.json
+        # (dittobench-coding-native-preexec-fixtures-v1), pinned in the signed
+        # approval as preexec_fixtures_sha256, and a preexec record built from
+        # them is accepted by the offline verifier (coding-native-evidence.py).
+        # The remaining step is the host driver-run wiring: for each language,
+        # stage the pass/wrong/hang and hostile fixtures through that language's
+        # own recorded test command on the real hosted grading launch, read the
+        # hang candidate's /proc/<pid>/status from outside for the identity
+        # probes, and map each receipt to the catalog outcome. That path needs
+        # the released driver images and the rootless native host to validate,
+        # so it lands with the driver-run collector (a follow-up on this branch).
+        **dict.fromkeys(
+            (
+                "control.pass",
+                "control.wrong",
+                "control.hang",
+                "identity.candidate",
+                "identity.host_ids",
+                "identity.capabilities",
+                "identity.no_new_privs",
+                "identity.seccomp",
+                *(
+                    f"hostile.{name}"
+                    for name in (
+                        "fork_exec",
+                        "process_group_escape",
+                        "setuid",
+                        "signal_supervisor",
+                        "capability_use",
+                        "grader_mount_read",
+                        "control_file_forge",
+                        "network",
+                        "scratch_exec",
+                        "unshare",
+                        "mount",
+                        "ptrace",
+                        "load_time_escape",
+                        "credential_env",
+                    )
+                ),
+            ),
+            "public fixture recorded and pinned; host driver-run wiring remains "
+            "(needs the released driver images to validate)",
+        ),
     },
     "cleanup_recovery": {},
 }
