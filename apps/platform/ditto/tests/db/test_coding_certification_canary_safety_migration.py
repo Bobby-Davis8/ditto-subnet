@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -24,22 +25,17 @@ _PARENT = "f2c8d41a6b90"
 
 
 def _alembic(target: pgharness.Dsn, action: str, revision: str) -> None:
-    from alembic.config import Config
-
-    from alembic import command
-
-    previous = {key: os.environ.get(key) for key in target.env}
-    os.environ.update(target.env)
-    try:
-        cfg = Config(str(pgharness._REPO_ROOT / "alembic.ini"))
-        cfg.set_main_option("script_location", str(pgharness._REPO_ROOT / "alembic"))
-        getattr(command, action)(cfg, revision)
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    # A subprocess, like the other Platform migration tests: alembic/env.py
+    # runs fileConfig from alembic.ini, which in-process would disable every
+    # existing logger on this pytest worker and break log assertions elsewhere.
+    subprocess.run(
+        ["uv", "run", "alembic", action, revision],
+        check=True,
+        cwd=pgharness._REPO_ROOT,
+        env={**os.environ, **target.env},
+        capture_output=True,
+        text=True,
+    )
 
 
 async def _seed(dsn: pgharness.Dsn) -> tuple[dict[str, UUID], dict[str, Agent]]:
