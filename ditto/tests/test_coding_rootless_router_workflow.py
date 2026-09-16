@@ -25,13 +25,25 @@ def test_rootless_router_job_is_path_filtered_bounded_and_credential_free():
         ".github/workflows/coding-rootless-router.yml",
     ):
         assert path in paths
-    # Every monorepo package the integration test imports directly triggers it.
-    package = ROOT / "services/dittobench-api/internal/rootlessnetns"
-    test = (package / "integration_linux_test.go").read_text()
-    for imported in re.findall(
-        r'"github\.com/ditto-assistant/dittobench-api/(internal/[a-z0-9_/]+)"', test
+    # Every monorepo package the integration tests import directly triggers it.
+    for package in (
+        ROOT / "services/dittobench-api/internal/rootlessnetns",
+        ROOT / "services/dittobench-api/internal/codingcertservice",
     ):
-        assert f"services/dittobench-api/{imported}/**" in paths
+        test = (package / "integration_linux_test.go").read_text()
+        for imported in re.findall(
+            r'"github\.com/ditto-assistant/dittobench-api/(internal/[a-z0-9_/]+)"',
+            test,
+        ):
+            assert f"services/dittobench-api/{imported}/**" in paths
+    for path in (
+        "services/dittobench-api/internal/codingcertservice/**",
+        "services/dittobench-api/cmd/dittobench-coding-certification-service/**",
+        "ditto/validator/coding_canary_runtime.py",
+        "ditto/validator/coding_certification_socket.py",
+        "ditto/tests/validator/rootless_certification_client.py",
+    ):
+        assert path in paths
     assert "services/dittobench-api/**" not in paths
     assert workflow["permissions"] == {"contents": "read"}
     assert "secrets." not in text and "id-token" not in text
@@ -63,10 +75,28 @@ def test_rootless_router_job_pins_docker_and_runs_the_exact_integration_test():
         "DITTOBENCH_ROOTLESS_IT_HOST_ADDRESS",
     ):
         assert variable in text
-    package = ROOT / "services/dittobench-api/internal/rootlessnetns"
-    test = (package / "integration_linux_test.go").read_text()
-    assert test.startswith("//go:build rootless_router_integration\n")
-    assert "t.Skip" not in test
+    for package in ("rootlessnetns", "codingcertservice"):
+        test = (
+            ROOT
+            / "services/dittobench-api/internal"
+            / package
+            / "integration_linux_test.go"
+        ).read_text()
+        assert test.startswith("//go:build rootless_router_integration\n")
+        assert "t.Skip" not in test
+
+
+def test_certification_service_probe_runs_under_the_same_rootless_daemon():
+    text = WORKFLOW.read_text()
+    assert (
+        "-test.run '^TestCertificationServiceSocketAndReadinessUnderRootlessDocker$'"
+        in text
+    )
+    assert "DITTOBENCH_CERT_IT_CLIENT" in text
+    # The executor daemon readiness half is real: the daemon carries the label.
+    assert "--label=io.heyditto.dittobench.isolated=true" in text
+    assert "uv sync --frozen --no-dev" in text
+    assert "ditto.tests.validator.rootless_certification_client" in text
 
 
 def test_runtime_bundle_workflow_rebuilds_when_the_router_helper_changes():
