@@ -1036,6 +1036,9 @@ class SystemHost:
     def clock_ticks(self) -> int:
         return os.sysconf("SC_CLK_TCK")
 
+    def page_size(self) -> int:
+        return os.sysconf("SC_PAGE_SIZE")
+
     def cgroup_read(self, cgroup: str, name: str) -> bytes | None:
         require(
             ".." not in cgroup.split("/") and "/" not in name,
@@ -2475,7 +2478,9 @@ def sample_memory_oom(host: Any, cgroup: str) -> dict[str, Any]:
 
     enforced = poll(host, killed)
     peak = parse_cgroup_limit(host.cgroup_read(cgroup, "memory.peak"), "memory.peak")
-    return {"enforced": enforced, "measured": peak}
+    # memory.peak may pass memory.max by one forced page charge; the verifier
+    # allows one page of the host page size recorded here (tolerances v2).
+    return {"enforced": enforced, "measured": peak, "page_bytes": host.page_size()}
 
 
 def sample_cpu_throttle(host: Any, cgroup: str) -> dict[str, Any]:

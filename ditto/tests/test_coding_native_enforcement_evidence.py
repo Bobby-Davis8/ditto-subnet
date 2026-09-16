@@ -48,7 +48,7 @@ DAEMON_IDENTITY_VECTOR = json.loads(
 )
 # Pinned identically in catalog/canonical_test.go.
 GOLDEN_RECORD_SHA256 = (
-    "b079646d740892d2db3eb5ab0599c8e40e3a81d730e863b8d790af1ddff2a8fa"
+    "a01d418ea0da074f7e3e94add42316abefb64612b94001d5b6939c49bd3fedea"
 )
 CANONICAL_VECTOR_SHA256 = (
     "1948b8f75bd3f0c25825ed268d2390e89ffe1993a37790ee740c19e5cd491a74"
@@ -410,6 +410,13 @@ def observed_for(probe: dict, language: str | None) -> dict:
         return {"cgroup": value, "profile": value}
     if kind == "bounded":
         value = expected_limit(probe["bind"]["limit"], container, language)
+        if probe["id"].endswith(".memory_oom"):
+            return {
+                "enforced": True,
+                "limit": value,
+                "measured": value,
+                "page_bytes": 4096,
+            }
         return {"enforced": True, "limit": value, "measured": value}
     if kind == "zero_retained":
         value = expected_limit(probe["bind"]["limit"], container, language)
@@ -852,6 +859,7 @@ GO_TOLERANCES = {
     "version": "TolerancesVersion",
     "cpu_usage_max_permille_of_quota": "CPUUsageMaxPermilleOfQuota",
     "memory_peak_max_permille_of_limit": "MemoryPeakMaxPermilleOfLimit",
+    "memory_peak_overshoot_max_pages": "MemoryPeakOvershootMaxPages",
     "pids_max_permille_of_limit": "PidsMaxPermilleOfLimit",
     "nofile_max_permille_of_limit": "NofileMaxPermilleOfLimit",
     "scratch_max_permille_of_limit": "ScratchMaxPermilleOfLimit",

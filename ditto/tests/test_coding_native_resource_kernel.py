@@ -177,11 +177,12 @@ def test_memory_oom_is_seen_in_the_cgroup_at_the_limit():
         observed = COLLECTOR.sample_memory_oom(host(), run.cgroup)
     observed["limit"] = 64 * MIB
     assert observed["enforced"] is True
-    # memory.peak can pass memory.max by a forced charge of one page; the
-    # catalog's 1000 per mille ceiling then refuses a real OOM kill.
-    assert 64 * MIB * 9 // 10 <= observed["measured"] <= 64 * MIB + 4096
-    if observed["measured"] <= 64 * MIB:
-        assert matched("harness.memory_oom", observed)
+    # memory.peak can pass memory.max by a forced charge of one page, which
+    # tolerances v2 allows in the recorded host page size.
+    page = observed["page_bytes"]
+    assert page == os.sysconf("SC_PAGE_SIZE")
+    assert 64 * MIB * 9 // 10 <= observed["measured"] <= 64 * MIB + page
+    assert matched("harness.memory_oom", observed), observed
 
 
 def test_cpu_quota_is_throttled_near_the_quota():

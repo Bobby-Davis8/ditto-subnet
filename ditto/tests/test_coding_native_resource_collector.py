@@ -71,6 +71,7 @@ class Scenario:
         self.preflight_age = 60
         self.leftover_after: dict[str, dict[str, int]] = {}
         self.agent_survives_sigterm = False
+        self.page_bytes = 4096
 
 
 @functools.cache
@@ -156,6 +157,9 @@ class ResourceFakeHost:
 
     def clock_ticks(self) -> int:
         return 100
+
+    def page_size(self) -> int:
+        return self.scenario.page_bytes
 
     # identity ------------------------------------------------------------
 
@@ -885,6 +889,61 @@ def test_each_enforcement_failure_is_recorded_and_refused(rw, change, probe_id):
     assert probe_id in unmatched
     failure = rw.verify(record)
     assert failure is not None and "did not match" in failure
+
+
+def memory_peak(container: str, language_limit_offset: int):
+    def change(scenario: Scenario) -> None:
+        limit = resource_limits(container, "go")["memory"]
+        scenario.cgroup[(container, "memory.peak")] = str(
+            limit + language_limit_offset
+        ).encode()
+
+    return change
+
+
+@pytest.mark.parametrize("page", [4096, 16384, 65536])
+def test_memory_peak_one_page_over_the_limit_verifies(rw, page):
+    scenario = Scenario()
+    scenario.page_bytes = page
+    memory_peak("harness", page)(scenario)
+    record, _ = rw.collect(scenario)
+    item = base.find_probe(record, "harness.memory_oom", "go")
+    assert item["matched"] is True
+    assert item["observed"]["page_bytes"] == page
+    assert item["observed"]["measured"] == item["observed"]["limit"] + page
+    assert rw.verify(record) is None
+
+
+def test_memory_peak_one_page_and_a_byte_over_the_limit_is_refused(rw):
+    scenario = Scenario()
+    memory_peak("harness", 4097)(scenario)
+    record, _ = rw.collect(scenario)
+    assert base.find_probe(record, "harness.memory_oom", "go")["matched"] is False
+    failure = rw.verify(record)
+    assert failure is not None and "harness.memory_oom did not match" in failure
+
+
+@pytest.mark.parametrize("page", [0, 1, 4095, 8192, 2097152])
+def test_memory_page_size_outside_the_accepted_set_is_refused(rw, page):
+    scenario = Scenario()
+    scenario.page_bytes = page
+    # The verifier's own evaluation refuses while the record is assembled, so
+    # nothing is retained.
+    with pytest.raises(Exception, match="not an accepted page size") as caught:
+        rw.collect(scenario)
+    assert type(caught.value).__name__ == "Refusal"
+
+
+def test_the_verifier_refuses_an_edited_page_size(rw):
+    record, _ = rw.collect()
+    base.edit_observed("harness.memory_oom", "go", page_bytes=8192)(record)
+    failure = rw.verify(record)
+    assert failure is not None and "not an accepted page size" in failure
+    record, _ = rw.collect()
+    item = base.find_probe(record, "harness.memory_oom", "go")
+    del item["observed"]["page_bytes"]
+    failure = rw.verify(record)
+    assert failure is not None and "keys are not the closed set" in failure
 
 
 def test_main_exits_nonzero_for_an_unmatched_resource_record(rw, capsys):

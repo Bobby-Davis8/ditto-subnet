@@ -195,14 +195,14 @@ Expectation types:
 | `subordinate_ids` | Host uid and gid equal subordinate start `+ id - 1` for the catalog candidate ids |
 
 Tolerances are versioned integer constants
-(`dittobench-coding-native-enforcement-tolerances-v1`), repeated in the catalog,
+(`dittobench-coding-native-enforcement-tolerances-v2`), repeated in the catalog,
 the Go package and the verifier. Every limit event must happen at or near its
 limit, so an idle or crashed burner fails:
 
 | Probe | Floor (per mille of limit) | Ceiling |
 |---|---|---|
 | `cpu_throttle` (usage against quota) | 750 | 1150 |
-| `memory_oom` (peak before the kill) | 900 | 1000 |
+| `memory_oom` (peak before the kill) | 900 | 1000, plus one page of the recorded `page_bytes` (4096, 16384 or 65536) |
 | `pids_cap` (pids when fork fails) | 1000 | 1000 |
 | `scratch_enospc` (bytes written at ENOSPC) | 950 | 1000 |
 | `nofile_cap` (fds open at EMFILE; 1014 of 1024 leaves a 10 fd baseline) | 990 | 1000 |
@@ -743,7 +743,7 @@ probe, sequentially.
 | Probe | Workload | Observation |
 |---|---|---|
 | `*.memory_max`, `*.memory_swap_max`, `*.cpu_quota`, `*.pids_max` | `hold` | The container cgroup's `memory.max`, `memory.swap.max`, `cpu.max` (quota × 1000 / period) and `pids.max` (`max` is recorded as 2^63−1 or 0 CPU quota, which never match) |
-| `*.memory_oom` | `memory`: a re-executed child maps and touches memory until killed; the parent holds | `memory.events` `oom_kill` ≥ 1 is `enforced`; `measured` is `memory.peak` |
+| `*.memory_oom` | `memory`: a re-executed child maps and touches memory until killed; the parent holds | `memory.events` `oom_kill` ≥ 1 is `enforced`; `measured` is `memory.peak`; `page_bytes` is the collector's `os.sysconf("SC_PAGE_SIZE")` |
 | `*.cpu_throttle` | `cpu`: quota/1000 + 1 locked burner threads for 9 s | After a 1.5 s warm-up, `cpu.stat` twice 4 s apart on the collector's monotonic clock: `measured` is usage millis per wall second, `enforced` is a rising `nr_throttled` |
 | `*.pids_cap` | `pids`: raw single-thread forks until `EAGAIN`, then hold | `pids.events max` ≥ 1 is `enforced`; `measured` is the highest `pids.current` over 5 reads |
 | `*.scratch_enospc` | `scratch`: 1 MiB writes to `/tmp` until `ENOSPC`, then hold | `statvfs` of `/proc/<pid>/root/tmp`: `enforced` when no block is available, `measured` is used blocks × frame size |
@@ -777,9 +777,19 @@ probe, sequentially.
 
 - **`memory.peak` can pass `memory.max` by one page.** In 1 of 5 local 64 MiB
   runs `memory.peak` was 67112960 (limit 67108864) after a genuine cgroup OOM
-  kill; forced kernel charges are not limited. The catalog ceiling of 1000 per
-  mille then refuses a real enforcement. The collector records the raw value;
-  the question is below.
+  kill; forced kernel charges are not limited. Decided (Peyton, 2026-09-16) and
+  implemented as tolerances v2:
+  - each `*.memory_oom` observation carries `page_bytes`, the host page size
+    the collector read with `os.sysconf("SC_PAGE_SIZE")`;
+  - the verifier (Python and Go) accepts only 4096, 16384 or 65536, and
+    otherwise refuses the record, so a collection that sees another size
+    retains nothing;
+  - the ceiling is `measured <= limit + memory_peak_overshoot_max_pages ×
+    page_bytes` with `memory_peak_overshoot_max_pages` = 1. One byte more is
+    unmatched, and the 900 per-mille floor is unchanged.
+
+  The shared expectation vectors cover exactly one page, one page plus one
+  byte, two pages, and page sizes outside the set.
 - **Harness swap and pull.** Fixed for hosted-v2 as decided: without
   `--memory-swap` the local test shows `memory.swap.max` equal to the memory
   limit.
@@ -950,10 +960,8 @@ approval's `private_input_custody` digest is the digest of that object.
 
 ## Questions for Peyton
 
-- **Memory peak ceiling (PR5).** `memory.peak` can exceed `memory.max` by one
-  page after a real OOM kill. Should `memory_peak_max_permille_of_limit` allow
-  that page (a tolerances-v2 change), or should a record that shows it stay
-  refused?
+- **Memory peak ceiling (PR5). Decided 2026-09-16:** allow one page of the
+  recorded host page size (tolerances v2; see the resource findings).
 - **Pre-exec fixtures (PR5).** Should the enforcement image set record public
   fixture test commands for the languages other than the grading profile's own?
   That includes a public Rust authority when Rust is not the profile's language.

@@ -97,9 +97,13 @@ FRESHNESS_SECONDS = 21600
 PRE_COLLECTION_PREFLIGHT_MAX_AGE_SECONDS = 900
 # Versioned tolerances. A change is a new version in both the catalog and here.
 TOLERANCES = {
-    "version": "dittobench-coding-native-enforcement-tolerances-v1",
+    "version": "dittobench-coding-native-enforcement-tolerances-v2",
     "cpu_usage_max_permille_of_quota": 1150,
     "memory_peak_max_permille_of_limit": 1000,
+    # Peyton, 2026-09-16 (tolerances v2): after a genuine cgroup OOM kill,
+    # memory.peak may pass memory.max by forced kernel charges of at most this
+    # many pages of the host page size the collector recorded.
+    "memory_peak_overshoot_max_pages": 1,
     "pids_max_permille_of_limit": 1000,
     "nofile_max_permille_of_limit": 1000,
     "scratch_max_permille_of_limit": 1000,
@@ -168,6 +172,11 @@ ZERO_RETAINED_PROBE = "executor_grading.log_bound"
 SUBORDINATE_MIN_START = 100000
 SUBORDINATE_MIN_COUNT = 65536
 ENDPOINT_DOMAIN = b"dittobench-coding-native-endpoint-v1"
+# The memory OOM observation carries the host page size (os.sysconf
+# SC_PAGE_SIZE) the overshoot page is measured in; only these Linux page sizes
+# are accepted.
+MEMORY_PEAK_TOLERANCE = "memory_peak_max_permille_of_limit"
+MEMORY_PAGE_BYTES = (4096, 16384, 65536)
 # The endpoint set is the connectivity profile without its per-issue fields
 # (schema, issued/expiry times and the fixed shadow flags), so a probe profile
 # and the canary's own later profile reproduce the same digest.
@@ -1655,7 +1664,9 @@ def evaluate(
             and value["retained_bytes"] == 0
         )
     if kind == "bounded":
-        value = closed(observed, {"enforced", "limit", "measured"}, "observed")
+        memory = expect["tolerance"] == MEMORY_PEAK_TOLERANCE
+        keys = {"enforced", "limit", "measured"} | ({"page_bytes"} if memory else set())
+        value = closed(observed, keys, "observed")
         require(
             type(value["enforced"]) is bool
             and is_int(value["limit"])
@@ -1664,11 +1675,21 @@ def evaluate(
         )
         permille, floor = TOLERANCES[expect["tolerance"]], TOLERANCES[expect["floor"]]
         assert isinstance(permille, int) and isinstance(floor, int)
+        overshoot = 0
+        if memory:
+            require(
+                is_int(value["page_bytes"])
+                and value["page_bytes"] in MEMORY_PAGE_BYTES,
+                "observed page size is not an accepted page size",
+            )
+            pages = TOLERANCES["memory_peak_overshoot_max_pages"]
+            assert isinstance(pages, int)
+            overshoot = value["page_bytes"] * pages
         return (
             value["enforced"] is True
             and value["limit"] >= 1
             and value["measured"] >= 1
-            and value["measured"] * 1000 <= value["limit"] * permille
+            and value["measured"] * 1000 <= value["limit"] * permille + overshoot * 1000
             and value["measured"] * 1000 >= value["limit"] * floor
         )
     if kind == "supervisor_timeout":
