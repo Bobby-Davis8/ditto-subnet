@@ -37,7 +37,14 @@ PACKAGES = (
 ROOTS = ("bin/", "apps/platform/", "packages/ditto-screening-protocol/")
 # Static amd64 ELF executables required by each schema. The listener helper is
 # started only by the worker, from the worker's own installed bundle directory.
-EXECUTABLES = {SCHEMA_V2: (WORKER,), SCHEMA: (WORKER, ROUTER_LISTENER)}
+# The B5 enforcement probe runner ships in every v3 bundle; the native release
+# index records its digest for evidence binding. Previously approved v2 bundles
+# predate both and stay installable.
+ENFORCEMENT_PROBE = "bin/dittobench-coding-enforcement-probe"
+EXECUTABLES = {
+    SCHEMA_V2: (WORKER,),
+    SCHEMA: (WORKER, ROUTER_LISTENER, ENFORCEMENT_PROBE),
+}
 
 
 class Parser(argparse.ArgumentParser):

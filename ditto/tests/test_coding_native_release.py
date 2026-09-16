@@ -45,6 +45,9 @@ def runtime(directory, revision=REVISION):
         "bin/dittobench-coding-router-listener": b"\x7fELF\x02\x01"
         + bytes(12)
         + b"\x3e\x00helper",
+        "bin/dittobench-coding-enforcement-probe": b"\x7fELF\x02\x01"
+        + bytes(12)
+        + b"\x3e\x00probe",
         "apps/platform/ditto/coding_hosted_worker.py": b"# public synthetic fixture\n",
         "apps/platform/uv.lock": b"synthetic lock",
         "apps/platform/.venv/bin/python": b"not an interpreter",
@@ -118,6 +121,10 @@ def test_complete_release_binds_every_artifact_without_execution(release, monkey
     value = RELEASE.verify(directory, REVISION, checksum)
     assert set(value["images"]) == set(RELEASE.PROFILES)
     assert value["runtime"]["worker_sha256"]
+    assert value["schema"] == "dittobench-coding-native-release-set-v3"
+    probe = RELEASE.sha(b"\x7fELF\x02\x01" + bytes(12) + b"\x3e\x00probe")
+    assert value["runtime"]["probe_runner_sha256"] == probe
+    assert probe != value["runtime"]["worker_sha256"]
     assert value["independent_approval_required"] is True
     for name in (
         "native_imported",
