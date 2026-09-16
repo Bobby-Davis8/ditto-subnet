@@ -280,6 +280,22 @@ RECORD_KEYS = {
     "started_at_unix",
     "completed_at_unix",
 }
+# Network records alone also carry the loaded nft ruleset and worker cgroup
+# binding the collector measured (B5 PR4).
+NETWORK_BINDING_KEY = "network_binding"
+NETWORK_BINDING_KEYS = {
+    "worker_cgroup",
+    "nft_table",
+    "scoped_ruleset_sha256",
+    "deny_ruleset_sha256",
+    "scoped_output_rules",
+    "scoped_input_rules",
+    "refusing_proxy_unit",
+    "refusing_proxy_sha256",
+}
+WORKER_CGROUP = "system.slice/ditto-coding-hosted-worker.service"
+NFT_TABLE = "inet ditto_coding_hosted"
+REFUSING_PROXY_UNIT = "ditto-coding-hosted-egress-proxy.service"
 HOST_KEYS = {
     "machine_id_sha256",
     "boot_id",
@@ -1300,9 +1316,20 @@ def parse_connectivity_profile(raw: bytes) -> dict[str, Any]:
             _endpoint_sha256(endpoint_set_sha256, label, *pair) for pair in pairs[label]
         )
 
+    candidates = len(pairs["candidate_tcp"])
     return {
         "sha256": canonical_sha256(value),
         "endpoint_set_sha256": endpoint_set_sha256,
+        # connectivity-policy.py ``policy``: one loopback, one per trusted TCP,
+        # two per DNS target, an accept and a reply per candidate, the daemon
+        # loopback reply and the final reject; one input mark per candidate and
+        # the daemon loopback mark.
+        "scoped_output_rules": int(value["trusted_loopback_tcp"])
+        + len(pairs["trusted_tcp"])
+        + 2 * len(pairs["trusted_dns"])
+        + 2 * candidates
+        + 2,
+        "scoped_input_rules": candidates + 1,
         "issued_at_unix": issued,
         "expires_at_unix": expires,
         "endpoints": {
@@ -1967,10 +1994,18 @@ def parse_custody_binding(raw: bytes) -> dict[str, Any]:
 def parse_record_envelope(raw: bytes) -> dict[str, Any]:
     """Catalog-free structure: canonical bytes, schema, closed keys and kind."""
 
-    value = closed(parse_canonical(raw, "record"), RECORD_KEYS, "record")
+    value = parse_canonical(raw, "record")
+    bound = type(value) is dict and NETWORK_BINDING_KEY in value
+    keys = RECORD_KEYS | {NETWORK_BINDING_KEY} if bound else RECORD_KEYS
+    value = closed(value, keys, "record")
     require(same(value["schema"], RECORD_SCHEMA), "record schema is unknown")
     require(
         type(value["kind"]) is str and value["kind"] in KINDS, "record kind is unknown"
+    )
+    # Only network records carry, and must carry, the network binding.
+    require(
+        bound is (value["kind"] == "network_enforcement"),
+        "record keys are not the closed set",
     )
     return value
 
@@ -2134,6 +2169,39 @@ def _connectivity_window(
         by_name[NETWORK_EXPIRY_PHASE]["completed_at_unix"] >= expires,
         "network expiry phase ends before the connectivity expiry",
     )
+
+
+def _network_binding(value: object, connectivity: dict[str, Any]) -> None:
+    """The loaded ruleset and cgroup a network collection was bound to.
+
+    The ruleset digests are the collector's normalized ``nft -j`` listings
+    (handles, counters and set timeouts removed). The verifier cannot recompute
+    them; it checks their form, that the scoped and restored deny rulesets
+    differ, and that the scoped rule counts are those the profile compiles to.
+    """
+
+    binding = closed(value, NETWORK_BINDING_KEYS, "network binding")
+    require(
+        same(binding["worker_cgroup"], WORKER_CGROUP)
+        and same(binding["nft_table"], NFT_TABLE)
+        and same(binding["refusing_proxy_unit"], REFUSING_PROXY_UNIT),
+        "network binding names another cgroup, table or proxy",
+    )
+    for name in (
+        "scoped_ruleset_sha256",
+        "deny_ruleset_sha256",
+        "refusing_proxy_sha256",
+    ):
+        require(is_digest(binding[name]), f"network binding {name} is malformed")
+    require(
+        binding["scoped_ruleset_sha256"] != binding["deny_ruleset_sha256"],
+        "network binding scoped and deny rulesets are the same",
+    )
+    for name in ("scoped_output_rules", "scoped_input_rules"):
+        require(
+            is_int(binding[name]) and same(binding[name], connectivity[name]),
+            f"network binding {name} differs from the connectivity profile",
+        )
 
 
 def _enforcement_images(
@@ -2350,6 +2418,9 @@ def verify_record(
         _controls(observations)
     if kind == "network_enforcement":
         _connectivity_window(phases, started, profiles["connectivity_profile_sha256"])
+        _network_binding(
+            record[NETWORK_BINDING_KEY], profiles["connectivity_profile_sha256"]
+        )
 
     require(
         record["pre_collection_preflight_sha256"] != host_preflight_sha256,

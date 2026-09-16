@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "infra/scripts/coding-native-evidence.py"
@@ -496,7 +497,13 @@ def build_record(
             }
         )
         moment += 2
+    binding = (
+        {"network_binding": copy.deepcopy(NETWORK_BINDING)}
+        if kind == "network_enforcement"
+        else {}
+    )
     return {
+        **binding,
         "schema": EVIDENCE.RECORD_SCHEMA,
         "kind": kind,
         "coverage": "same_boot",
@@ -526,6 +533,21 @@ def build_record(
         "started_at_unix": started,
         "completed_at_unix": moment + 1,
     }
+
+
+# The collector's measured ruleset binding for CONNECTIVITY_PROFILE: loopback,
+# two trusted TCP, two DNS protocols, two candidates (accept and reply each),
+# the daemon loopback reply and the reject; three input marks.
+NETWORK_BINDING = {
+    "worker_cgroup": "system.slice/ditto-coding-hosted-worker.service",
+    "nft_table": "inet ditto_coding_hosted",
+    "scoped_ruleset_sha256": digest("normalized scoped ruleset"),
+    "deny_ruleset_sha256": digest("normalized deny ruleset"),
+    "scoped_output_rules": 11,
+    "scoped_input_rules": 3,
+    "refusing_proxy_unit": "ditto-coding-hosted-egress-proxy.service",
+    "refusing_proxy_sha256": digest("egress-proxy.py"),
+}
 
 
 def preflight_value(tool_hashes: dict, checked_at: int) -> dict:
@@ -3721,9 +3743,26 @@ def test_collectors_never_enter_the_operate_workflow():
             "ssh",
             "gcloud",
             "self-hosted",
-            "collect-coding-native-enforcement",
         ):
             assert forbidden not in ci, (name, forbidden)
+        # The collector may be named only as a path filter and a lint target of
+        # the offline regression job (B5 PR4); no step ever executes it, and the
+        # rootless probe-runner job never names it.
+        workflow = yaml.safe_load(ci)
+        commands = [
+            step.get("run", "")
+            for job in workflow["jobs"].values()
+            for step in job["steps"]
+        ]
+        for command in commands:
+            for line in command.splitlines():
+                if "collect-coding-native-enforcement" in line:
+                    assert name == "coding-native-release.yml", line
+                    assert line.strip().startswith(
+                        ("uv run --frozen ruff ", "uv run --frozen mypy ")
+                    ), line
+        if name != "coding-native-release.yml":
+            assert "collect-coding-native-enforcement" not in ci
 
 
 def test_script_runs_isolated_from_the_checkout(world):
