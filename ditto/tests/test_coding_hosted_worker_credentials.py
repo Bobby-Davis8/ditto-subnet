@@ -299,6 +299,7 @@ def test_unlink_refused_leftover_temp_keeps_the_removal_receipt(
     import types
 
     spec = importlib.util.spec_from_file_location("unlink_module", UNLINK_MODULE)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     private = tmp_path / "home" / "private"
@@ -309,9 +310,14 @@ def test_unlink_refused_leftover_temp_keeps_the_removal_receipt(
         (private / name).write_text("stand-in")
     (private / ".image-storage.json.1.ab.tmp").write_text("partial")
     (private / ".provider-key.1.ab.tmp").symlink_to(tmp_path / "elsewhere")
-    synced = []
+    synced: list[int] = []
     real_fsync = os.fsync
-    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd)))
+
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
 
     class Failed(Exception):
         pass
@@ -329,7 +335,7 @@ def test_unlink_refused_leftover_temp_keeps_the_removal_receipt(
             raise AssertionError(result)
 
     basic = types.ModuleType("ansible.module_utils.basic")
-    basic.AnsibleModule = FakeModule
+    basic.AnsibleModule = FakeModule  # type: ignore[attr-defined]
     for name in ("ansible", "ansible.module_utils"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, "ansible.module_utils.basic", basic)
