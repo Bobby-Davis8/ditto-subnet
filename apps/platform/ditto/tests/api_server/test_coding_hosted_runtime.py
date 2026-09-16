@@ -723,6 +723,7 @@ def test_router_namespace_defaults_to_host_and_accepts_only_known_modes():
     host = {
         "docker_executable": "/usr/bin/docker",
         "docker_socket": "/run/ditto-coding-hosted/docker.sock",
+        "launch_journal_dir": "/var/lib/ditto-coding-hosted/launch-journal",
         "router_listen": "172.17.0.1:18080",
         "egress_network": "ditto-coding-restricted",
         "egress_proxy": "http://10.33.0.2:18090",
