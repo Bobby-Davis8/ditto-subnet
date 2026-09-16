@@ -63,6 +63,7 @@ import {
   tokenPenaltyChipLabel,
   trendDirection,
   unrankedKind,
+  unrankedReasonLabel,
   validatorWeightViews,
   vectorChampion,
   crownHysteresisState,
@@ -530,6 +531,12 @@ describe("unrankedKind", () => {
     expect(unrankedKind({ eligible: false, n: 250, team_canary: true })).toBe("team_canary");
     expect(unrankedKind({ eligible: true, n: 250, team_canary: true })).toBe("team_canary");
     expect(unrankedKind({ eligible: true, n: 250, team_canary: false })).toBeNull();
+  });
+
+  it("shares one reason label per unranked kind across the board and detail panel", () => {
+    expect(unrankedReasonLabel("team_canary")).toBe("team canary");
+    expect(unrankedReasonLabel("zero")).toBe("scored 0.000");
+    expect(unrankedReasonLabel("provisional")).toBe("provisional run");
   });
 
   it("labels smaller or unreported profiles 'provisional'", () => {

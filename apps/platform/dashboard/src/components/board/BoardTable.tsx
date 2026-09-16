@@ -37,7 +37,9 @@ import {
   showsCompositeErrBand,
   tarballArrivalDiffers,
   unrankedKind,
+  unrankedReasonLabel,
 } from "../../lib/scoring";
+import type { UnrankedKind } from "../../lib/scoring";
 import { pushEntityRoute } from "../../stores/routeStore";
 import { CopyButton } from "../shell/CopyButton";
 import { EntityButton } from "../ui/EntityButton";
@@ -624,7 +626,7 @@ function BoardRow(props: {
     finalizedEntry() && elig() && e().emission_eligible === true && (e().rank as number) <= 3
       ? " r" + e().rank
       : "";
-  const kind = (): "team_canary" | "zero" | "provisional" | null => unrankedKind(e());
+  const kind = (): UnrankedKind | null => unrankedKind(e());
   const displayName = (): string => publicDisplayName(e().agent_name, e().name_handle);
   const rowLabel = (): string =>
     (kind() === "team_canary"
@@ -707,15 +709,7 @@ function BoardRow(props: {
                 fallback={
                   <TipTarget
                     class="rank prov-rank tip-chip"
-                    text={
-                      "Not ranked (" +
-                      (kind() === "team_canary"
-                        ? "team canary"
-                        : kind() === "zero"
-                          ? "scored 0.000"
-                          : "provisional run") +
-                      ")."
-                    }
+                    text={"Not ranked (" + unrankedReasonLabel(kind() ?? "provisional") + ")."}
                   >
                     –
                   </TipTarget>
