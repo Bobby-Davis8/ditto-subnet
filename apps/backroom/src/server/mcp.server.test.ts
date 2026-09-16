@@ -61,6 +61,32 @@ afterEach(() => {
 })
 
 describe('Backroom MCP tools', () => {
+  it('keeps benchmark canary mutations write-scoped', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const id = '11111111-1111-4111-8111-111111111111'
+    try {
+      for (const [name, args] of [
+        ['issue_benchmark_canary', { canaryId: id, agentId: id, benchVersion: 13,
+          validatorHotkey: '5'.repeat(48), slotId: 'slot-0',
+          expectedArtifactSha256: 'a'.repeat(64), expectedScreenedImageSha256: 'b'.repeat(64),
+          expectedActiveVersion: 12, reason: 'A non-authoritative diagnostic',
+          confirmation: `ISSUE CANARY V13 ${id}` }],
+        ['cancel_benchmark_canary', { canaryId: id, reason: 'Stop this diagnostic',
+          confirmation: `CANCEL CANARY ${id}` }],
+      ] as const) {
+        const response = await client.callTool({ name, arguments: args })
+        expect(response.isError).toBe(true)
+        expect(readTextResult(response)).toContain('read-only')
+      }
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('reads block-bound vTrust and pending rounds without exposing ciphertext', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
     const payload = {
@@ -230,6 +256,10 @@ describe('Backroom MCP tools', () => {
         'reinstate_evicted_submission_to_queue',
         'qualify_scored_benchmark_rollout',
         'start_benchmark_rollout',
+        'list_benchmark_canaries',
+        'get_benchmark_canary',
+        'issue_benchmark_canary',
+        'cancel_benchmark_canary',
         'resolve_screening_quarantine',
         'resolve_screening_dispute',
         'resolve_ath_review',
@@ -311,7 +341,10 @@ describe('Backroom MCP tools', () => {
     // 5.7k of exact UUID, digest and subject bounds (the rest of the catalog
     // stays under the previous 132_000). Platform derives every digest from
     // those fields, so none is droppable (135_918 measured on main e1a8fa2b7).
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(136_000)
+    // The four benchmark canary operations add explicit lease identity/digest/CAS
+    // inputs (133,733 bytes measured on main without the assignment tools);
+    // both sets together measure 139,424 on main ea20fc343.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(139_500)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -330,9 +363,11 @@ describe('Backroom MCP tools', () => {
     // the one-line bench v13 gate-evidence and dispute-kind notes on the score
     // and dispute tools land at 25_237, so it moves to 25_400. The five
     // hosted-v2 assignment catalog lines (170 chars) fit under 25_400 as they
-    // are; existing Coding lines keep their routing terms.
+    // are; existing Coding lines keep their routing terms. With main's four
+    // one-line benchmark canary tools as well the catalog lands at 25_512, so
+    // it moves to 25_600.
     expect(descriptions.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
-      25_400,
+      25_600,
     )
     // Raise the budget with a reason rather than strip routing terms clients
     // use to pick these tools.
