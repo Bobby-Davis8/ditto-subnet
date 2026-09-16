@@ -11,7 +11,10 @@ helper receipt, not re-run here. The output is an unsigned draft
 Approval exists only as a detached 64-byte Ed25519 curator signature over the
 exact canonical document bytes, the format the private-v2 publication signing
 message already uses. ``verify`` checks that signature against a pinned curator
-key. No private key is read, accepted or produced here, and nothing is activated.
+key. The consumed native controls approval is itself curator-signed: ``build``
+verifies its detached signature over the exact stored approval bytes with the
+same curator key. No private key is read, accepted or produced here, and nothing
+is activated.
 """
 
 from __future__ import annotations
@@ -198,6 +201,8 @@ _PLAN_CONTROLS = frozenset(
         ("reference", "hidden"),
     }
 )
+NATIVE_RELEASE_SCHEMA = "dittobench-coding-native-release-set-v3"
+NATIVE_APPROVAL_SCHEMA = "dittobench-coding-native-controls-approval-v3"
 # coding_runtime/qualification/native.py policy() and Binding.provenance().
 NATIVE_APPROVAL_FIELDS = frozenset(
     {
@@ -209,18 +214,81 @@ NATIVE_APPROVAL_FIELDS = frozenset(
         "helper_sha256",
         "runner_sha256",
         "binding_sha256",
+        "evidence_tool_sha256",
+        "curator_signing_key_sha256",
         "machine_id_sha256",
         "boot_id",
+        "daemon_identity",
         "issued_at_unix",
         "expires_at_unix",
         "controls",
         "max_jobs",
         "images",
         "evidence_sha256",
+        "profile_pins",
         "shadow_only",
         "weight_eligible",
     }
 )
+_NATIVE_APPROVAL_DIGESTS = (
+    "release_manifest_sha256",
+    "plan_sha256",
+    "helper_sha256",
+    "runner_sha256",
+    "binding_sha256",
+    "evidence_tool_sha256",
+    "curator_signing_key_sha256",
+    "machine_id_sha256",
+)
+# native.APPROVAL_MAX_VALIDITY_SECONDS (Peyton, 2026-09-16).
+NATIVE_APPROVAL_MAX_VALIDITY_SECONDS = 86400
+_NATIVE_EVIDENCE = frozenset(
+    {
+        "host_preflight",
+        "network_enforcement",
+        "resource_enforcement",
+        "preexec_confinement",
+        "cleanup_recovery",
+        "private_input_custody",
+    }
+)
+# native.PROFILE_PINS.
+_NATIVE_PROFILE_PINS = frozenset(
+    {
+        "connectivity_endpoint_set_sha256",
+        "enforcement_images_sha256",
+        "execution_profile_sha256",
+        "grading_profile_sha256",
+        "preexec_fixtures_sha256",
+    }
+)
+# native.DAEMON_IDENTITY_KEYS and daemon_identity_policy() for the fixed socket.
+_DAEMON_IDENTITY_SCHEMA = "dittobench-coding-native-daemon-identity-v1"
+_DAEMON_IDENTITY_FIELDS = frozenset(
+    {
+        "schema",
+        "engine_id",
+        "server_version",
+        "rootless",
+        "socket_path",
+        "docker_root_dir",
+        "storage_driver",
+        "image_store",
+        "containerd_address",
+        "cgroup_driver",
+        "cgroup_version",
+        "security_options",
+        "default_runtime",
+    }
+)
+_DAEMON_SOCKET = "/run/ditto-coding-hosted/docker.sock"
+_DAEMON_ROOT_DIR = "/var/lib/ditto-coding-hosted/docker"
+_DAEMON_IMAGE_STORE = "io.containerd.snapshotter.v1"
+_DAEMON_TEXT = re.compile(r"[\x21-\x7e]{1,512}")
+# native.DAEMON_OBSERVED_KEYS: recorded, reported when different, never refused.
+_DAEMON_OBSERVED_FIELDS = frozenset({"server_version"})
+_DAEMON_OBSERVATION_FIELDS = frozenset({"field", "approved", "observed"})
+_BOOT_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")
 _NATIVE_IMAGE_FIELDS = (
     "image_ref",
     "config_digest",
@@ -230,11 +298,14 @@ _NATIVE_IMAGE_FIELDS = (
 _NATIVE_AUTHORITY_FIELDS = frozenset(
     {
         "approval_sha256",
+        "approval_signature_sha256",
+        "curator_signing_key_sha256",
         "release_manifest_sha256",
         "machine_id_sha256",
         "boot_id",
         "evidence_sha256",
         "daemon_identity_sha256",
+        "daemon_identity_observations",
     }
 )
 # coding_runtime/qualification/run.py native-bound provenance.json and summary.json.
@@ -333,6 +404,7 @@ class ApprovalInputs:
     registration: bytes
     release_index: bytes
     native_approval: bytes
+    native_approval_signature: bytes
     native_plan: bytes
     native_summary: bytes
     native_provenance: bytes
@@ -625,8 +697,113 @@ def _task_group(task_version_id: object) -> str | None:
     return groups[0] if len(groups) == 1 and groups[0] else None
 
 
+def _public_key_sha256(public_key: Ed25519PublicKey) -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    _require(isinstance(public_key, Ed25519PublicKey), "curator public key is invalid")
+    raw = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+    )
+    return _sha(raw)
+
+
+def _daemon_text(value: object) -> bool:
+    return isinstance(value, str) and _DAEMON_TEXT.fullmatch(value) is not None
+
+
+def _daemon_identity(value: object) -> bool:
+    """native.daemon_identity_policy() for the fixed native socket and data root."""
+
+    if not isinstance(value, dict) or set(value) != _DAEMON_IDENTITY_FIELDS:
+        return False
+    options = value["security_options"]
+    return (
+        value["schema"] == _DAEMON_IDENTITY_SCHEMA
+        and value["rootless"] is True
+        and all(
+            _daemon_text(value[name])
+            for name in _DAEMON_IDENTITY_FIELDS
+            - {"schema", "rootless", "security_options"}
+        )
+        and value["socket_path"] == _DAEMON_SOCKET
+        and value["docker_root_dir"] == _DAEMON_ROOT_DIR
+        and value["image_store"] == _DAEMON_IMAGE_STORE
+        and value["cgroup_driver"] == "systemd"
+        and value["cgroup_version"] == "2"
+        and isinstance(options, list)
+        and all(_daemon_text(option) for option in options)
+        and options == sorted(set(options))
+        and "name=rootless" in options
+    )
+
+
+def _daemon_identity_sha256(value: dict[str, Any]) -> str:
+    """native.daemon_identity_sha256(): sha256 of its sorted compact JSON."""
+
+    return _sha(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _daemon_observations(value: object, identity: dict[str, Any]) -> bool:
+    """native.Binding.check_daemon() observations: only observed-only fields, each
+    naming the approved value and a different observed daemon value, once."""
+
+    if not isinstance(value, list) or len(value) > len(_DAEMON_OBSERVED_FIELDS):
+        return False
+    fields = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _DAEMON_OBSERVATION_FIELDS:
+            return False
+        field = item["field"]
+        if (
+            not isinstance(field, str)
+            or field not in _DAEMON_OBSERVED_FIELDS
+            or item["approved"] != identity[field]
+            or not _daemon_text(item["observed"])
+            or item["observed"] == item["approved"]
+        ):
+            return False
+        fields.append(field)
+    return fields == sorted(set(fields))
+
+
+def _native_approval_policy(approval: dict[str, Any]) -> bool:
+    """native.policy() without the host clock, plan, helper and job arguments,
+    which the host checks when it consumes the approval."""
+
+    issued, expires = approval["issued_at_unix"], approval["expires_at_unix"]
+    evidence, pins = approval["evidence_sha256"], approval["profile_pins"]
+    return (
+        approval["schema"] == NATIVE_APPROVAL_SCHEMA
+        and approval["purpose"] == "private-compatibility-once"
+        and approval["shadow_only"] is True
+        and approval["weight_eligible"] is False
+        and _revision(approval["source_revision"])
+        and all(_digest(approval[name]) for name in _NATIVE_APPROVAL_DIGESTS)
+        and type(approval["controls"]) is int
+        and 1 <= approval["controls"] <= 1024
+        and type(approval["max_jobs"]) is int
+        and approval["max_jobs"] in (1, 2, 4)
+        and type(issued) is int
+        and type(expires) is int
+        and 0 < expires - issued <= NATIVE_APPROVAL_MAX_VALIDITY_SECONDS
+        and isinstance(approval["boot_id"], str)
+        and _BOOT_ID.fullmatch(approval["boot_id"]) is not None
+        and isinstance(evidence, dict)
+        and set(evidence) == _NATIVE_EVIDENCE
+        and all(_digest(item) for item in evidence.values())
+        and isinstance(pins, dict)
+        and set(pins) == _NATIVE_PROFILE_PINS
+        and all(_digest(item) for item in pins.values())
+        and _daemon_identity(approval["daemon_identity"])
+    )
+
+
 def build_profile_approval(
-    inputs: ApprovalInputs, *, curator_signing_key_sha256: str
+    inputs: ApprovalInputs,
+    *,
+    curator_signing_key_sha256: str,
+    curator_public_key: Ed25519PublicKey,
 ) -> bytes:
     """Return the exact canonical unsigned approval document bytes."""
 
@@ -634,6 +811,10 @@ def build_profile_approval(
     _require(
         curator_signing_key_sha256 == request["curator_signing_key_sha256"],
         "curator public key differs from the reviewed pin",
+    )
+    _require(
+        _public_key_sha256(curator_public_key) == curator_signing_key_sha256,
+        "curator public key differs from the pinned identity",
     )
     index = request["catalog_index"]
     language = request["language"]
@@ -801,8 +982,13 @@ def build_profile_approval(
     release = _compact_json(
         inputs.release_index, 64 << 10, "release index", newline=False
     )
+    runtime = release.get("runtime")
     _require(
-        release.get("schema") == "dittobench-coding-native-release-set-v2"
+        release.get("schema") == NATIVE_RELEASE_SCHEMA
+        and isinstance(runtime, dict)
+        and _digest(runtime.get("worker_sha256"))
+        and _digest(runtime.get("probe_runner_sha256"))
+        and runtime["probe_runner_sha256"] != runtime["worker_sha256"]
         and release.get("independent_approval_required") is True
         and release.get("shadow_only") is True
         and all(
@@ -844,19 +1030,36 @@ def build_profile_approval(
         _sha(inputs.native_approval) == request["native_controls_approval_sha256"],
         "native approval differs from the reviewed pin",
     )
+    # The curator signs the exact stored approval bytes, which need not be
+    # canonical; the host and the evidence tool parse those same bytes strictly.
+    from cryptography.exceptions import InvalidSignature
+
+    signature = inputs.native_approval_signature
+    _require(
+        isinstance(signature, bytes) and len(signature) == SIGNATURE_BYTES,
+        "native approval signature is missing or malformed",
+    )
+    try:
+        curator_public_key.verify(signature, inputs.native_approval)
+    except InvalidSignature:
+        raise ProfileApprovalError(
+            "native approval signature does not verify"
+        ) from None
     approval = _json(inputs.native_approval, 65536, "native approval")
     _require(
-        set(approval) == NATIVE_APPROVAL_FIELDS
-        and approval["schema"] == "dittobench-coding-native-controls-approval-v2"
-        and approval["purpose"] == "private-compatibility-once"
-        and approval["shadow_only"] is True
-        and approval["weight_eligible"] is False
-        and type(approval["controls"]) is int
-        and all(
-            _digest(approval[name])
-            for name in ("plan_sha256", "helper_sha256", "runner_sha256")
-        ),
+        set(approval) == NATIVE_APPROVAL_FIELDS and _native_approval_policy(approval),
         "native approval is invalid",
+    )
+    _require(
+        approval["curator_signing_key_sha256"] == curator_signing_key_sha256,
+        "native approval names another curator key",
+    )
+    _require(
+        approval["profile_pins"]["execution_profile_sha256"]
+        == _sha(inputs.execution_profile)
+        and approval["profile_pins"]["grading_profile_sha256"]
+        == _sha(inputs.grading_profile),
+        "native approval profile pins differ from the reviewed profiles",
     )
     _require(
         approval["source_revision"] == revision,
@@ -959,14 +1162,30 @@ def build_profile_approval(
     _require(
         isinstance(authority, dict)
         and set(authority) == _NATIVE_AUTHORITY_FIELDS
-        and summary["native_control_authority"] == authority
+        and _same(summary["native_control_authority"], authority)
         and authority["approval_sha256"] == request["native_controls_approval_sha256"]
+        and authority["approval_signature_sha256"] == _sha(signature)
         and authority["release_manifest_sha256"] == request["release_manifest_sha256"]
         and all(
-            authority[name] == approval[name]
-            for name in ("machine_id_sha256", "boot_id", "evidence_sha256")
-        ),
+            _same(authority[name], approval[name])
+            for name in (
+                "curator_signing_key_sha256",
+                "machine_id_sha256",
+                "boot_id",
+                "evidence_sha256",
+            )
+        )
+        and authority["daemon_identity_sha256"]
+        == _daemon_identity_sha256(approval["daemon_identity"]),
         "native control authority differs from the approval",
+    )
+    # A server_version change is observed on the host, never refused (Peyton,
+    # 2026-09-16); anything else in the observations is not the host's output.
+    _require(
+        _daemon_observations(
+            authority["daemon_identity_observations"], approval["daemon_identity"]
+        ),
+        "native control daemon observations are invalid",
     )
     _require(
         all(
@@ -1224,6 +1443,7 @@ def _build(argv: list[str]) -> str:
         "registration",
         "release-index",
         "native-approval",
+        "native-approval-signature",
         "native-plan",
         "native-summary",
         "native-provenance",
@@ -1233,7 +1453,13 @@ def _build(argv: list[str]) -> str:
         parser.add_argument(f"--{name}", type=Path, required=True)
     args = parser.parse_args(argv)
     execution, grading, receipt = _read_profiles(args.profiles)
-    _public_key, key_sha256 = _curator_public_key(args.curator_public_key)
+    public_key, key_sha256 = _curator_public_key(args.curator_public_key)
+    try:
+        native_signature = _read(args.native_approval_signature, SIGNATURE_BYTES)
+    except ProfileApprovalError:
+        raise ProfileApprovalError(
+            "native approval signature is missing or malformed"
+        ) from None
     body = build_profile_approval(
         ApprovalInputs(
             request=_read(args.request, 1 << 16),
@@ -1245,11 +1471,13 @@ def _build(argv: list[str]) -> str:
             registration=_read(args.registration, 64 << 10),
             release_index=_read(args.release_index, 64 << 10),
             native_approval=_read(args.native_approval, 65536),
+            native_approval_signature=native_signature,
             native_plan=_read(args.native_plan, MAX_PLAN_BYTES),
             native_summary=_read(args.native_summary, 1 << 20),
             native_provenance=_read(args.native_provenance, 1 << 20),
         ),
         curator_signing_key_sha256=key_sha256,
+        curator_public_key=public_key,
     )
     _write_new(args.output, body)
     return f"approved=false\ndocument_sha256={_sha(body)}\n"
