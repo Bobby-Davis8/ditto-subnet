@@ -244,24 +244,23 @@ false, and every target list ships empty.
   `/opt/ditto/coding/certification-root`. No Compose setting points at it any
   more: the host certification service loads its own installed copy. A pack
   edit still selects the scorer release.
-- **Production rendering.** The `validator_stack` role has two switches:
-  - `validator_stack_dittobench_coding_canary_enabled` renders the scorer gate,
-    the runtime image repository (Docker reference grammar) and `sha256:`
-    digest, and `validator_stack_coding_docker_host`. It builds the whole
-    scorer coding host, not just a route. A failure leaves the coding routes at
-    404 and ordinary scoring running.
-  - `validator_stack_coding_canary_enabled` renders the validator worker, its
-    poll interval, `validator_stack_coding_canary_targets` (mappings with
-    exactly `agent_id`, `artifact_sha256` and `screened_image_sha256`), and
-    `validator_stack_coding_canary_validator_hotkey`. It requires the scorer
-    switch, the dedicated daemon endpoint, and 1 to 16 exact targets bound to
-    `validator_stack_hotkey`. With the host certification service, the role
-    refuses this switch outright until it renders the certification socket
-    route (`infra/docs/coding-certification-service.md`).
+- **Production rendering.** `validator_stack_coding_canary_enabled` renders
+  the validator worker, its poll interval,
+  `validator_stack_coding_canary_targets` (mappings with exactly `agent_id`,
+  `artifact_sha256` and `screened_image_sha256`),
+  `validator_stack_coding_canary_validator_hotkey`, and the host certification
+  service's socket route: the socket's parent directory mount, the bearer file
+  mount, the pinned socket uid and gid, and the service's runtime image and
+  pack manifest digests (`infra/docs/coding-certification-service.md`). Input
+  validation admits the switch only with 1 to 16 exact targets bound to
+  `validator_stack_hotkey` and the complete socket route. The bearer is only
+  ever a mounted file. The Compose scorer's certification switch
+  (`validator_stack_dittobench_coding_canary_enabled`) and its daemon, runtime
+  image and egress settings are retired.
 
-  Validation runs before any host mutation. Stage the scorer switch first. Then
-  confirm two things before turning on the validator switch: the scorer stays
-  healthy, and the readiness probe answers `ready: true`.
+  Validation runs before any host mutation. Before turning on the validator
+  switch, confirm that the host certification service's readiness probe
+  answers `ready: true` over its socket.
 - **Exchange origin.** Validators accept a coding grant exchange URL only when
   it is exactly `{VALIDATOR_PLATFORM_API_URL}/api/v1/validator/...`. Platform
   renders that URL from `platform_coding_validator_api_base_url`, which

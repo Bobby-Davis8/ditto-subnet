@@ -84,12 +84,50 @@ Validator environment (read only when `VALIDATOR_CODING_CANARY_ENABLED=true`):
 | --- | --- |
 | `VALIDATOR_CODING_CERTIFICATION_SOCKET_UID` | pinned socket owner uid (the service user); not 0 |
 | `VALIDATOR_CODING_CERTIFICATION_SOCKET_GID` | pinned socket group gid (the client group); not 0 |
-| `VALIDATOR_CODING_CERTIFICATION_CONTROL_TOKEN` | 32–256 URL-safe characters; must differ from `VALIDATOR_DITTOBENCH_CONTROL_TOKEN` |
+| `VALIDATOR_CODING_CERTIFICATION_CONTROL_TOKEN_FILE` | absolute path of the mounted bearer file (Compose pins `/run/secrets/coding-certification-control-token`); no final symlink; a regular file of 32–256 URL-safe characters plus at most one trailing newline; must differ from `VALIDATOR_DITTOBENCH_CONTROL_TOKEN` |
 | `VALIDATOR_CODING_CERTIFICATION_RUNTIME_IMAGE_DIGEST` | must equal the service's pinned digest |
 | `VALIDATOR_CODING_CERTIFICATION_PACK_MANIFEST_SHA256` | must equal the service's pinned manifest digest |
 
-The canary no longer uses `VALIDATOR_DITTOBENCH_API_URL`, the scorer bearer or
-the shared scorer client.
+The bearer is never an environment value, because container environment values
+are visible to `docker inspect`: `VALIDATOR_CODING_CERTIFICATION_CONTROL_TOKEN`
+is refused at startup. The canary no longer uses `VALIDATOR_DITTOBENCH_API_URL`,
+the scorer bearer or the shared scorer client, and the Compose scorer no longer
+serves a certification route.
+
+### Validator stack rendering
+
+`validator_stack` renders the route only while
+`validator_stack_coding_canary_enabled` is true, and its input validation admits
+that switch only when the whole route can be rendered:
+
+| Role variable | Rendered as | Validation |
+| --- | --- | --- |
+| (fixed) | `VALIDATOR_CODING_CERTIFICATION_SOCKET_HOST_DIRECTORY=/run/ditto-coding-certification` | not configurable |
+| `validator_stack_coding_certification_control_token_path` | `VALIDATOR_CODING_CERTIFICATION_CONTROL_TOKEN_HOST_PATH` | absolute, normalized, at most 255 bytes, not `/dev/null`, not inside the socket directory |
+| `validator_stack_coding_certification_socket_uid` / `_gid` | `VALIDATOR_CODING_CERTIFICATION_SOCKET_UID` / `_GID` | canonical decimal in [1, 2147483646] |
+| `validator_stack_coding_certification_runtime_image_digest` | `VALIDATOR_CODING_CERTIFICATION_RUNTIME_IMAGE_DIGEST` | `sha256:<64 hex>` |
+| `validator_stack_coding_certification_pack_manifest_sha256` | `VALIDATOR_CODING_CERTIFICATION_PACK_MANIFEST_SHA256` | 64 hex |
+
+With the switch off, both host paths render as `/dev/null` and every other value
+is empty. Compose then:
+
+- bind-mounts the socket's **parent directory** read-only at
+  `/run/ditto-coding-certification`, never the socket file. A service restart
+  recreates the socket inside that directory, and the service unit sets
+  `RuntimeDirectoryPreserve=yes`, so the directory's inode (the one the bind
+  mount holds) survives restarts. Bind-mounting the socket file, or a directory
+  systemd removes on stop, would leave the validator holding a deleted inode
+  until it restarts. `create_host_path: true` means a validator that starts
+  before the service (for example after a reboot) still starts, and ordinary
+  scoring keeps running. The client refuses the Docker-created root-owned
+  directory until the service's systemd `RuntimeDirectory=` takes it over with
+  the pinned owner, group and mode. Verify that takeover on the target systemd
+  before any activation.
+- mounts the bearer file read-only as the Compose secret
+  `coding-certification-control-token` at
+  `/run/secrets/coding-certification-control-token`.
+
+The role never reads, renders or logs the bearer.
 
 ## Socket verification (validator side)
 
@@ -157,7 +195,12 @@ uvx --from ansible-core==2.21.2 ansible-playbook --check -i localhost, tests/cod
 - Go: `./internal/codingcertservice ./cmd/dittobench-coding-certification-service
   ./internal/rootlessnetns ./internal/codingcanary ./internal/codinghost ./internal/sandbox`.
 - Python: `ditto/tests/validator/test_coding_certification_socket.py`,
-  `test_coding_canary.py`, `test_coding_runtime_wiring.py`, `test_config.py`.
+  `test_coding_canary.py`, `test_coding_runtime_wiring.py`, `test_config.py`,
+  and the Compose and role guards `ditto/tests/test_compose_stack.py` and
+  `ditto/tests/test_coding_executor_validator_runtime.py`.
+- Ansible: `tests/validator-stack-coding-canary.yml` renders the default-off
+  and complete socket routes and rejects each missing or unsafe route input at
+  its own assertion.
 - CI: `coding-rootless-router.yml` runs
   `TestCertificationServiceSocketAndReadinessUnderRootlessDocker` against a real
   labelled rootless daemon with synthetic data only. It proves the topology
@@ -173,13 +216,8 @@ uvx --from ansible-core==2.21.2 ansible-playbook --check -i localhost, tests/cod
   binary. These are separate, approved operator steps.
 - The host deny-all egress guard for the daemon user, the egress proxy itself,
   and the egress network on the dedicated daemon.
-- Materializing the control token on the host or in the validator environment.
-- Mounting `/run/ditto-coding-certification` into the validator container and
-  rendering the new `VALIDATOR_CODING_CERTIFICATION_*` variables in
-  `validator_stack`. Until then `validator_stack` refuses
-  `validator_stack_coding_canary_enabled: true` during input validation,
-  before any host change. Without that refusal the validator would exit at
-  startup and stop ordinary scoring too.
+- Materializing the control token file on the host. `validator_stack` only
+  names its path.
 - Preloading the reviewed runtime image, and stale-resource cleanup on the
   dedicated daemon.
 - A time-bounded authority window on the router listener: unlike the one-shot

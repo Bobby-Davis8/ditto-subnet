@@ -93,6 +93,7 @@
           - "'SupplementaryGroups=ditto-coding-cert-clients' in service_unit"
           - "'RuntimeDirectory=ditto-coding-certification' in service_unit"
           - "'RuntimeDirectoryMode=0750' in service_unit"
+          - "'RuntimeDirectoryPreserve=yes' in service_unit"
           - "'LoadCredential=control-token:/etc/ditto-coding-certification/control-token' in service_unit"
           - "'BindReadOnlyPaths=/run/user/61001/dockerd-rootless/child_pid' in service_unit"
           - "'BindsTo=ditto-coding-certification-docker.service' in service_unit"
