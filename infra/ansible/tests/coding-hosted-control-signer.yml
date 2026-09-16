@@ -27,6 +27,8 @@
       - Require the pre-placed single-link 0600 32-byte seed owned by ditto-api
     # Synthetic stand-ins for host_vars, Terraform outputs and Secret Manager.
     platform_inference_public_base_url: https://platform.invalid
+    # #1921 derives platform_coding_validator_api_base_url from platform_domain.
+    platform_domain: platform.invalid
     platform_pg_host: 192.0.2.10
     platform_storage_access_key: synthetic-access-id
     platform_db_name: synthetic_platform
