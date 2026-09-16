@@ -44,6 +44,7 @@ python -I -m ditto.coding_hosted_profile_approval build \
   --registration /ABS/PRIVATE/private-v2-registration.json \
   --release-index /ABS/RELEASE/release.json \
   --native-approval /ABS/PRIVATE/native-controls-approval.json \
+  --native-approval-signature /ABS/PRIVATE/native-controls-approval.sig \
   --native-plan /ABS/PRIVATE/compatibility-plan.json \
   --native-summary /ABS/PRIVATE/NATIVE-MATRIX/summary.json \
   --native-provenance /ABS/PRIVATE/NATIVE-MATRIX/provenance.json \
@@ -59,6 +60,10 @@ Every path, including `--curator-public-key`, must be absolute.
   SHA-256 must equal the receipt's `request_sha256`. It must use the helper's
   exact field names; the builder rejects case variants that Go's decoder would
   accept.
+- `--native-approval-signature` is the curator's raw 64-byte detached Ed25519
+  signature over the exact stored native approval bytes, the file the host
+  consumed with `run.py --native-approval-signature`. It must verify under the
+  same `--curator-public-key`.
 - `--native-plan` is the private compatibility plan written by
   `coding_runtime/qualification/prepare.py` and run by the native controls. Its
   SHA-256 must equal the native approval's `plan_sha256`. It contains private
@@ -119,13 +124,27 @@ checks are type-strict, so `true` never matches `1` and `1.0` never matches `1`.
    It matches its pin and binds the same corpus release, private release,
    payload and catalog.
 4. **Release set.** `release.json` matches its pin and its writer's exact
-   encoding. Readiness fields are unedited and `source_revision` equals the
-   reviewed revision. All four images carry their driver profiles and approval
+   encoding (`dittobench-coding-native-release-set-v3`, whose runtime records
+   distinct `worker_sha256` and `probe_runner_sha256` digests). Readiness fields
+   are unedited and `source_revision` equals the reviewed revision. All four images carry their driver profiles and approval
    digests. The reviewed language's `image_ref` digest equals the profiles'
    `image_digest`.
-5. **Native approval and plan.** The approval matches its pin and has the
-   `dittobench-coding-native-controls-approval-v2` shape. Its revision, release
-   set and four images equal the release index.
+5. **Native approval and plan.** The approval matches its pin, and its detached
+   curator signature verifies over those exact bytes with the pinned curator
+   key before they are parsed; the bytes need not be canonical JSON. It is the
+   closed `dittobench-coding-native-controls-approval-v3` object that
+   `native.policy` accepts, apart from the host clock:
+   - it names the same `curator_signing_key_sha256` as the request;
+   - it is valid for at most 24 hours (`0 < expires_at_unix - issued_at_unix
+     <= 86400`); expiry is enforced by the host, not here;
+   - its `daemon_identity` is a rootless
+     `dittobench-coding-native-daemon-identity-v1` on the fixed native socket
+     and data root, and `profile_pins`, `evidence_sha256` and every digest are
+     closed and well formed;
+   - `profile_pins.execution_profile_sha256` and `grading_profile_sha256` equal
+     the reviewed profiles.
+
+   Its revision, release set and four images equal the release index.
    - The plan hashes to the approval's `plan_sha256` and is `prepare.py`'s
      exact encoding. It is the closed plan schema at the reviewed revision, with
      two replicates and `production_api_approval=false`.
@@ -141,6 +160,14 @@ checks are type-strict, so `true` never matches `1` and `1.0` never matches `1`.
    independent pin and are the native-bound outputs of `qualification/run.py` at
    the same revision. They carry the same `native_control_authority` for the
    approval and match its plan, helper and runner.
+   - The authority names the approval digest, the signature digest, the
+     curator key, machine, boot and evidence of the approval, and
+     `daemon_identity_sha256` equal to the sha256 of the approval's
+     `daemon_identity` (sorted compact JSON).
+   - `daemon_identity_observations` may only report a `server_version` that
+     differs from the approved one (Peyton, 2026-09-16): an observed Docker
+     patch upgrade is recorded, not refused. Any other observed field is
+     rejected.
    - Provenance keeps `runtime_qualification` and `production_api_approval`
      false, and its inspected repository digests include the profile image.
    - The summary reports native and private controls passed, zero failed
