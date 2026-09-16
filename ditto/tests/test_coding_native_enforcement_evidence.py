@@ -3758,8 +3758,9 @@ def test_collectors_never_enter_the_operate_workflow():
         ):
             assert forbidden not in ci, (name, forbidden)
         # The collector may be named only as a path filter and a lint target of
-        # the offline regression job (B5 PR4); no step ever executes it, and the
-        # rootless probe-runner job never names it.
+        # the offline regression job (B5 PR4), and as a path filter of the
+        # probe-runner job, whose kernel step imports its samplers (B5 PR5); no
+        # step ever executes it.
         workflow = yaml.safe_load(ci)
         commands = [
             step.get("run", "")
@@ -3774,7 +3775,18 @@ def test_collectors_never_enter_the_operate_workflow():
                         ("uv run --frozen ruff ", "uv run --frozen mypy ")
                     ), line
         if name != "coding-native-release.yml":
-            assert "collect-coding-native-enforcement" not in ci
+            named = [
+                line.strip()
+                for line in ci.splitlines()
+                if "collect-coding-native-enforcement" in line
+            ]
+            # YAML 1.1 reads the `on` key as true.
+            triggers = workflow.get(True) or workflow["on"]
+            assert named == ["- infra/scripts/collect-coding-native-enforcement.py"]
+            assert (
+                "infra/scripts/collect-coding-native-enforcement.py"
+                in triggers["pull_request"]["paths"]
+            )
 
 
 def test_script_runs_isolated_from_the_checkout(world):

@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Default-off root collector for native enforcement evidence (B5 PR4: network).
+"""Default-off root collector for native enforcement evidence (B5 PR4, PR5).
 
-Only ``network`` is implemented. Resource, pre-exec and cleanup collection are
-refused (PR5). Nothing here mints approval: the collector retains one
-``network_enforcement`` record in the evidence store, and Peyton reviews it with
-``coding-native-evidence.py verify`` against a post-collection preflight.
+``network`` (PR4) and ``resource`` (PR5) are collected. ``preexec`` and
+``cleanup`` are not implemented. A kind with any catalog probe it does not
+collect lists it in ``NOT_COLLECTED`` and refuses before any host effect. Nothing here
+mints approval: the collector retains one record in the evidence store, and
+Peyton reviews it with ``coding-native-evidence.py verify`` against a
+post-collection preflight.
 
 Run only on ``ditto-coding-hosted-v2``, as root, from the reviewed release
-checkout, with the worker unit installed in ``network_enforcement`` mode, the
-refusing proxy running and an expiring probe connectivity profile installed.
-It is never invoked from ``coding-hosted-operate`` or any CI workflow.
+checkout. Network collection needs the worker unit installed in
+``network_enforcement`` mode, the refusing proxy running and an expiring probe
+connectivity profile installed; resource collection needs the worker and
+custody stopped and the approved profile documents. It is never invoked from
+``coding-hosted-operate`` or any CI workflow.
 
-What it measures from outside the candidate container:
+Resource collection starts every workload through the production launch paths
+(hosted harness sandbox, authoring executor, hosted grading executor), driven by
+the measured runner's resource agent as the daemon user, and measures each limit
+from outside: the started container's cgroup v2 files and ``docker inspect``,
+and ``/proc`` of the workload process, whose binary is hashed like every agent.
+
+What network collection measures from outside the candidate container:
 
 - the probe runner file it will execute (release-recorded digest), and the
   ``/proc/<pid>/exe`` of every agent process it drives (worker cgroup, daemon
@@ -47,6 +57,7 @@ import os
 import re
 import secrets
 import selectors
+import shutil
 import signal
 import socket
 import stat
@@ -95,6 +106,7 @@ GATE = AGENT_DIR / "gate"
 CONNECTIVITY_PATH = Path("/etc/ditto-coding-hosted/connectivity.json")
 PREREQUISITES_PATH = Path("/usr/local/lib/ditto-coding-hosted/host-prerequisites.json")
 CUSTODY_RUN = Path("/run/ditto-coding-custody")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 RUN_LABEL = "io.heyditto.dittobench.run"
 HARNESS_UID = 65532
 EXECUTOR_UID = 10001
@@ -1012,6 +1024,97 @@ class SystemHost:
             ["/usr/bin/docker", *arguments], cwd="/", **self._docker_env()
         )
 
+    # -- resource and cleanup collection (B5 PR5) ----------------------------
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def boottime_ns(self) -> int:
+        return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+
+    def clock_ticks(self) -> int:
+        return os.sysconf("SC_CLK_TCK")
+
+    def cgroup_read(self, cgroup: str, name: str) -> bytes | None:
+        require(
+            ".." not in cgroup.split("/") and "/" not in name,
+            "cgroup path is malformed",
+        )
+        try:
+            return (CGROUP_ROOT / cgroup / name).read_bytes()[:MAX_FILE]
+        except FileNotFoundError:
+            return None
+
+    def fd_count(self, pid: int) -> int:
+        return len(os.listdir(f"/proc/{pid}/fd"))
+
+    def root_statvfs(self, pid: int, path: str) -> tuple[int, int, int, int]:
+        # /proc/<pid>/root resolves inside the process's own mount namespace.
+        info = os.statvfs(f"/proc/{pid}/root{path}")
+        return info.f_blocks, info.f_bfree, info.f_bavail, info.f_frsize
+
+    def root_lexists(self, pid: int, path: str) -> bool:
+        return os.path.lexists(f"/proc/{pid}/root{path}")
+
+    def docker_output_bytes(self, *args: str) -> int:
+        """Count Docker's output (stdout and stderr) without keeping it."""
+
+        process = subprocess.Popen(
+            ["/usr/bin/docker", *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd="/",
+            **self._docker_env(),
+        )
+        assert process.stdout is not None
+        total = 0
+        deadline = time.monotonic() + 90
+        while chunk := process.stdout.read(1 << 20):
+            total += len(chunk)
+            require(time.monotonic() < deadline, "docker output took too long")
+        require(process.wait(timeout=30) == 0, f"docker {args[0]} failed")
+        return total
+
+    def prepare_work_dir(self, uid: int, gid: int, files: dict[str, bytes]) -> None:
+        self.remove_work_dir()
+        os.mkdir(WORK_DIR, 0o700)
+        os.chown(WORK_DIR, uid, gid)
+        for name, raw in files.items():
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            fd = os.open(WORK_DIR / name, flags, 0o400)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw)
+                os.fchown(stream.fileno(), uid, gid)
+
+    def remove_work_dir(self) -> None:
+        if not os.path.lexists(WORK_DIR):
+            return
+        require(stat.S_ISDIR(os.lstat(WORK_DIR).st_mode), "work directory is a link")
+        shutil.rmtree(WORK_DIR)
+
+    def resource_session(self, unit: str, arguments: list[str]) -> Session:
+        return ProcessSession(
+            [
+                "/usr/bin/systemd-run",
+                "--user",
+                f"--machine={USER}@.host",
+                "--pipe",
+                "--quiet",
+                "--wait",
+                "--collect",
+                f"--unit={unit}",
+                f"--setenv=DOCKER_HOST=unix://{SOCKET}",
+                f"--setenv=DOCKER_CONFIG={DOCKER_CONFIG}",
+                f"--setenv=TMPDIR={WORK_DIR}",
+                "--setenv=PATH=/usr/bin:/bin",
+                "--",
+                *arguments,
+            ],
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            cwd="/",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Collection
@@ -1154,8 +1257,9 @@ class Collector:
             self.runner_sha256 == self.release_index["probe_runner_sha256"],
             "installed probe runner differs from the release-recorded binary",
         )
-        language = self.config["candidate_image_language"]
-        self.image = self.release_value["images"][language]["image_ref"]
+        language = self.config.get("candidate_image_language")
+        if language is not None:
+            self.image = self.release_value["images"][language]["image_ref"]
 
     def bind_preflight(self) -> None:
         store = self.evidence.Store(Path(self.config["store"]))
@@ -2037,6 +2141,1123 @@ class Collector:
         return self.assemble(started, completed, preconditions, residue, tools)
 
 
+# ---------------------------------------------------------------------------
+# Resource and cleanup collection (B5 PR5)
+#
+# Workloads start only through the production launch paths, driven by the
+# measured probe runner's resource agent running as the daemon user. Every
+# limit is measured here, from outside the candidate: cgroup v2 files of the
+# started container, docker inspect of that container, /proc of the workload
+# process (whose binary is hashed through /proc/<pid>/exe), a statfs of its
+# /tmp, and Docker's retained log. The agent's own reports are only the
+# production receipts (return code, timeout, retained output length).
+
+RESOURCE_CONFIRMATION = "COLLECT NATIVE RESOURCE ENFORCEMENT EVIDENCE"
+RESOURCE_CONFIG_SCHEMA = "dittobench-coding-native-resource-collection-config-v1"
+RESOURCE_AGENT_SCHEMA = "dittobench-coding-native-resource-agent-v1"
+WORK_DIR = Path("/var/lib/ditto-coding-hosted/native-enforcement")
+WORK_FILES = {
+    "execution_profile": "execution-profile.json",
+    "grading_profile": "grading-profile.json",
+    "enforcement_images": "enforcement-images.json",
+}
+EXECUTOR_LABEL = "io.heyditto.dittobench.coding-executor"
+EXECUTOR_RUNNER = "/workspace/dittobench-coding-enforcement-probe"
+ROOTFS_PROBE_PREFIX = "/.dittobench-rootfs-probe-"
+CLASSES = ("harness", "executor_authoring", "executor_grading")
+CANDIDATE_UIDS = {
+    "harness": 65532,
+    "executor_authoring": 10001,
+    "executor_grading": 10001,
+}
+INT64_MAX = (1 << 63) - 1
+NONCE = re.compile(r"[0-9a-f]{16}")
+RUN_ID = re.compile(r"r[0-9]{1,3}")
+SECURITY_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+EXECUTOR_INSTANCE = re.compile(r"coding-executor-[0-9a-f]{32}")
+CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+HOLD_MS = 4000
+RUN_TIMEOUT_MS = 180_000
+LIMIT_WAIT_SECONDS = 90
+SAMPLE_SECONDS = 0.01
+CPU_SECONDS = 9
+CPU_WARMUP_SECONDS = 1.5
+CPU_WINDOW_SECONDS = 4.0
+EXECUTOR_LOG_BYTES = 4 * 24576
+HANG_GRACE_SECONDS = 120
+
+# Probes each collector kind observes. Anything else in the catalog is listed
+# in NOT_COLLECTED with the concrete reason, and a kind with any such probe
+# refuses to run: a record missing a catalog probe can never verify, and no
+# collector claims a probe it did not measure.
+NOT_COLLECTED: dict[str, dict[str, str]] = {
+    "network_enforcement": {},
+    "resource_enforcement": {},
+}
+
+
+def parse_resource_config(raw: bytes) -> dict[str, Any]:
+    keys = {
+        "schema",
+        "source_revision",
+        "release_directory",
+        "release_manifest_sha256",
+        "machine_id_sha256",
+        "boot_id",
+        "store",
+        "pre_collection_preflight_sha256",
+        "execution_profile",
+        "grading_profile",
+        "enforcement_images",
+        "seccomp_profile",
+        "apparmor_profile",
+        "shadow_only",
+        "weight_eligible",
+    }
+    value = closed(parse_unique(raw, "collector config"), keys, "collector config")
+    require(
+        value["schema"] == RESOURCE_CONFIG_SCHEMA, "collector config schema differs"
+    )
+    require(
+        value["shadow_only"] is True and value["weight_eligible"] is False,
+        "collector config must be shadow-only",
+    )
+    require(
+        type(value["source_revision"]) is str
+        and REVISION.fullmatch(value["source_revision"]),
+        "collector source revision is malformed",
+    )
+    for name in (
+        "release_manifest_sha256",
+        "machine_id_sha256",
+        "pre_collection_preflight_sha256",
+    ):
+        require(
+            type(value[name]) is str and HEX64.fullmatch(value[name]),
+            f"collector {name} is malformed",
+        )
+    require(
+        type(value["boot_id"]) is str and BOOT_ID.fullmatch(value["boot_id"]),
+        "collector boot id is malformed",
+    )
+    for name in (
+        "release_directory",
+        "store",
+        "execution_profile",
+        "grading_profile",
+        "enforcement_images",
+    ):
+        path = value[name]
+        require(
+            type(path) is str
+            and path.startswith("/")
+            and os.path.normpath(path) == path
+            and ".." not in path.split("/"),
+            f"collector {name} is not a clean absolute path",
+        )
+    for name in ("seccomp_profile", "apparmor_profile"):
+        require(
+            value[name] == ""
+            or (
+                type(value[name]) is str
+                and SECURITY_PROFILE.fullmatch(value[name])
+                and value[name].lower() != "unconfined"
+            ),
+            f"collector {name} is malformed",
+        )
+    return value
+
+
+def parse_cgroup_limit(raw: bytes | None, label: str) -> int:
+    """A cgroup v2 single-value limit; ``max`` is recorded as INT64_MAX."""
+
+    require(raw is not None, f"container cgroup lacks {label}")
+    assert raw is not None
+    text = raw.decode("ascii", "replace").strip()
+    if text == "max":
+        return INT64_MAX
+    require(text.isdecimal() and len(text) <= 19, f"{label} is malformed")
+    return min(int(text), INT64_MAX)
+
+
+def parse_cpu_max(raw: bytes | None) -> int:
+    """``cpu.max`` as CPU millis per second; no quota is 0."""
+
+    require(raw is not None, "container cgroup lacks cpu.max")
+    assert raw is not None
+    fields = raw.decode("ascii", "replace").split()
+    require(
+        len(fields) == 2
+        and fields[1].isdecimal()
+        and int(fields[1]) > 0
+        and (fields[0] == "max" or fields[0].isdecimal()),
+        "cpu.max is malformed",
+    )
+    if fields[0] == "max":
+        return 0
+    return int(fields[0]) * 1000 // int(fields[1])
+
+
+def parse_keyed(raw: bytes | None, label: str) -> dict[str, int]:
+    """``memory.events``, ``pids.events``, ``cpu.stat`` and ``/proc/<pid>/io``."""
+
+    require(raw is not None, f"container cgroup lacks {label}")
+    assert raw is not None
+    result: dict[str, int] = {}
+    for line in raw.decode("ascii", "replace").splitlines():
+        fields = line.replace(":", " ").split()
+        require(
+            len(fields) == 2 and fields[1].isdecimal() and fields[0] not in result,
+            f"{label} is malformed",
+        )
+        result[fields[0]] = int(fields[1])
+    return result
+
+
+def parse_nofile_limits(raw: bytes) -> tuple[int, int]:
+    for line in raw.decode("ascii", "replace").splitlines():
+        if line.startswith("Max open files"):
+            fields = line[len("Max open files") :].split()
+            require(
+                len(fields) >= 2 and fields[0].isdecimal() and fields[1].isdecimal(),
+                "open file limits are malformed",
+            )
+            return int(fields[0]), int(fields[1])
+    raise Refusal("process limits lack open files")
+
+
+def root_mount_read_only(raw: bytes) -> bool:
+    """The last ``/`` mount in ``mountinfo`` (the visible one) is mounted ro."""
+
+    options = None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        fields = line.split()
+        if len(fields) > 5 and fields[4] == "/":
+            options = fields[5].split(",")
+    require(options is not None, "mountinfo lacks the root mount")
+    assert options is not None
+    return "ro" in options
+
+
+def parse_stat(raw: bytes) -> tuple[str, int]:
+    """``/proc/<pid>/stat`` state and start time (clock ticks since boot)."""
+
+    text = raw.decode("ascii", "replace")
+    fields = text[text.rindex(")") + 2 :].split()
+    require(len(fields) > 19 and fields[19].isdecimal(), "process stat is malformed")
+    return fields[0], int(fields[19])
+
+
+def workload_args(mode: str, nonce: str, **flags: int | str | bool) -> list[str]:
+    """``probe.WorkloadArgs``: the exact order the runner renders and accepts."""
+
+    require(NONCE.fullmatch(nonce) is not None, "workload nonce is malformed")
+    argv = ["workload", mode, "--nonce", nonce]
+    for name in ("hold_ms", "threads", "seconds", "dir", "bytes"):
+        if flags.get(name):
+            argv += ["--" + name.replace("_", "-"), str(flags[name])]
+    if flags.get("setsid_child"):
+        argv.append("--setsid-child")
+    return argv
+
+
+# Outside samplers. Each reads only the container's cgroup v2 files or /proc
+# of the workload process through the host adapter, so the collector and the
+# local kernel test share one implementation.
+
+
+def poll(host: Any, condition: Any, seconds: float = LIMIT_WAIT_SECONDS) -> bool:
+    deadline = host.monotonic() + seconds
+    while True:
+        if condition():
+            return True
+        if host.monotonic() >= deadline:
+            return False
+        host.sleep(SAMPLE_SECONDS)
+
+
+def cpu_burners(quota_millis: int) -> int:
+    """More burner threads than the quota allows, so the cgroup must throttle."""
+
+    return -(-quota_millis // 1000) + 1
+
+
+def sample_cgroup_limits(host: Any, cgroup: str) -> dict[str, int]:
+    return {
+        "memory_max": parse_cgroup_limit(
+            host.cgroup_read(cgroup, "memory.max"), "memory.max"
+        ),
+        "memory_swap_max": parse_cgroup_limit(
+            host.cgroup_read(cgroup, "memory.swap.max"), "memory.swap.max"
+        ),
+        "cpu_quota": parse_cpu_max(host.cgroup_read(cgroup, "cpu.max")),
+        "pids_max": parse_cgroup_limit(
+            host.cgroup_read(cgroup, "pids.max"), "pids.max"
+        ),
+    }
+
+
+def sample_memory_oom(host: Any, cgroup: str) -> dict[str, Any]:
+    """The cgroup's own OOM kill counter and its peak usage before the kill."""
+
+    def killed() -> bool:
+        events = parse_keyed(host.cgroup_read(cgroup, "memory.events"), "memory.events")
+        return events.get("oom_kill", 0) >= 1
+
+    enforced = poll(host, killed)
+    peak = parse_cgroup_limit(host.cgroup_read(cgroup, "memory.peak"), "memory.peak")
+    return {"enforced": enforced, "measured": peak}
+
+
+def sample_cpu_throttle(host: Any, cgroup: str) -> dict[str, Any]:
+    """CPU millis used per wall second over a window, and throttling in it."""
+
+    def read() -> tuple[float, dict[str, int]]:
+        moment = host.monotonic()
+        return moment, parse_keyed(host.cgroup_read(cgroup, "cpu.stat"), "cpu.stat")
+
+    host.sleep(CPU_WARMUP_SECONDS)
+    first, before = read()
+    host.sleep(CPU_WINDOW_SECONDS)
+    last, after = read()
+    wall_usec = max(1, round((last - first) * 1_000_000))
+    usage = after["usage_usec"] - before["usage_usec"]
+    return {
+        "enforced": after["nr_throttled"] - before["nr_throttled"] >= 1,
+        "measured": usage * 1000 // wall_usec,
+    }
+
+
+def sample_pids_cap(host: Any, cgroup: str) -> dict[str, Any]:
+    """The cgroup refused a fork (``pids.events max``) at its task count."""
+
+    def capped() -> bool:
+        events = parse_keyed(host.cgroup_read(cgroup, "pids.events"), "pids.events")
+        return events.get("max", 0) >= 1
+
+    enforced = poll(host, capped)
+    current = 0
+    for _ in range(5):
+        current = max(
+            current,
+            parse_cgroup_limit(
+                host.cgroup_read(cgroup, "pids.current"), "pids.current"
+            ),
+        )
+        host.sleep(SAMPLE_SECONDS * 2)
+    return {"enforced": enforced, "measured": current}
+
+
+def sample_scratch_enospc(host: Any, pid: int) -> dict[str, Any]:
+    """The workload's own /tmp, seen from outside: used bytes when it is full."""
+
+    state: dict[str, tuple[int, int, int, int]] = {}
+
+    def full() -> bool:
+        state["fs"] = host.root_statvfs(pid, "/tmp")
+        return state["fs"][2] == 0
+
+    enforced = poll(host, full)
+    blocks, free, _available, size = state["fs"]
+    return {"enforced": enforced, "measured": (blocks - free) * size}
+
+
+def sample_rootfs(host: Any, pid: int, nonce: str) -> dict[str, str]:
+    """The root mount is read-only and the workload's create left nothing."""
+
+    host.sleep(0.5)
+    read_only = root_mount_read_only(host.proc(pid, "mountinfo"))
+    created = host.root_lexists(pid, f"{ROOTFS_PROBE_PREFIX}{nonce}")
+    return {"outcome": "read_only" if read_only and not created else "writable"}
+
+
+def sample_nofile_cap(host: Any, pid: int, limit: int) -> dict[str, Any]:
+    """Open descriptors once the table stopped growing, against the rlimit."""
+
+    counts: list[int] = []
+
+    def settled() -> bool:
+        counts.append(host.fd_count(pid))
+        return len(counts) > 5 and counts[-1] == counts[-5] and counts[-1] > 3
+
+    poll(host, settled)
+    soft, hard = parse_nofile_limits(host.proc(pid, "limits"))
+    return {
+        "enforced": soft == hard == limit and counts[-1] == soft,
+        "measured": counts[-1],
+    }
+
+
+def sample_emitted_bytes(host: Any, pid: int, total: int) -> int:
+    """Bytes the workload wrote (``/proc/<pid>/io`` wchar), once it wrote them."""
+
+    emitted = [0]
+
+    def written() -> bool:
+        emitted[0] = parse_keyed(host.proc(pid, "io"), "io")["wchar"]
+        return emitted[0] >= total
+
+    poll(host, written)
+    return emitted[0]
+
+
+def sample_timeout(
+    host: Any, cgroup: str, pid: int, deadline_ms: int, uid: int
+) -> dict[str, int]:
+    """From the workload's kernel start time to its disappearance, then what lives.
+
+    Elapsed time starts at ``/proc/<pid>/stat`` starttime (clock ticks since
+    boot) and ends at the first poll that finds the process gone or a zombie,
+    on CLOCK_BOOTTIME, rounded up to a millisecond.
+    """
+
+    def alive(target: int) -> bool:
+        try:
+            return parse_stat(host.proc(target, "stat"))[0] != "Z"
+        except (OSError, Refusal):
+            return False
+
+    ticks = host.clock_ticks()
+    _, start = parse_stat(host.proc(pid, "stat"))
+    poll(host, lambda: not alive(pid), deadline_ms / 1000 + HANG_GRACE_SECONDS)
+    gone_ns = host.boottime_ns()
+    elapsed = -(-(gone_ns - start * 1_000_000_000 // ticks) // 1_000_000)
+    live = 0
+    for item in (host.cgroup_read(cgroup, "cgroup.procs") or b"").split():
+        with contextlib.suppress(OSError, Refusal, ValueError):
+            other = int(item)
+            if alive(other) and parse_status_ids(host.proc(other, "status"))[0] == uid:
+                live += 1
+    return {"elapsed_ms": max(0, elapsed), "live_processes": live}
+
+
+class ResourceHost(Host, Protocol):
+    """Outside reads resource and cleanup collection needs, beyond ``Host``."""
+
+    def monotonic(self) -> float: ...
+    def boottime_ns(self) -> int: ...
+    def clock_ticks(self) -> int: ...
+    def cgroup_read(self, cgroup: str, name: str) -> bytes | None: ...
+    def fd_count(self, pid: int) -> int: ...
+    def root_statvfs(self, pid: int, path: str) -> tuple[int, int, int, int]: ...
+    def root_lexists(self, pid: int, path: str) -> bool: ...
+    def docker_output_bytes(self, *args: str) -> int: ...
+    def prepare_work_dir(self, uid: int, gid: int, files: dict[str, bytes]) -> None: ...
+    def remove_work_dir(self) -> None: ...
+    def resource_session(self, unit: str, arguments: list[str]) -> Session: ...
+
+
+class ResourceCollector(Collector):
+    """``resource_enforcement``: every container class, every language image.
+
+    It shares the network collector's host, release, preflight, daemon and
+    residue bindings; ``daemon_unit`` names the resource agent's unit.
+    """
+
+    kind = "resource_enforcement"
+    host: ResourceHost
+
+    def __init__(
+        self, host: ResourceHost, config: dict[str, Any], checkout: Path = ROOT
+    ) -> None:
+        super().__init__(host, config, checkout)
+        self.daemon_unit = f"ditto-native-resource-agent-{self.nonce}.service"
+        self.agent: Session | None = None
+        self.agent_pid = 0
+
+    # -- agent -------------------------------------------------------------
+
+    def ask(
+        self, session: Session, value: dict[str, Any], extra: float = 30
+    ) -> dict[str, Any]:
+        timeout_ms = value.get("timeout_ms", 0)
+        answer = session.request(value, timeout_ms / 1000 + extra)
+        require(
+            answer.get("schema") == RESOURCE_AGENT_SCHEMA
+            and answer.get("op") == value["op"],
+            "resource agent answer does not match its request",
+        )
+        require(not answer.get("error"), f"resource agent refused {value['op']}")
+        return answer
+
+    def bind_inputs(self) -> None:
+        try:
+            self._bind_inputs()
+        except self.evidence.Refusal as error:
+            raise Refusal(str(error)) from None
+
+    def _bind_inputs(self) -> None:
+        raws = {name: self.host.read(Path(self.config[name])) for name in WORK_FILES}
+        evidence = self.evidence
+        self.input_raw = raws
+        self.profiles = {
+            "execution_profile_sha256": evidence.parse_execution_profile(
+                raws["execution_profile"]
+            ),
+            "grading_profile_sha256": evidence.parse_grading_profile(
+                raws["grading_profile"]
+            ),
+            "enforcement_images_sha256": evidence.parse_enforcement_images(
+                raws["enforcement_images"]
+            ),
+        }
+        # The verifier's own binding: released images, the grading profile's
+        # own language and its exact commands.
+        evidence._enforcement_images(self.profiles, self.release_index)
+        self.inputs = {name: doc["sha256"] for name, doc in self.profiles.items()}
+        self.repositories = {}
+        for language in self.evidence.LANGUAGES:
+            reference = self.release_value["images"][language]["image_ref"]
+            repository, _, digest = reference.partition("@")
+            require(
+                "sha256:" + digest.removeprefix("sha256:")
+                == self.profiles["enforcement_images_sha256"]["images"][language][
+                    "image_digest"
+                ],
+                f"{language} release image is not the pinned enforcement image",
+            )
+            self.repositories[language] = repository
+        grading_image = self.profiles["grading_profile_sha256"]["image_digest"]
+        self.own_language = next(
+            language
+            for language in self.evidence.LANGUAGES
+            if self.profiles["enforcement_images_sha256"]["images"][language][
+                "image_digest"
+            ]
+            == grading_image
+        )
+
+    def limit(
+        self, source: str, container: str, language: str, group: str | None = None
+    ) -> int:
+        value = self.evidence.resolve_bind(
+            source, container, language, {"test_group": group}, self.profiles
+        )
+        assert isinstance(value, int)
+        return value
+
+    def start_agent(self) -> None:
+        self.host.prepare_work_dir(
+            self.uid,
+            self.gid,
+            {WORK_FILES[name]: raw for name, raw in self.input_raw.items()},
+        )
+        arguments = [str(self.runner), "resource-agent"]
+        for name, file in WORK_FILES.items():
+            arguments += ["--" + name.replace("_", "-"), str(WORK_DIR / file)]
+        arguments += ["--runner", str(self.runner), "--work-dir", str(WORK_DIR)]
+        for name in ("seccomp_profile", "apparmor_profile"):
+            if self.config[name]:
+                arguments += ["--" + name.replace("_", "-"), self.config[name]]
+        session = self.host.resource_session(self.daemon_unit, arguments)
+        self.sessions.append(session)
+        pid = 0
+        for _ in range(int(UNIT_WAIT_SECONDS / POLL_SECONDS)):
+            code, output = self.host.systemctl(
+                "--user",
+                f"--machine={USER}@.host",
+                "show",
+                self.daemon_unit,
+                "--property=MainPID",
+            )
+            pid = int(parse_show(output).get("MainPID", "0") or 0) if code == 0 else 0
+            if pid > 1:
+                break
+            self.host.sleep(POLL_SECONDS)
+        require(pid > 1, "resource agent process is unknown")
+        daemon = f"user.slice/user-{self.uid}.slice/user@{self.uid}.service/"
+        require(
+            parse_cgroup(self.host.proc(pid, "cgroup")).startswith(daemon),
+            "resource agent is not in the daemon user's cgroup",
+        )
+        answer = self.hello(session, pid, "resource agent", in_host_pid_ns=True)
+        require(
+            answer.get("uid") == self.uid and answer.get("gid") == self.gid,
+            "resource agent runs as another user",
+        )
+        require(
+            answer.get("inputs") == self.inputs,
+            "resource agent read other profile documents",
+        )
+        self.agent, self.agent_pid = session, pid
+
+    def stop_agent(self) -> None:
+        if self.agent is not None:
+            with contextlib.suppress(Exception):
+                self.ask(self.agent, {"op": "exit"}, extra=120)
+            with contextlib.suppress(Exception):
+                self.agent.close()
+        self.agent = None
+
+    # -- one workload --------------------------------------------------------
+
+    def launch(
+        self,
+        container: str,
+        language: str,
+        argv: list[str],
+        *,
+        timeout_ms: int = RUN_TIMEOUT_MS,
+        test_group: str | None = None,
+    ) -> dict[str, Any]:
+        assert self.agent is not None
+        request: dict[str, Any] = {
+            "op": "start",
+            "class": container,
+            "language": language,
+            "repository": self.repositories[language],
+            "workload": argv[1:],
+        }
+        if test_group is None:
+            request["timeout_ms"] = timeout_ms
+        else:
+            request["test_group"] = test_group
+        # A harness start runs `docker run` and may create its job network.
+        answer = self.ask(self.agent, request, extra=150)
+        require(
+            type(answer.get("run")) is str and RUN_ID.fullmatch(answer["run"]),
+            "resource agent run id is malformed",
+        )
+        if container == "harness":
+            require(
+                type(answer.get("container_name")) is str
+                and (
+                    CONTAINER_ID.fullmatch(answer["container_name"])
+                    or re.fullmatch(
+                        r"dittobench-[0-9a-f]{16}", answer["container_name"]
+                    )
+                ),
+                "harness workload container is unnamed",
+            )
+        else:
+            require(
+                type(answer.get("executor_instance")) is str
+                and EXECUTOR_INSTANCE.fullmatch(answer["executor_instance"]),
+                "executor workload instance is malformed",
+            )
+        return answer
+
+    def inspect(self, target: str) -> dict[str, Any] | None:
+        try:
+            value = parse_unique(self.host.docker("inspect", target), "inspect")
+        except Refusal:
+            return None
+        require(type(value) is list and len(value) == 1, "inspect is malformed")
+        return value[0]
+
+    def container(
+        self, started: dict[str, Any], container: str, language: str
+    ) -> dict[str, Any]:
+        """The running workload container, found and bound from outside."""
+
+        for _ in range(int(UNIT_WAIT_SECONDS / POLL_SECONDS)):
+            if container == "harness":
+                targets = [started["container_name"]]
+            else:
+                label = f"{EXECUTOR_LABEL}={started['executor_instance']}"
+                targets = self.host.docker(
+                    "ps", "--all", "--no-trunc", "--quiet", "--filter", f"label={label}"
+                ).split()
+                targets = [item.decode() for item in targets]
+            for target in targets:
+                inspected = self.inspect(target)
+                if inspected is None:
+                    continue
+                name = inspected.get("Name", "")
+                if container != "harness" and name.startswith(
+                    "/dittobench-coding-probe-"
+                ):
+                    continue
+                state = inspected["State"]
+                if state.get("Running") is True and state.get("Pid", 0) > 1:
+                    return self.bind_container(inspected, container, language, started)
+            self.host.sleep(POLL_SECONDS)
+        raise Refusal(f"{container} {language} workload container did not start")
+
+    def bind_container(
+        self,
+        inspected: dict[str, Any],
+        container: str,
+        language: str,
+        started: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The started container is the approved launch, or collection refuses."""
+
+        host_config, config = inspected["HostConfig"], inspected["Config"]
+        memory = self.limit("memory_limit_bytes", container, language)
+        scratch = self.limit("scratch_limit_bytes", container, language)
+        labels = config.get("Labels") or {}
+        require(
+            CONTAINER_ID.fullmatch(inspected.get("Id", "")) is not None,
+            "workload container id is malformed",
+        )
+        require(
+            inspected.get("Image")
+            == self.release_value["images"][language]["config_digest"],
+            f"{container} {language} container runs another image",
+        )
+        require(
+            host_config.get("ReadonlyRootfs") is True
+            and host_config.get("Memory") == memory
+            and host_config.get("MemorySwap") == memory
+            and host_config.get("NanoCpus")
+            == self.limit("cpu_quota_millis", container, language) * 1_000_000
+            and host_config.get("PidsLimit")
+            == self.limit("pids_limit", container, language)
+            and (host_config.get("Tmpfs") or {}).get("/tmp")
+            == f"rw,noexec,nosuid,nodev,size={scratch}"
+            and host_config.get("Privileged") is False
+            and [
+                item.upper().removeprefix("CAP_")
+                for item in host_config.get("CapDrop") or []
+            ]
+            == ["ALL"],
+            f"{container} {language} container limits differ from the approved profile",
+        )
+        uid = CANDIDATE_UIDS[container]
+        if container == "harness":
+            mounts = inspected.get("Mounts") or []
+            require(
+                config.get("User") == f"{uid}:{uid}"
+                and host_config.get("LogConfig", {}).get("Type") == "local"
+                and str(host_config.get("NetworkMode", "")).startswith("ditto-job-")
+                and RUN_LABEL in labels
+                and len(mounts) == 1
+                and mounts[0].get("Destination") == CONTAINER_RUNNER
+                and mounts[0].get("RW") is False
+                and config.get("Entrypoint") == [CONTAINER_RUNNER],
+                "harness workload container is not the hosted harness launch",
+            )
+        else:
+            require(
+                config.get("User") == "0:0"
+                and host_config.get("LogConfig", {}).get("Type") == "none"
+                and host_config.get("NetworkMode") == "none"
+                and labels.get(EXECUTOR_LABEL) == started["executor_instance"]
+                and labels.get(RUN_LABEL) == inspected.get("Name", "").lstrip("/"),
+                "executor workload container is not the production executor launch",
+            )
+        init = inspected["State"]["Pid"]
+        cgroup = parse_cgroup(self.host.proc(init, "cgroup"))
+        require(
+            cgroup.startswith(
+                f"user.slice/user-{self.uid}.slice/user@{self.uid}.service/"
+            )
+            and cgroup.endswith(f"/docker-{inspected['Id']}.scope"),
+            "workload container is outside the daemon user's container cgroup",
+        )
+        return {"id": inspected["Id"], "init": init, "cgroup": cgroup}
+
+    def workload_process(
+        self, found: dict[str, Any], container: str, argv: list[str]
+    ) -> int:
+        """The measured runner running exactly this workload, as the candidate."""
+
+        runner = CONTAINER_RUNNER if container == "harness" else EXECUTOR_RUNNER
+        expected = [runner.encode(), *(item.encode() for item in argv)]
+        uid = CANDIDATE_UIDS[container]
+        for _ in range(int(UNIT_WAIT_SECONDS / SAMPLE_SECONDS / 10)):
+            found_pid = 0
+            with contextlib.suppress(OSError, ValueError):
+                children = self.host.children(found["init"])
+                if container != "harness":
+                    children = [
+                        pid for child in children for pid in self.host.children(child)
+                    ]
+                for pid in children:
+                    if self.host.proc(pid, "cmdline").split(b"\0")[:-1] == expected:
+                        found_pid = pid
+            if found_pid:
+                self.measure(found_pid, f"{container} workload")
+                host_ids = parse_status_ids(self.host.proc(found_pid, "status"))
+                require(
+                    container_ids(host_ids, self.subordinate)
+                    == {"uid": uid, "gid": uid},
+                    f"{container} workload runs as another identity",
+                )
+                return found_pid
+            self.host.sleep(SAMPLE_SECONDS * 10)
+        raise Refusal(f"{container} workload process did not start")
+
+    def finish(
+        self, started: dict[str, Any], container: str, *, receipt: bool = False
+    ) -> dict[str, Any]:
+        """Wait for the production receipt; the container must then be gone."""
+
+        assert self.agent is not None
+        deadline = self.host.monotonic() + RUN_TIMEOUT_MS / 1000 + 3600
+        while True:
+            answer = self.ask(
+                self.agent, {"op": "wait", "run": started["run"], "timeout_ms": 30000}
+            )
+            if answer.get("done") is True:
+                break
+            require(self.host.monotonic() < deadline, "workload did not finish")
+        if receipt:
+            require(
+                answer.get("run_failed") is not True
+                and type(answer.get("return_code")) is int
+                and type(answer.get("retained_output_bytes")) is int,
+                f"{container} workload has no production receipt",
+            )
+        if container == "harness":
+            name = started["container_name"]
+            field = "id" if CONTAINER_ID.fullmatch(name) else "name"
+            remaining = self.host.docker(
+                "ps", "--all", "--quiet", "--filter", f"{field}={name}"
+            )
+        else:
+            label = f"{EXECUTOR_LABEL}={started['executor_instance']}"
+            remaining = self.host.docker(
+                "ps", "--all", "--quiet", "--filter", f"label={label}"
+            )
+        require(not remaining.split(), f"{container} workload container remains")
+        return answer
+
+    def run(
+        self,
+        container: str,
+        language: str,
+        mode: str,
+        sample: Any,
+        *,
+        receipt: bool = False,
+        test_group: str | None = None,
+        timeout_ms: int = RUN_TIMEOUT_MS,
+        **flags: int | str | bool,
+    ) -> tuple[Any, dict[str, Any]]:
+        nonce = secrets.token_hex(8)
+        argv = workload_args(mode, nonce, **flags)
+        started = self.launch(
+            container, language, argv, timeout_ms=timeout_ms, test_group=test_group
+        )
+        started = {**started, "nonce": nonce}
+        found = self.container(started, container, language)
+        pid = self.workload_process(found, container, argv)
+        observed = sample(found, pid, started)
+        return observed, self.finish(started, container, receipt=receipt)
+
+    # -- phases --------------------------------------------------------------
+
+    def cgroup_phase(self, container: str, language: str) -> None:
+        values, _ = self.run(
+            container,
+            language,
+            "hold",
+            lambda found, _pid, _started: sample_cgroup_limits(
+                self.host, found["cgroup"]
+            ),
+            hold_ms=HOLD_MS,
+        )
+        for probe, source in (
+            ("memory_max", "memory_limit_bytes"),
+            ("cpu_quota", "cpu_quota_millis"),
+            ("pids_max", "pids_limit"),
+        ):
+            self.record(
+                f"{container}.{probe}",
+                language,
+                {
+                    "cgroup": values[probe],
+                    "profile": self.limit(source, container, language),
+                },
+            )
+        self.record(
+            f"{container}.memory_swap_max",
+            language,
+            {"swap_max_bytes": values["memory_swap_max"]},
+        )
+
+    def measured_phase(self, container: str, language: str) -> None:
+        bounded = {
+            "memory_oom": self.memory_oom,
+            "cpu_throttle": self.cpu_throttle,
+            "pids_cap": self.pids_cap,
+            "scratch_enospc": self.scratch_enospc,
+            "rootfs_read_only": self.rootfs_read_only,
+            "nofile_cap": self.nofile_cap,
+            "log_bound": self.log_bound,
+        }
+        for probe, measure in bounded.items():
+            self.record(f"{container}.{probe}", language, measure(container, language))
+        if container == "executor_grading":
+            for group in self.evidence.HOSTED_TEST_GROUPS:
+                self.record(
+                    f"executor_grading.supervisor_timeout.{group}",
+                    language,
+                    self.supervisor_timeout(language, group),
+                )
+
+    def memory_oom(self, container: str, language: str) -> dict[str, Any]:
+        observed, _ = self.run(
+            container,
+            language,
+            "memory",
+            lambda found, _pid, _started: sample_memory_oom(self.host, found["cgroup"]),
+            hold_ms=HOLD_MS,
+        )
+        return {
+            **observed,
+            "limit": self.limit("memory_limit_bytes", container, language),
+        }
+
+    def cpu_throttle(self, container: str, language: str) -> dict[str, Any]:
+        quota = self.limit("cpu_quota_millis", container, language)
+        observed, _ = self.run(
+            container,
+            language,
+            "cpu",
+            lambda found, _pid, _started: sample_cpu_throttle(
+                self.host, found["cgroup"]
+            ),
+            threads=cpu_burners(quota),
+            seconds=CPU_SECONDS,
+        )
+        return {**observed, "limit": quota}
+
+    def pids_cap(self, container: str, language: str) -> dict[str, Any]:
+        observed, _ = self.run(
+            container,
+            language,
+            "pids",
+            lambda found, _pid, _started: sample_pids_cap(self.host, found["cgroup"]),
+            hold_ms=HOLD_MS,
+        )
+        return {**observed, "limit": self.limit("pids_limit", container, language)}
+
+    def scratch_enospc(self, container: str, language: str) -> dict[str, Any]:
+        observed, _ = self.run(
+            container,
+            language,
+            "scratch",
+            lambda _found, pid, _started: sample_scratch_enospc(self.host, pid),
+            hold_ms=HOLD_MS,
+            dir="/tmp",
+        )
+        return {
+            **observed,
+            "limit": self.limit("scratch_limit_bytes", container, language),
+        }
+
+    def rootfs_read_only(self, container: str, language: str) -> dict[str, Any]:
+        observed, _ = self.run(
+            container,
+            language,
+            "rootfs",
+            lambda _found, pid, started: sample_rootfs(
+                self.host, pid, started["nonce"]
+            ),
+            hold_ms=HOLD_MS,
+        )
+        return observed
+
+    def nofile_cap(self, container: str, language: str) -> dict[str, Any]:
+        limit = self.limit("nofile_limit", container, language)
+        observed, _ = self.run(
+            container,
+            language,
+            "nofile",
+            lambda _found, pid, _started: sample_nofile_cap(self.host, pid, limit),
+            hold_ms=HOLD_MS,
+        )
+        return {**observed, "limit": limit}
+
+    def log_bound(self, container: str, language: str) -> dict[str, Any]:
+        limit = self.limit("log_limit_bytes", container, language)
+        total = limit * 7 // 4 if container == "harness" else EXECUTOR_LOG_BYTES
+
+        def sample(found: dict[str, Any], pid: int, _started: object) -> dict:
+            emitted = sample_emitted_bytes(self.host, pid, total)
+            retained = 0
+            if container == "harness":
+                retained = self.host.docker_output_bytes("logs", found["id"])
+            return {"emitted": emitted, "docker_retained": retained}
+
+        observed, answer = self.run(
+            container,
+            language,
+            "log",
+            sample,
+            receipt=container != "harness",
+            hold_ms=HOLD_MS if container == "harness" else 1000,
+            bytes=total,
+        )
+        if container == "executor_grading":
+            # Grading containers use --log-driver none (bound in
+            # bind_container), so the receipt is every retained byte.
+            return {
+                "emitted_bytes": observed["emitted"],
+                "limit": limit,
+                "retained_bytes": answer["retained_output_bytes"],
+            }
+        retained = (
+            observed["docker_retained"]
+            if container == "harness"
+            else answer["retained_output_bytes"]
+        )
+        return {
+            "enforced": observed["emitted"] > limit,
+            "limit": limit,
+            "measured": retained,
+        }
+
+    def supervisor_timeout(self, language: str, group: str) -> dict[str, Any]:
+        deadline_ms = self.limit(
+            f"{group}_command_timeout_ms", "executor_grading", language, group
+        )
+        uid = self.subordinate["uid_start"] + CANDIDATE_UIDS["executor_grading"] - 1
+        observed, answer = self.run(
+            "executor_grading",
+            language,
+            "hang",
+            lambda found, pid, _started: sample_timeout(
+                self.host, found["cgroup"], pid, deadline_ms, uid
+            ),
+            receipt=True,
+            test_group=group,
+            seconds=deadline_ms // 1000 + HANG_GRACE_SECONDS,
+        )
+        code = answer["return_code"]
+        return {
+            "deadline_ms": deadline_ms,
+            "elapsed_ms": observed["elapsed_ms"],
+            "exit_code": code if 0 <= code <= 255 else 255,
+            "live_processes": observed["live_processes"],
+            "test_group": group,
+        }
+
+    # -- record ------------------------------------------------------------
+
+    def probes_for(self, phase: str) -> list[dict[str, Any]]:
+        entry = self.catalog["kinds"][self.kind]
+        outcomes = set(self.catalog["outcomes"])
+        result = []
+        for probe in entry["probes"]:
+            if probe["phase"] != phase:
+                continue
+            scopes = (
+                list(self.evidence.LANGUAGES)
+                if probe["scope"] == "language"
+                else [None]
+            )
+            for language in scopes:
+                key = (probe["id"], language)
+                require(key in self.observed, f"probe {probe['id']} was not observed")
+                observed = self.observed.pop(key)
+                result.append(
+                    {
+                        "id": probe["id"],
+                        "language": language,
+                        "endpoint_sha256": None,
+                        "expect": probe["expect"],
+                        "observed": observed,
+                        "matched": self.evidence.evaluate(
+                            probe["expect"], observed, self.subordinate, outcomes
+                        ),
+                    }
+                )
+        return sorted(result, key=lambda item: (item["id"], item["language"] or "", ""))
+
+    def assemble_record(
+        self,
+        started: int,
+        completed: int,
+        preconditions: dict[str, Any],
+        residue: dict[str, Any],
+        tools: dict[str, str],
+    ) -> dict[str, Any]:
+        entry = self.catalog["kinds"][self.kind]
+        phases = [
+            {
+                "name": name,
+                "started_at_unix": self.phase_times[name][0],
+                "completed_at_unix": self.phase_times[name][1],
+                "probes": self.probes_for(name),
+            }
+            for name in entry["phases"]
+        ]
+        require(not self.observed, "an observation belongs to no catalog probe")
+        return {
+            "schema": self.evidence.RECORD_SCHEMA,
+            "kind": self.kind,
+            "coverage": self.evidence.COVERAGE,
+            "not_covered": list(self.evidence.NOT_COVERED),
+            "tolerances_version": self.evidence.TOLERANCES["version"],
+            "host": {
+                "machine_id_sha256": self.machine_sha256,
+                "boot_id": self.config["boot_id"],
+                "kernel_release": self.kernel,
+                "daemon_identity_sha256": self.daemon_sha256,
+                "subordinate_ids": dict(self.subordinate),
+                "router_namespace": ROUTER_NAMESPACE,
+            },
+            "release": {
+                "source_revision": self.release_index["source_revision"],
+                "release_manifest_sha256": self.release_index["sha256"],
+                "runtime_archive_sha256": self.release_index["runtime_archive_sha256"],
+                "image_approval_sha256": dict(
+                    self.release_index["image_approval_sha256"]
+                ),
+            },
+            "pre_collection_preflight_sha256": self.config[
+                "pre_collection_preflight_sha256"
+            ],
+            "inputs": {name: self.inputs[name] for name in entry["inputs"]},
+            "endpoints": [],
+            "tools": tools,
+            "preconditions": preconditions,
+            "phases": phases,
+            "residue": residue,
+            "started_at_unix": started,
+            "completed_at_unix": completed,
+        }
+
+    def phases(self) -> None:
+        for phase in ("cgroup", "measured"):
+            self.phase(phase)
+            for language in self.evidence.LANGUAGES:
+                for container in CLASSES:
+                    if phase == "cgroup":
+                        self.cgroup_phase(container, language)
+                    else:
+                        self.measured_phase(container, language)
+            self.end_phase(phase)
+
+    def collect(self) -> dict[str, Any]:
+        uncovered = sorted(NOT_COLLECTED[self.kind])
+        require(not uncovered, f"{self.kind} cannot collect {', '.join(uncovered)}")
+        started = self.host.now()
+        self.bind_host()
+        self.bind_release()
+        self.bind_preflight()
+        self.bind_daemon()
+        self.bind_inputs()
+        tools = dict(self.checkout.tools())
+        tools["probe_runner_binary_sha256"] = self.runner_sha256
+        preconditions = self.conditions(residue=False)
+        require(
+            preconditions == self.evidence.PRECONDITIONS,
+            "collection preconditions do not hold",
+        )
+        try:
+            self.start_agent()
+            self.phases()
+        finally:
+            self.stop_agent()
+            for session in self.sessions:
+                with contextlib.suppress(Exception):
+                    session.close()
+            self.host.remove_work_dir()
+        residue = self.conditions(residue=True)
+        require(
+            self.daemon_identity_sha256() == self.daemon_sha256,
+            "Docker daemon identity changed during collection",
+        )
+        require(self.host.boot_id() == self.config["boot_id"], "the host rebooted")
+        completed = self.host.now()
+        return self.assemble_record(started, completed, preconditions, residue, tools)
+
+
 def retain(evidence: Any, store_path: Path, record: dict[str, Any]) -> str:
     raw = evidence.canonical_bytes(record)
     evidence.parse_record_envelope(raw)
@@ -2056,8 +3277,9 @@ def summary(record: dict[str, Any], digest: str) -> dict[str, Any]:
             if probe["matched"] is not True
         }
     )
+    short = SUBCOMMANDS[record["kind"]]
     return {
-        "schema": "dittobench-coding-native-network-collection-result-v1",
+        "schema": f"dittobench-coding-native-{short}-collection-result-v1",
         "record_sha256": digest,
         "all_matched": not unmatched,
         "unmatched": unmatched,
@@ -2078,14 +3300,24 @@ def summary(record: dict[str, Any], digest: str) -> dict[str, Any]:
     }
 
 
+SUBCOMMANDS = {
+    "network_enforcement": "network",
+    "resource_enforcement": "resource",
+    "preexec_confinement": "preexec",
+    "cleanup_recovery": "cleanup",
+}
+KIND_OF = {short: kind for kind, short in SUBCOMMANDS.items()}
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = result.add_subparsers(dest="kind", required=True)
-    network = commands.add_parser("network", help="collect network_enforcement")
-    network.add_argument("--config", required=True, type=Path)
-    network.add_argument("--confirm", required=True)
-    for name in ("resource", "preexec", "cleanup"):
-        commands.add_parser(name, help="not implemented (B5 PR5)")
+    for name in ("network", "resource"):
+        command = commands.add_parser(name, help=f"collect {KIND_OF[name]}")
+        command.add_argument("--config", required=True, type=Path)
+        command.add_argument("--confirm", required=True)
+    for name in ("preexec", "cleanup"):
+        commands.add_parser(name, help=f"refused: {KIND_OF[name]} is not collectable")
     return result
 
 
@@ -2100,15 +3332,33 @@ def main(
     checkout: Path = ROOT,
 ) -> int:
     args = parser().parse_args(argv)
-    if args.kind != "network":
-        print(f"{args.kind} collection is not implemented (B5 PR5)", file=sys.stderr)
+    if KIND_OF[args.kind] not in NOT_COLLECTED:
+        print(f"{args.kind} collection is not implemented", file=sys.stderr)
         return 2
-    require(args.confirm == CONFIRMATION, "collection needs the exact confirmation")
+    uncovered = NOT_COLLECTED[KIND_OF[args.kind]]
+    if uncovered:
+        # Before any host effect: a record missing these probes never verifies.
+        print(
+            f"{args.kind} collection is refused; these catalog probes are not "
+            "collected:",
+            file=sys.stderr,
+        )
+        for probe, reason in sorted(uncovered.items()):
+            print(f"  {probe}: {reason}", file=sys.stderr)
+        return 2
+    confirmation = CONFIRMATION if args.kind == "network" else RESOURCE_CONFIRMATION
+    require(args.confirm == confirmation, "collection needs the exact confirmation")
     host = host_factory()
     require(host.euid() == 0, "collection needs root")
-    config = parse_config(host.read(args.config))
+    raw = host.read(args.config)
     signal.signal(signal.SIGTERM, terminated)
-    collector = Collector(host, config, checkout)
+    collector: Collector
+    if args.kind == "network":
+        config = parse_config(raw)
+        collector = Collector(host, config, checkout)
+    else:
+        config = parse_resource_config(raw)
+        collector = ResourceCollector(host, config, checkout)
     record = collector.collect()
     digest = retain(collector.evidence, Path(config["store"]), record)
     result = summary(record, digest)
@@ -2120,5 +3370,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Refusal as error:
-        print(f"network collection refused: {error}", file=sys.stderr)
+        print(f"collection refused: {error}", file=sys.stderr)
         raise SystemExit(1) from None

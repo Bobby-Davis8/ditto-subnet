@@ -190,10 +190,9 @@ func loadConfigChecked(path string, executable func(string) bool) (*runtimeConfi
 		}
 	}
 	p := profile.ResourcePolicy
-	docker := &sandbox.LocalDocker{HarnessPort: "8080", MemoryLimit: strconv.FormatUint(p.MemoryLimitBytes, 10), TmpfsLimit: strconv.FormatUint(p.ScratchLimitBytes, 10),
-		CPULimit: fmt.Sprintf("%d.%03d", p.CPUQuotaMillis/1000, p.CPUQuotaMillis%1000), PidsLimit: int(p.PidsLimit), StartTimeout: 2 * time.Minute,
-		Harden: true, RequireRootless: true, RequireIsolatedDaemon: true, HostGatewayIP: ip.String(), EgressNetwork: wire.EgressNetwork, EgressProxy: wire.EgressProxy,
-		SeccompProfile: wire.SeccompProfile, AppArmorProfile: wire.AppArmorProfile}
+	docker := sandbox.NewHostedHarnessDocker(sandbox.HostedHarnessConfig{MemoryLimitBytes: p.MemoryLimitBytes, ScratchLimitBytes: p.ScratchLimitBytes,
+		CPUQuotaMillis: p.CPUQuotaMillis, PidsLimit: p.PidsLimit, HostGatewayIP: ip.String(), EgressNetwork: wire.EgressNetwork, EgressProxy: wire.EgressProxy,
+		SeccompProfile: wire.SeccompProfile, AppArmorProfile: wire.AppArmorProfile})
 	return &runtimeConfig{wire: wire, control: control, starts: starts, executors: executors, docker: docker, publicBase: "http://host.docker.internal:" + port}, nil
 }
 
