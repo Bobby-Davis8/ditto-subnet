@@ -235,9 +235,11 @@ from ditto.db.queries.screening import (
 from ditto_screening_protocol import (
     SCREENING_POLICY_VERSION,
     ScreenResultOutcome,
+    SourceReviewFinding,
     SourceReviewObservationPayload,
     verdict_signing_message,
 )
+from ditto_screening_protocol.models import source_review_invariants_for_policy
 from ditto_screening_protocol.private_failure import (
     PRIVATE_FAILURE_DETAIL_LIMIT,
     PRIVATE_FAILURE_LOG_TAIL_LIMIT,
@@ -3955,22 +3957,18 @@ async def complete_fanout_shadow_review(
             "unresolved_candidate",
             "critic_also_flagged",
         }
-        file_plan = payload.report.get("file_plan")
-        coverage_complete = bool(
-            payload.outcome != "incomplete"
-            and isinstance(file_plan, dict)
-            and not file_plan.get("truncated", True)
-            and isinstance(passes, list)
-            and passes
-            and all(
-                isinstance(item, dict) and item.get("outcome") != "incomplete"
-                for item in passes
-            )
-        )
+        coverage_complete = _fanout_protocol_complete(payload.report, payload.outcome)
         row.report = payload.report
-        row.disagrees_with_baseline = baseline_candidate != fanout_candidate
-        invalid_result = exceeded or model_binding_invalid or unmetered
+        protocol_invalid = payload.status == "succeeded" and not coverage_complete
+        invalid_result = (
+            exceeded or model_binding_invalid or unmetered or protocol_invalid
+        )
         row.coverage_complete = coverage_complete and not invalid_result
+        row.disagrees_with_baseline = (
+            baseline_candidate != fanout_candidate
+            if row.coverage_complete and payload.status == "succeeded"
+            else None
+        )
         row.status = "incomplete" if invalid_result else payload.status
         row.outcome = "incomplete" if invalid_result else payload.outcome
         row.error_code = (
@@ -3980,6 +3978,8 @@ async def complete_fanout_shadow_review(
             if model_binding_invalid
             else "fanout-response-metering-incomplete"
             if unmetered
+            else "fanout-review-protocol-incomplete"
+            if protocol_invalid
             else payload.error_code
         )
         row.reported_cost_microusd = reported_microusd
@@ -4000,6 +4000,284 @@ async def complete_fanout_shadow_review(
                 stored.provider_resource_id = None
                 stored.updated_at = datetime.now(UTC)
     return FanoutShadowCompleteResponse(accepted=True)
+
+
+def _fanout_protocol_complete(report: dict, outcome: str) -> bool:
+    """Require five provisional reviews and one source-verified final decision."""
+    expected_passes = {
+        "generalist",
+        "answer_authority",
+        "benchmark_engine",
+        "tool_fidelity",
+        "evasion_scope",
+    }
+    if (
+        outcome
+        not in {
+            "no_findings",
+            "candidate",
+            "critic_also_flagged",
+            "unresolved_candidate",
+        }
+        or report.get("outcome") != outcome
+        or report.get("revision")
+        not in (
+            "fanout-source-review-v4",
+            "fanout-source-review-v5",
+            "fanout-source-review-v6",
+        )
+        or report.get("mode") != "shadow_report_only"
+        or report.get("partition") != "specialists"
+        or report.get("coverage_protocol") != "five-specialists-adjudicator-v2"
+        or report.get("coverage_scope") != "source_review"
+        or report.get("exhaustive_file_audit") is not False
+    ):
+        return False
+    passes = report.get("passes")
+    if (
+        not isinstance(passes, list)
+        or len(passes) != len(expected_passes)
+        or not all(
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item.get("outcome") == "provisional"
+            and isinstance(item.get("raw_review"), dict)
+            and isinstance(item.get("notes"), list)
+            and item.get("error_code") is None
+            and _fanout_models_complete(
+                item.get("response_models"), report.get("requested_model")
+            )
+            for item in passes
+        )
+        or {item["name"] for item in passes} != expected_passes
+    ):
+        return False
+    # Specialist contradictions are intentionally allowed above. Only the fresh
+    # adjudicator produces a canonical policy verdict; a majority is not a verdict.
+    critic = report.get("critic")
+    if (
+        not isinstance(critic, dict)
+        or critic.get("name") != "adjudicator"
+        or (report.get("revision"), critic.get("revision"))
+        not in (
+            ("fanout-source-review-v4", "fanout-adjudicator-v2"),
+            ("fanout-source-review-v5", "fanout-adjudicator-v3"),
+            ("fanout-source-review-v6", "fanout-adjudicator-v4"),
+        )
+        or critic.get("error_code") is not None
+        or critic.get("outcome") != outcome
+        or critic.get("pass_context_count") != len(passes)
+        or not _fanout_models_complete(
+            critic.get("response_models"), report.get("requested_model")
+        )
+        or critic.get("evidence_verified") is not True
+        or not isinstance(critic.get("final_review"), dict)
+    ):
+        return False
+    policy_version = report.get("policy_version")
+    if (
+        type(policy_version) is not int
+        or not 10 <= policy_version <= SCREENING_POLICY_VERSION
+    ):
+        return False
+    try:
+        finding = SourceReviewFinding.model_validate(critic["final_review"])
+        finding.require_policy_v10_invariants()
+    except ValueError:
+        return False
+    if (
+        finding.artifact_sha256 != report.get("artifact_sha256")
+        or re.fullmatch(
+            rf"source-review-v[0-9]+-policy-v{policy_version}", finding.prompt_revision
+        )
+        is None
+        or finding.invariant_assessment is None
+        or {item.invariant for item in finding.invariant_assessment.decisions}
+        != set(source_review_invariants_for_policy(policy_version))
+    ):
+        return False
+    risk = finding.risk_level
+    if risk == "low" and critic.get("clearance_certified") is not True:
+        return False
+    if report.get(
+        "revision"
+    ) == "fanout-source-review-v6" and not _fanout_obligations_complete(report, risk):
+        return False
+    candidates = report.get("candidates")
+    assessments = critic.get("candidate_assessments")
+    if (
+        not isinstance(candidates, list)
+        or not isinstance(assessments, list)
+        or len(assessments) != len(candidates)
+        or not all(
+            isinstance(item, dict)
+            and item.get("candidate_id") == f"candidate-{index:03d}"
+            and isinstance(item.get("source_pass"), str)
+            and item["source_pass"] in expected_passes
+            and isinstance(item.get("finding"), dict)
+            and isinstance(item.get("basis"), list)
+            and bool(item["basis"])
+            for index, item in enumerate(candidates, start=1)
+        )
+        or not all(
+            isinstance(item, dict)
+            and isinstance(item.get("candidate_id"), str)
+            and isinstance(item.get("disposition"), str)
+            and item["disposition"] in {"supported", "refuted", "unresolved"}
+            for item in assessments
+        )
+    ):
+        return False
+    by_id = {item["candidate_id"]: item for item in assessments}
+    if set(by_id) != {item["candidate_id"] for item in candidates} or any(
+        by_id[item["candidate_id"]].get("source_pass") != item["source_pass"]
+        for item in candidates
+    ):
+        return False
+    supported = any(item["disposition"] == "supported" for item in assessments)
+    unresolved = any(item["disposition"] == "unresolved" for item in assessments)
+    if supported and risk == "low":
+        return False
+    expected_outcome = (
+        "critic_also_flagged"
+        if supported
+        else "candidate"
+        if risk in {"medium", "high"}
+        else "unresolved_candidate"
+        if unresolved
+        else "no_findings"
+    )
+    return outcome == expected_outcome
+
+
+def _fanout_obligations_complete(report: dict, risk: str) -> bool:
+    """Do not let a v6 report omit structured specialist uncertainty."""
+    if report.get("policy_version") == 13 and risk == "low":
+        required = set(source_review_invariants_for_policy(13))
+        for source in report["passes"]:
+            decisions = source["raw_review"].get("invariants")
+            if (
+                not isinstance(decisions, list)
+                or len(decisions) != len(required)
+                or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("invariant"), str)
+                    or item.get("disposition") not in ("pass", "breach", "inconclusive")
+                    for item in decisions
+                )
+                or {item["invariant"] for item in decisions} != required
+            ):
+                return False
+    expected = []
+    for source in report["passes"]:
+        decisions = source["raw_review"].get("invariants")
+        for decision in decisions if isinstance(decisions, list) else []:
+            if (
+                isinstance(decision, dict)
+                and decision.get("disposition") == "inconclusive"
+            ):
+                expected.append(
+                    (
+                        source["name"],
+                        "inconclusive_invariant",
+                        decision.get("invariant"),
+                        decision.get("summary"),
+                    )
+                )
+        for note in source["notes"]:
+            if isinstance(note, dict) and note.get("kind") == "concern":
+                expected.append(
+                    (source["name"], "concern_note", None, note.get("summary"))
+                )
+    obligations = report.get("review_obligations")
+    critic = report["critic"]
+    resolutions = critic.get("obligation_resolutions")
+    if (
+        len(expected) > 64
+        or not isinstance(obligations, list)
+        or len(obligations) != len(expected)
+        or not isinstance(resolutions, list)
+        or len(resolutions) != len(expected)
+        or critic.get("obligation_evidence_verified") is not True
+    ):
+        return False
+    by_id = {}
+    for item in resolutions:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("obligation_id"), str)
+            or item["obligation_id"] in by_id
+        ):
+            return False
+        by_id[item["obligation_id"]] = item
+    for index, (obligation, identity) in enumerate(
+        zip(obligations, expected, strict=True), start=1
+    ):
+        oid = f"obligation-{index:03d}"
+        if (
+            not isinstance(obligation, dict)
+            or obligation.get("obligation_id") != oid
+            or tuple(
+                obligation.get(key)
+                for key in ("source_pass", "kind", "invariant", "summary")
+            )
+            != identity
+        ):
+            return False
+        resolution = by_id.get(oid)
+        if not isinstance(resolution, dict) or resolution.get("disposition") not in (
+            "resolved",
+            "unresolved",
+        ):
+            return False
+        if risk == "low" and resolution["disposition"] != "resolved":
+            return False
+        summary = resolution.get("summary")
+        if not isinstance(summary, str) or not 1 <= len(summary) <= 240:
+            return False
+        anchors = obligation.get("locations")
+        evidence = resolution.get("source_evidence")
+        if (
+            not isinstance(anchors, list)
+            or not isinstance(evidence, list)
+            or len(evidence) > 16
+        ):
+            return False
+        for item in anchors + evidence:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("path"), str)
+                or not item["path"]
+                or type(item.get("line")) is not int
+                or item["line"] < 1
+            ):
+                return False
+        locations = {
+            (item["path"].removeprefix("./"), item["line"]) for item in evidence
+        }
+        anchor_locations = {
+            (item["path"].removeprefix("./"), item["line"]) for item in anchors
+        }
+        if resolution["disposition"] == "resolved" and not (
+            bool(locations & anchor_locations)
+            if anchor_locations
+            else len(locations) >= 2
+        ):
+            return False
+    return True
+
+
+def _fanout_models_complete(models: object, expected_model: object) -> bool:
+    return (
+        expected_model == "z-ai/glm-5.3-flash"
+        and isinstance(models, list)
+        and bool(models)
+        and all(
+            isinstance(model, str)
+            and _fanout_response_model_matches("z-ai/glm-5.3-flash", model)
+            for model in models
+        )
+    )
 
 
 def _fanout_response_model_matches(
