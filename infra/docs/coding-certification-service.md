@@ -35,6 +35,17 @@ validator container (root)                 host
   keeps its container source address. The harness is published on host
   loopback, which the service reaches directly because it runs on the host.
 - **No TCP control listener.** The only control surface is the Unix socket.
+- **Bounded admission window.** The service is long-lived, so admission to the
+  router is not left to source binding and route tokens alone. Each run admits
+  work only until its maximum lifetime (default 2 hours) and only until it has
+  been idle for the idle timeout (default 15 minutes). Activity is an open
+  router connection or an in-flight `POST` certify request. A readiness probe
+  is not activity, so polling cannot keep an idle service open. At either
+  bound, the router listener (wrapped by `rootlessnetns.WithAuthority`) and all
+  its connections close, the control socket is removed, and the process exits 0
+  with `coding certification service admission window ended`. `Restart=no`
+  keeps it stopped until an operator starts it again, which re-proves the whole
+  placement.
 
 ## Fixed paths, owners and modes
 
@@ -73,6 +84,8 @@ no `DITTOBENCH_SANDBOX_*`, `DOCKER_HOST`, proxy or CA variable):
 | `DITTOBENCH_CODING_CERTIFICATION_RUNTIME_IMAGE_DIGEST` | `sha256:<64 hex>` |
 | `DITTOBENCH_CODING_CERTIFICATION_PACK_MANIFEST_SHA256` | the pinned canary manifest digest; startup refuses another pack |
 | `DITTOBENCH_CODING_CERTIFICATION_ROUTER_HELPER_SHA256` | SHA-256 of the installed router helper; startup refuses another helper |
+| `DITTOBENCH_CODING_CERTIFICATION_MAX_LIFETIME_SECONDS` | optional; canonical decimal seconds in [3600, 43200]; default 7200 |
+| `DITTOBENCH_CODING_CERTIFICATION_IDLE_TIMEOUT_SECONDS` | optional; canonical decimal seconds in [600, max lifetime]; default 900 |
 
 The coding harness gets no CA bundle, no GitHub token and fixed limits (3g
 memory, 512m tmpfs, 2 CPUs, 512 pids). The Docker CLI drops every inherited
@@ -156,7 +169,7 @@ reported as `failure`:
 | --- | --- | --- |
 | 1 | `pack` | the loaded public pack re-verifies on disk |
 | 2 | `rootless_topology` | euid is the configured non-root user; the daemon socket and directory have the pinned owner and modes (no links); the daemon's default bridge gateway equals the router address; RootlessKit's child and the daemon behind the socket share the pinned, non-detached user and network namespaces owned by this user (`rootlessnetns.Precheck`) |
-| 3 | `listener_namespace` | the served router listener is a listening IPv4 TCP socket bound exactly to the router address, without `SO_REUSEPORT`, in the current RootlessKit network namespace (`rootlessnetns.VerifyListener`, `SIOCGSKNS`); a daemon restart strands the old listener and fails here |
+| 3 | `listener_namespace` | the admission window is open, with at least 35 minutes of lifetime left (one full lease) and, when nothing is active, at least 5 minutes before the idle timeout; and the served router listener is a listening IPv4 TCP socket bound exactly to the router address, without `SO_REUSEPORT`, in the current RootlessKit network namespace (`rootlessnetns.VerifyListener`, `SIOCGSKNS`); a daemon restart strands the old listener and fails here |
 | 4 | `control_socket` | the control socket path still names the served inode, in the same directory inode, with the pinned owner, group and modes, reached without links |
 | 5 | `executor_daemon` | the dedicated daemon reports rootless and carries the isolated-daemon label |
 | 6 | `runtime_image` | the pinned `sha256` runtime image digest is present locally with the supervisor contract |
@@ -167,7 +180,9 @@ before creating private state, the router listener or the control socket, re-ver
 and creates the control socket last.
 
 `POST /v1/coding/certifier/canary` re-runs checks 2–4 before touching the
-backend and answers `503 placement` if any fails, so a stale listener or swapped
+backend and answers `503 placement` if any fails. An in-flight certify needs
+only an open admission window, not the 35-minute margin readiness already
+proved before the claim, so a stale listener or swapped
 socket after claim is an infrastructure refusal, never a failed certification
 attributed to the candidate.
 
@@ -220,9 +235,9 @@ uvx --from ansible-core==2.21.2 ansible-playbook --check -i localhost, tests/cod
   names its path.
 - Preloading the reviewed runtime image, and stale-resource cleanup on the
   dedicated daemon.
-- A time-bounded authority window on the router listener: unlike the one-shot
-  hosted worker, the service is long-lived, so admission relies on source
-  binding plus route tokens while it runs.
+- A per-operation authority window on the router listener. Admission is
+  bounded per service run (lifetime and idle timeout), not per certify
+  operation.
 - Client authentication beyond the socket permissions and the certification
   bearer. The validator container runs as root, so the socket mode identifies
   the service to the validator rather than restricting the validator.
