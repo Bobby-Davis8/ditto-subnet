@@ -2,6 +2,51 @@
 
 <!-- version list -->
 
+## v0.274.0 (2026-09-16)
+
+### Features
+
+- **coding**: Derive and launch-check hosted-v2 task profiles
+  ([#1865](https://github.com/ditto-assistant/ditto-subnet/pull/1865),
+  [`1dcea85`](https://github.com/ditto-assistant/ditto-subnet/commit/1dcea85298034ffabcf0836527261a9aec20c5d7))
+
+- **infra**: Default-off native coding PostgreSQL environment materialization
+  ([#1888](https://github.com/ditto-assistant/ditto-subnet/pull/1888),
+  [`127126d`](https://github.com/ditto-assistant/ditto-subnet/commit/127126dd325d09b73f9dc987dfc5baeb42b4e45f))
+
+- **infra**: Stable custody install and per-run native-v2 custody lifecycle
+  ([#1860](https://github.com/ditto-assistant/ditto-subnet/pull/1860),
+  [`137e574`](https://github.com/ditto-assistant/ditto-subnet/commit/137e574d815b039c3995ae404978f2bb6e7cc5c9))
+
+
+## v0.273.1 (2026-09-16)
+
+### Bug Fixes
+
+- Preserve v13 claim evidence in signed report wire format
+  ([#1944](https://github.com/ditto-assistant/ditto-subnet/pull/1944),
+  [`bcd7337`](https://github.com/ditto-assistant/ditto-subnet/commit/bcd733721d50012f5cca3f20d50c1d536b2675b5))
+
+
+## v0.273.0 (2026-09-16)
+
+### Documentation
+
+- Route Backroom reviews to the applicable v13 policy
+  ([#1942](https://github.com/ditto-assistant/ditto-subnet/pull/1942),
+  [`e4efec3`](https://github.com/ditto-assistant/ditto-subnet/commit/e4efec389ec03341ef3d71665dd36352d4d2ddb5))
+
+### Features
+
+- **bench**: Integrate the v13 pre-activation contract
+  ([#1937](https://github.com/ditto-assistant/ditto-subnet/pull/1937),
+  [`e1a8fa2`](https://github.com/ditto-assistant/ditto-subnet/commit/e1a8fa2b786143d4c74c57277d75a1cb57a9d4fb))
+
+- **platform**: Add isolated singleton benchmark canary leases
+  ([#1943](https://github.com/ditto-assistant/ditto-subnet/pull/1943),
+  [`f1e067d`](https://github.com/ditto-assistant/ditto-subnet/commit/f1e067d4f6084a5b963cc2b46a476faea87db4d4))
+
+
 ## v0.272.0 (2026-09-16)
 
 ### Features

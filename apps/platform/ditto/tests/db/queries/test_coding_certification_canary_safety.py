@@ -85,7 +85,7 @@ _POLICY_PATH = (
 )
 _MIGRATION = (
     Path(__file__).parents[4]
-    / "alembic/versions/2026_09_14_add_coding_certification_canary_safety.py"
+    / "alembic/versions/2026_09_16_add_coding_certification_canary_safety.py"
 )
 _BROKER_KEY = "A" * 43
 _MICROSECOND = timedelta(microseconds=1)
