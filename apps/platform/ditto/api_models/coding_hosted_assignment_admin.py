@@ -32,7 +32,9 @@ class AdminHostedAssignmentPreviewRequest(AdminHostedAssignmentSubject):
 class AdminHostedAssignmentCreateRequest(AdminHostedAssignmentSubject):
     evaluation_id: UUID
     attempt_id: UUID
-    deadline_unix: Annotated[int, Field(strict=True, gt=0)]
+    # Upper bound matches the authority projection (9999-12-31T23:59:59Z) so the
+    # datetime conversion in planning can never raise on a wire-valid value.
+    deadline_unix: Annotated[int, Field(strict=True, gt=0, le=253402300799)]
     confirmed_assignment_sha256: Sha256
     reason: Annotated[str, Field(min_length=8)]
     actor: Annotated[str, Field(min_length=1, max_length=120)] = "admin_api"

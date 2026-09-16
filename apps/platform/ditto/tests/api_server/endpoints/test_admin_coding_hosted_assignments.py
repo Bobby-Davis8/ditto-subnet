@@ -27,6 +27,9 @@ from ditto.api_models.coding_certification import (
     coding_certification_receipt_digest,
     coding_certification_signing_message,
 )
+from ditto.api_models.coding_hosted_assignment_admin import (
+    AdminHostedAssignmentCreateRequest,
+)
 from ditto.api_models.coding_inference import (
     CodingInferencePolicy,
     CodingInferenceProviderSettlement,
@@ -305,6 +308,37 @@ async def test_create_requires_exact_confirmation_then_creates_and_binds(
     assert replay.json()["authoring_grant_id"] == body["authoring_grant_id"]
     assert await _count(session_maker, CodingHostedAssignment) == 1
     assert await _count(session_maker, CodingHostedPrivateTask) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_out_of_range_deadline_as_client_error(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    _install(app, session_maker)
+    agent_id, release_row_id, _ = await _seed(session_maker)
+    subject = _subject(agent_id, release_row_id)
+    create = {
+        **subject,
+        "evaluation_id": str(uuid4()),
+        "attempt_id": str(uuid4()),
+        "deadline_unix": 2**40,
+        "confirmed_assignment_sha256": "f" * 64,
+        "reason": "synthetic operator canary assignment",
+        "actor": "test-operator",
+        "confirmation": "CREATE SHADOW CODING HOSTED ASSIGNMENT",
+    }
+
+    refused = await client.post(_URL, headers=_HEADERS, json=create)
+    assert refused.status_code == 422, refused.text
+    assert await _count(session_maker, CodingHostedAssignment) == 0
+
+    boundary = AdminHostedAssignmentCreateRequest.model_validate(
+        {**create, "deadline_unix": 253402300799}
+    )
+    assert boundary.deadline_unix == 253402300799
+    assert datetime.fromtimestamp(boundary.deadline_unix, UTC).year == 9999
 
 
 # --- Real contract-v1 certification through the supported lease/receipt path ---
