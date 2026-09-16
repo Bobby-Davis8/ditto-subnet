@@ -10,3 +10,5 @@ coding_hosted_rollout_connectivity_sha256: ""
 # runtime config's router_namespace: the worker then reads only RootlessKit's
 # child_pid below the daemon user's otherwise hidden runtime directory.
 coding_hosted_router_namespace: host
+# network_enforcement mode only: the release runtime's probe runner binary.
+coding_hosted_probe_runner: ""
