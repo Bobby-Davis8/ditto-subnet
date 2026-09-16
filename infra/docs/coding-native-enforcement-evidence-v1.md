@@ -10,11 +10,11 @@ network, resource, pre-exec and cleanup. This layer has three parts:
 
 The verifier runs no probe, reaches no host or daemon, reads no custody path
 and creates no approval. The PR2 probe runner (below) writes no evidence
-record either. Two collectors write records: the PR4 network collector
-(`network_enforcement`) and the PR5 resource collector (`resource_enforcement`).
-Pre-exec and cleanup collection refuse before any host effect and list the
-catalog probes they do not collect, with the reason; see
-[pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable).
+record either. Three collectors write records: the PR4 network collector
+(`network_enforcement`), and the PR5 resource (`resource_enforcement`) and
+cleanup (`cleanup_recovery`) collectors. Pre-exec collection refuses before any
+host effect and lists the catalog probes it does not collect, with the reason;
+see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5).
 Collectors never run from `coding-hosted-operate`, and a test checks that only
 the offline regression job and the disposable rootless probe-runner CI job name
 these tools. The collector may appear there only as a path filter and a lint
@@ -417,9 +417,8 @@ collects now (nothing has been collected on a host yet):
 |---|---|
 | `network_enforcement` (all) | Collected by the [PR4 network collector](#network-collector-b5-pr4) |
 | `resource_enforcement` (all 35 probes × 4 language images) | Collected by the [PR5 resource collector](#resource-collector-b5-pr5) from started containers, measured from outside |
-| `preexec_confinement` (all) | Not collected: per-language fixtures are missing; see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable) |
-| `cleanup_recovery.{normal_stop,partial_start,timeout,oom,escaped_setsid,runner_sigterm}` | Scenarios implemented and tested against a simulated host; the kind refuses to run until the rest exist |
-| `cleanup.runner_sigkill.*`, `cleanup.rerun.consumed_marker` | Not collected: the hosted runtime has no intent journal, and the consumed marker needs a full private runtime configuration |
+| `preexec_confinement` (all) | Not collected: per-language fixtures are missing; see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5) |
+| `cleanup_recovery` (all 10 probes) | Collected by the [PR5 cleanup collector](#cleanup-recovery-collected), including SIGKILL reconciliation from the hosted runtime's launch journal and the consumed-attempt rerun |
 
 The PR4 network collector measures preconditions and residue for network
 records (worker and custody state, custody socket, all daemon containers,
@@ -759,7 +758,9 @@ probe, sequentially.
 - `ditto/tests/test_coding_native_resource_collector.py`: a simulated host
   whose correct collection verifies offline, 22 enforcement failures that are
   recorded and refused by the verifier, 26 binding refusals that retain nothing,
-  residue, config and verifier tamper paths, and the cleanup scenarios.
+  residue, config and verifier tamper paths, the memory page tolerance, and
+  cleanup collection end to end (retained and verified), with each SIGKILL and
+  rerun failure recorded as unmatched and the launch journal parser.
 - `ditto/tests/test_coding_native_resource_kernel.py`: the collector's own
   samplers and `SystemHost` readers against a real kernel, with the built
   runner's workloads in throwaway containers under small limits (64 MiB memory,
@@ -822,13 +823,13 @@ probe, sequentially.
   least certain floor).
 - Reboot and daemon-restart recovery, as for every record.
 
-## Pre-exec and cleanup (B5 PR5): not collectable
+## Pre-exec and cleanup (B5 PR5)
 
-`preexec` and `cleanup` exit 2 before reading a config or touching the host, and
-print every catalog probe they do not collect with its reason
-(`NOT_COLLECTED` in the collector). A record missing a catalog probe never
-verifies, and no collector claims a probe it did not measure. A test checks that
-this list, the catalog and the tables below agree.
+`preexec` exits 2 before reading a config or touching the host, and prints every
+catalog probe it does not collect with its reason (`NOT_COLLECTED` in the
+collector). A record missing a catalog probe never verifies, and no collector
+claims a probe it did not measure. A test checks that this list, the catalog
+and the tables below agree. `cleanup` collects every `cleanup_recovery` probe.
 
 ### Pre-exec confinement (nothing collected)
 
@@ -850,12 +851,28 @@ The fixtures are the open work. Two constraints shape them:
 The image test stages (`coding_runtime/*/supervisor-probe*`) already carry
 synthetic hostile scenarios for each driver, and are a starting point.
 
-### Cleanup recovery (six scenarios implemented, kind refused)
+### Cleanup recovery (collected)
 
-Implemented, and tested against the simulated host. Each scenario then counts,
-from outside: all daemon containers, `ditto-job-` networks, volumes, and
-processes owned by subordinate ids plus processes in the daemon user's
-`docker-*.scope` cgroups.
+`collect-coding-native-enforcement.py cleanup --config FILE --confirm "COLLECT
+NATIVE CLEANUP RECOVERY EVIDENCE"` is default-off and root-only on
+`ditto-coding-hosted-v2`, and takes the resource collector's config, host setup
+and bindings. It retains one record, prints `approval_generated: false` and
+exits 3 when a probe did not match or residue remains. Nothing has run on a
+host.
+
+Every agent session runs with the hosted runtime's
+[launch intent journal](../../services/dittobench-api/docs/coding-hosted-runtime-v2.md#launch-intent-journal-and-sigkill-recovery-b5):
+`resource-agent --launch-journal native-enforcement/launch-journal
+--attempt-state native-enforcement/attempt-N`. The collector creates both
+directories (mode 0700, owned by the daemon user). The agent first consumes the
+attempt with the runtime's own `ConsumeAttempt` (the function `Run` calls), then
+reconciles the journal. It runs each workload as one journaled attempt, one at a
+time: it journals and creates a sentinel network, launches only through the
+journal hook, and reconciles when the run's production cleanup is done.
+
+Each counting scenario then counts, from outside: all daemon containers,
+`ditto-job-` networks (sentinels included), volumes, and processes owned by
+subordinate ids plus processes in the daemon user's `docker-*.scope` cgroups.
 
 | Probe | Scenario |
 |---|---|
@@ -864,18 +881,34 @@ processes owned by subordinate ids plus processes in the daemon user's
 | `cleanup.timeout.absent` | An authoring `hang` workload exceeds a 3 s command timeout |
 | `cleanup.oom.absent` | An authoring `memory` workload is OOM-killed |
 | `cleanup.escaped_setsid.absent` | An authoring `hang` workload whose child calls `setsid` times out |
-| `cleanup.runner_sigterm.absent` | The resource agent gets SIGTERM while a workload runs; it cancels the run, waits for production cleanup and exits |
+| `cleanup.runner_sigterm.absent` | The resource agent gets SIGTERM while a workload runs; it cancels the run, waits for production cleanup, reconciles and exits |
+| `cleanup.runner_sigkill.reconciled_absent` | A new agent session (a fresh attempt) starts an authoring `hang` workload. The collector binds the container and workload, then SIGKILLs the agent and waits for its cgroup to empty. It runs the runtime's reconciler as a transient unit of the daemon user (`dittobench-coding-enforcement-probe reconcile-launch-journal`, the same `ReconcileLaunchJournal` as `dittobench-coding-hosted-worker --reconcile-launch-journal`, with the pinned socket and `/usr/bin/docker`), then counts |
+| `cleanup.runner_sigkill.journal_ids_only` | Read by root after the kill, before reconciling, without following links: the journal must be the daemon user's mode-0600 single-link file of at most 256 KiB. Every complete line must be exactly the runtime's encoding of `schema`, `attempt`, `worker`, `run`, `containers`, `networks`, in that order, with closed identifier values. `journal_ids_only` if so; `permitted` if anything else is present or the file is not private; `absent` if there is no journal or no entry |
+| `cleanup.runner_sigkill.sentinel_network` | Before the kill the collector creates a decoy: an internal network named and labelled exactly like a sentinel (`ditto-job-sentinel-<16 hex>`, ownership label, sentinel label) but never journaled. `present` only if all of these hold: after the kill the journal names the workload container and exactly one sentinel, and both still exist; after reconciliation that sentinel is gone; and the decoy is still there. `extra_ids_touched` if the decoy was removed; `absent` if the kill left nothing journaled to reconcile; `probe_error` if the sentinel survived. The collector then removes its decoy before counting |
+| `cleanup.rerun.consumed_marker` | The collector reads the killed attempt's `consumed` marker (the daemon user's 0600 file, exact v2 content), then starts the agent again on the same `--attempt-state`. `refused` only if the marker was exact and the agent's only output is the fixed consumed refusal before it exits; otherwise `accepted` |
 
-Not collected:
+On an interrupted collection, the collector removes its decoy and, if a journal
+is pending, runs the reconciler before removing the work directory.
 
-| Probe | Reason |
-|---|---|
-| `cleanup.runner_sigkill.reconciled_absent` | The hosted runtime keeps no intent journal of the container and network ids it launched, so nothing reconciles after SIGKILL |
-| `cleanup.runner_sigkill.journal_ids_only` | No intent journal exists |
-| `cleanup.runner_sigkill.sentinel_network` | Without journal reconciliation, sparing a sentinel network cannot be shown |
-| `cleanup.rerun.consumed_marker` | The marker is written by `codinghostedruntime.Run`, which needs a full private runtime configuration (Platform control, custody inputs) to reach |
+### What cleanup collection does not show
 
-The SIGKILL probes need a runtime change: an intent journal and a reconciler.
+- **Not a `Run`.** The workloads are started by the probe runner's agent through
+  the production launch paths and the runtime's journal, marker and reconciler
+  functions, not by `codinghostedruntime.Run`, which needs private Platform
+  control and custody inputs. Run's own order (consume, environment, reconcile,
+  sentinel, launch through the hook, reconcile after confirmed cleanup) is
+  covered by Go tests only.
+- **The rerun proves the marker, not Platform.** PostgreSQL's irreversible start
+  remains the cross-host authority.
+- **One class.** The SIGKILL scenario kills an authoring executor workload; the
+  harness path journals its job network too, and a real-daemon test covers that
+  only in CI (`TestLaunchJournalReconcilesAKilledOwnerOnRealDocker`, created
+  containers only).
+- **Sentinel outcome vocabulary.** The catalog's `present` outcome is kept. It
+  now means the journaled sentinel was left by the kill and removed by
+  reconciliation while an unjournaled look-alike was spared. Removal of the
+  journaled sentinel is also counted by `reconciled_absent`.
+- Reboot and daemon-restart recovery, as for every record.
 
 ## Semantic nft ruleset digest (preflight v4)
 
@@ -965,9 +998,14 @@ approval's `private_input_custody` digest is the digest of that object.
 - **Pre-exec fixtures (PR5).** Should the enforcement image set record public
   fixture test commands for the languages other than the grading profile's own?
   That includes a public Rust authority when Rust is not the profile's language.
-- **Cleanup SIGKILL (PR5).** Should the hosted runtime get an intent journal and
-  a reconciler, so the SIGKILL probes can be collected, or should they move to
-  the not-covered list with reboot and daemon restart?
+- **Cleanup SIGKILL (PR5). Decided 2026-09-16:** build the journal and the
+  reconciler in the hosted runtime; implemented, and the SIGKILL probes are
+  collected (see [cleanup recovery](#cleanup-recovery-collected)).
+- **Consumed-marker rerun (PR5). Decided 2026-09-16:** observe it without
+  private configuration. The marker write and check stay one function, which
+  `Run` still calls first. It is exported as `ConsumeAttempt`, and the probe
+  agent drives it with a public attempt directory. Nothing in the runtime's own
+  check changed.
 - **Harness and authoring log floors.** These keep the 500 per-mille floor.
   Docker's local log driver with `max-file=1` may keep any amount under 8 MiB
   after rotation, so this floor is still the least certain.
@@ -1036,7 +1074,9 @@ identity is bound into the signed approval and the evidence.
 - It cannot confirm that `--checkout` is at `source_revision`.
 - The router and proxy roles are the record's own split of the two candidate
   endpoints; only the pair itself is derived from the profile.
-- Pre-exec confinement and the cleanup SIGKILL and rerun scenarios; see
-  [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable).
+- Pre-exec confinement; see
+  [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5). Cleanup records do not
+  exercise `codinghostedruntime.Run` itself; see
+  [what cleanup collection does not show](#what-cleanup-collection-does-not-show).
 - Endpoint hashes hide raw addresses from the record, but IPv4 addresses are
   few enough to guess a hash by brute force. They are labels, not secrets.

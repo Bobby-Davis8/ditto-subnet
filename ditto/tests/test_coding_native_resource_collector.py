@@ -72,6 +72,15 @@ class Scenario:
         self.leftover_after: dict[str, dict[str, int]] = {}
         self.agent_survives_sigterm = False
         self.page_bytes = 4096
+        # cleanup_recovery launch journal and rerun knobs
+        self.journal_tamper: Any = None  # callable(bytes) -> bytes
+        self.journal_not_private = False
+        self.journal_omits_container = False
+        self.kill_leaves_nothing = False
+        self.reconciler_removes_decoy = False
+        self.reconciler_skips_sentinel = False
+        self.rerun_accepted = False
+        self.marker_missing = False
 
 
 @functools.cache
@@ -93,10 +102,15 @@ class FakeAgent:
         self.closed = False
         self.counter = 0
 
+    def read(self, timeout: float) -> dict:
+        assert timeout > 0
+        raise COLLECTOR.Refusal("agent did not answer in time")
+
     def request(self, value: dict, timeout: float) -> dict:
         assert timeout > 0
         host, scenario = self.host, self.host.scenario
         assert not host.agent_terminated, "request to a terminated agent"
+        assert not host.agent_killed, "request to a killed agent"
         host.requests.append(value)
         op = value["op"]
         answer: dict[str, Any] = {"schema": COLLECTOR.RESOURCE_AGENT_SCHEMA, "op": op}
@@ -119,6 +133,42 @@ class FakeAgent:
 
     def close(self) -> None:
         self.closed = True
+        # End of input ends the agent.
+        self.host.agent_exited = True
+
+
+class RefusingAgent:
+    """An agent started on a consumed attempt: one line, then it exits."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def read(self, timeout: float) -> dict:
+        assert timeout > 0
+        return {
+            "schema": COLLECTOR.RESOURCE_AGENT_SCHEMA,
+            "op": "attempt",
+            "error": "probe: attempt state consumed",
+        }
+
+    def request(self, value: dict, timeout: float) -> dict:
+        assert value and timeout > 0
+        raise COLLECTOR.Refusal("agent closed its session")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def journal_line(run: str, containers: list[str], networks: list[str]) -> bytes:
+    entry = {
+        "schema": COLLECTOR.JOURNAL_ENTRY_SCHEMA,
+        "attempt": "native-enforcement-0123456789abcdef",
+        "worker": "native-enforcement-agent",
+        "run": run,
+        "containers": containers,
+        "networks": networks,
+    }
+    return json.dumps(entry, separators=(",", ":")).encode() + b"\n"
 
 
 class ResourceFakeHost:
@@ -137,6 +187,13 @@ class ResourceFakeHost:
         self.work_dir_removed = False
         self.agent_exited = False
         self.agent_terminated = False
+        self.agent_killed = False
+        self.journaled = False
+        self.journal: list[bytes] = []
+        self.consumed: set[str] = set()
+        self.private_dirs: list[Path] = []
+        self.one_shots: list[tuple[str, list[str]]] = []
+        self.decoys: set[str] = set()
         self.commands: list[tuple] = []
         if scenario.stray_container:
             self.containers["f" * 64] = {"run": None}
@@ -245,9 +302,44 @@ class ResourceFakeHost:
             self.networks.add(run["network"])
         else:
             answer["executor_instance"] = run["instance"]
+        if self.journaled:
+            run["sentinel"] = f"ditto-job-sentinel-{init:016x}"
+            self.networks.add(run["sentinel"])
+            self.journal.append(
+                journal_line(f"sentinel-{init:016x}", [], [run["sentinel"]])
+            )
+            name = self.container_name(run)
+            networks = [run["network"]] if container == "harness" else []
+            if not self.scenario.journal_omits_container:
+                self.journal.append(journal_line(name, [name], networks))
         if not run["fail_start"]:
             self.containers[container_id] = {"run": run_id}
         return answer
+
+    def container_name(self, run: dict) -> str:
+        if run["class"] == "harness":
+            return f"dittobench-{run['init']:016x}"
+        return f"dittobench-coding-{run['init']:012x}-{run['init']:012x}"
+
+    def reconcile_journal(
+        self, *, decoys: bool = False, skip_sentinel: bool = False
+    ) -> None:
+        for line in self.journal:
+            entry = json.loads(line)
+            for name in entry["containers"]:
+                for container_id, item in list(self.containers.items()):
+                    run = self.runs.get(item["run"]) if item["run"] else None
+                    if run and self.container_name(run) == name:
+                        del self.containers[container_id]
+            for name in entry["networks"]:
+                if name.startswith("ditto-job-sentinel-") and skip_sentinel:
+                    continue
+                self.networks.discard(name)
+        if decoys:
+            for name in list(self.networks):
+                if name.startswith("ditto-job-sentinel-"):
+                    self.networks.discard(name)
+        self.journal = []
 
     def run_of_container(self, target: str) -> dict | None:
         entry = self.containers.get(target)
@@ -276,6 +368,8 @@ class ResourceFakeHost:
         if container not in self.scenario.container_remains:
             self.containers.pop(run["container_id"], None)
             self.networks.discard(run["network"])
+            if self.journaled:
+                self.reconcile_journal()
         answer: dict[str, Any] = {"run": run_id, "done": True}
         leftovers = self.scenario.leftover_after.get(run["mode"])
         if leftovers:
@@ -300,6 +394,22 @@ class ResourceFakeHost:
 
     def docker(self, *args: str) -> bytes:
         self.commands.append(("docker", *args))
+        if args == ("ps", "--all", "--format", "{{.Names}}"):
+            names = []
+            for item in self.containers.values():
+                run = self.runs.get(item["run"]) if item["run"] else None
+                if run is not None:
+                    names.append(self.container_name(run))
+            return "\n".join(names).encode()
+        if args == ("network", "ls", "--format", "{{.Name}}"):
+            return "\n".join(sorted(self.networks)).encode()
+        if args[:2] == ("network", "create"):
+            self.networks.add(args[-1])
+            self.decoys.add(args[-1])
+            return b"id\n"
+        if args[:2] == ("network", "rm"):
+            self.networks.discard(args[-1])
+            return args[-1].encode()
         if args[0] == "info":
             self.info_calls += 1
             info = base.DAEMON_IDENTITY_VECTOR["info"]
@@ -555,7 +665,9 @@ class ResourceFakeHost:
 
     def cgroup_procs(self, cgroup: str) -> list[int]:
         if cgroup.endswith(".service") and "ditto-native-resource-agent" in cgroup:
-            alive = not (self.agent_exited or self.agent_terminated)
+            alive = not (
+                self.agent_exited or self.agent_terminated or self.agent_killed
+            )
             if self.agent_terminated and self.scenario.agent_survives_sigterm:
                 alive = True
             return [AGENT_PID] if alive else []
@@ -572,6 +684,15 @@ class ResourceFakeHost:
 
     def resource_session(self, unit: str, arguments: list[str]):
         self.agent_unit, self.agent_arguments = unit, arguments
+        self.agent_exited = self.agent_terminated = self.agent_killed = False
+        self.journaled = "--launch-journal" in arguments
+        if "--attempt-state" in arguments:
+            state = arguments[arguments.index("--attempt-state") + 1]
+            if state in self.consumed and not self.scenario.rerun_accepted:
+                self.agent_exited = True
+                return RefusingAgent()
+            if not self.scenario.marker_missing:
+                self.consumed.add(state)
         self.agent = FakeAgent(self, arguments)
         return self.agent
 
@@ -581,6 +702,59 @@ class ResourceFakeHost:
         if not self.scenario.agent_survives_sigterm:
             for run in self.runs.values():
                 self.containers.pop(run["container_id"], None)
+            if self.journaled:
+                self.reconcile_journal()
+
+    def kill(self, pid: int) -> None:
+        assert pid == AGENT_PID
+        self.agent_killed = True
+        if self.scenario.kill_leaves_nothing:
+            self.containers.clear()
+            self.networks = {
+                name
+                for name in self.networks
+                if not name.startswith("ditto-job-sentinel-") or name in self.decoys
+            }
+
+    def make_private_dir(self, path: Path, uid: int, gid: int) -> None:
+        assert (uid, gid) == (UID, GID) and path.parent == COLLECTOR.WORK_DIR
+        assert path not in self.private_dirs
+        self.private_dirs.append(path)
+
+    def read_private_file(self, path: Path, uid: int, maximum: int) -> bytes | None:
+        assert uid == UID and maximum > 0
+        if path == COLLECTOR.JOURNAL_DIR / COLLECTOR.JOURNAL_FILE:
+            if self.scenario.journal_not_private:
+                raise COLLECTOR.Refusal("private file is not the daemon user's")
+            if not self.journal:
+                return None
+            raw = b"".join(self.journal)
+            if self.scenario.journal_tamper is not None:
+                raw = self.scenario.journal_tamper(raw)
+            return raw
+        assert path.name == "consumed"
+        if str(path.parent) in self.consumed:
+            return COLLECTOR.CONSUMED_MARKER
+        return None
+
+    def one_shot(self, unit: str, arguments: list[str]) -> tuple[int, bytes]:
+        self.one_shots.append((unit, arguments))
+        assert arguments[:2] == [RUNNER, "reconcile-launch-journal"]
+        assert arguments[2:] == [
+            "--launch-journal",
+            str(COLLECTOR.JOURNAL_DIR),
+            "--docker-executable",
+            "/usr/bin/docker",
+            "--docker-socket",
+            COLLECTOR.SOCKET,
+        ]
+        entries = len(self.journal)
+        self.reconcile_journal(
+            decoys=self.scenario.reconciler_removes_decoy,
+            skip_sentinel=self.scenario.reconciler_skips_sentinel,
+        )
+        report = {"schema": COLLECTOR.RECONCILE_SCHEMA, "entries": entries}
+        return 0, json.dumps(report).encode()
 
     def subordinate_processes(self, start: int, count: int) -> int:
         assert (start, count) == (SUBUID, 65536)
@@ -1281,8 +1455,8 @@ def test_cleanup_scenarios_observe_absence_from_outside(rw):
         )
     starts = [item for item in host.requests if item["op"] == "start"]
     assert [item.get("fail_start", False) for item in starts].count(True) == 1
-    # The SIGTERM scenario ended the agent; nothing it launched remains.
-    assert host.agent_terminated and host.containers == {}
+    # Nothing any scenario launched remains, and the journal is reconciled.
+    assert host.containers == {} and host.networks == set() and host.journal == []
 
 
 def test_cleanup_records_leftovers_and_refuses_an_agent_that_ignores_sigterm(rw):
@@ -1299,14 +1473,12 @@ def test_cleanup_records_leftovers_and_refuses_an_agent_that_ignores_sigterm(rw)
         collector.scenario_runner_sigterm()
 
 
-def test_uncollectable_kinds_refuse_before_any_host_effect(rw, capsys):
-    for kind in ("preexec", "cleanup"):
-        assert COLLECTOR.main([kind], host_factory=pytest.fail) == 2
-        err = capsys.readouterr().err
-        for probe in COLLECTOR.NOT_COLLECTED[COLLECTOR.KIND_OF[kind]]:
-            assert probe in err
-    with pytest.raises(COLLECTOR.Refusal, match="cannot collect"):
-        rw.collector(rw.host(), "cleanup").collect()
+def test_uncollectable_kinds_refuse_before_any_host_effect(capsys):
+    assert COLLECTOR.main(["preexec"], host_factory=pytest.fail) == 2
+    err = capsys.readouterr().err
+    for probe in COLLECTOR.NOT_COLLECTED["preexec_confinement"]:
+        assert probe in err
+    assert COLLECTOR.NOT_COLLECTED["cleanup_recovery"] == {}
 
 
 def test_not_collected_probes_are_catalog_probes_and_documented():
@@ -1369,3 +1541,224 @@ def test_collector_source_names_no_approval_and_no_workflow():
     workflow = ROOT / ".github/workflows/coding-hosted-operate.yml"
     if workflow.exists():
         assert "collect-coding-native-enforcement" not in workflow.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Cleanup recovery: SIGKILL journal reconciliation and the consumed rerun
+
+
+def cleanup_main(rw, scenario: Scenario | None = None, confirm: str | None = None):
+    host = rw.host(scenario)
+    code = COLLECTOR.main(
+        [
+            "cleanup",
+            "--config",
+            str(CONFIG_PATH),
+            "--confirm",
+            confirm or COLLECTOR.CLEANUP_CONFIRMATION,
+        ],
+        host_factory=lambda: host,
+        checkout=rw.world.checkout,
+    )
+    return code, host
+
+
+def test_cleanup_record_is_collected_retained_and_verifies_offline(rw, capsys):
+    code, host = cleanup_main(rw)
+    result = json.loads(capsys.readouterr().out)
+    assert code == 0 and result["all_matched"] and result["approval_generated"] is False
+    assert result["schema"] == "dittobench-coding-native-cleanup-collection-result-v1"
+    stored = (rw.world.store / result["record_sha256"]).read_bytes()
+    record = json.loads(stored)
+    assert record["kind"] == "cleanup_recovery"
+    assert rw.verify(record) is None
+    observed_ids = {
+        (item["id"], json.dumps(item["observed"], sort_keys=True))
+        for phase in record["phases"]
+        for item in phase["probes"]
+    }
+    assert (
+        "cleanup.runner_sigkill.sentinel_network",
+        '{"outcome": "present"}',
+    ) in observed_ids
+    assert (
+        "cleanup.rerun.consumed_marker",
+        '{"outcome": "refused"}',
+    ) in observed_ids
+    # Every session had a fresh attempt directory in the private work dir;
+    # the rerun reused the killed attempt's.
+    work = COLLECTOR.WORK_DIR
+    assert host.private_dirs == [
+        COLLECTOR.JOURNAL_DIR,
+        work / "attempt-1",
+        work / "attempt-2",
+    ]
+    assert host.agent_arguments[-1] == str(work / "attempt-2")
+    # The runtime's reconciler ran once, as the daemon user's transient unit,
+    # and the collector's decoy network is gone again.
+    assert len(host.one_shots) == 1
+    assert host.networks == set() and host.containers == {} and host.journal == []
+    decoys = [
+        command
+        for command in host.commands
+        if command[:3] == ("docker", "network", "create")
+    ]
+    assert (
+        len(decoys) == 1
+        and COLLECTOR.SENTINEL_LABEL + "=collector-decoy" in (decoys[0])
+    )
+
+
+def test_cleanup_needs_the_exact_confirmation_and_root(rw, monkeypatch):
+    with pytest.raises(COLLECTOR.Refusal, match="exact confirmation"):
+        cleanup_main(rw, confirm=COLLECTOR.RESOURCE_CONFIRMATION)
+    monkeypatch.setattr(ResourceFakeHost, "euid", lambda _self: 1001)
+    with pytest.raises(COLLECTOR.Refusal, match="needs root"):
+        cleanup_main(rw)
+
+
+def test_cleanup_refuses_another_hostname(rw, monkeypatch):
+    monkeypatch.setattr(ResourceFakeHost, "hostname", lambda _self: "other-host")
+    with pytest.raises(COLLECTOR.Refusal):
+        cleanup_main(rw)
+
+
+def add_env_field(raw: bytes) -> bytes:
+    return raw.replace(b'"networks":', b'"env":["OPENROUTER_API_KEY=x"],"networks":', 1)
+
+
+CLEANUP_FAILURES = [
+    (
+        "journal carries a non-identifier field",
+        setting("journal_tamper", add_env_field),
+        {"cleanup.runner_sigkill.journal_ids_only": "permitted"},
+    ),
+    (
+        "journal value is a path",
+        setting(
+            "journal_tamper",
+            lambda raw: raw.replace(b'"worker":"native', b'"worker":"/home/native', 1),
+        ),
+        {"cleanup.runner_sigkill.journal_ids_only": "permitted"},
+    ),
+    (
+        "journal is not the owner-only single-link file",
+        setting("journal_not_private", True),
+        {"cleanup.runner_sigkill.journal_ids_only": "permitted"},
+    ),
+    (
+        "workload container never journaled",
+        setting("journal_omits_container", True),
+        {
+            "cleanup.runner_sigkill.sentinel_network": "absent",
+            "cleanup.runner_sigkill.reconciled_absent": {
+                "containers": 1,
+                "networks": 0,
+                "processes": 0,
+                "volumes": 0,
+            },
+        },
+    ),
+    (
+        "kill left nothing to reconcile",
+        setting("kill_leaves_nothing", True),
+        {"cleanup.runner_sigkill.sentinel_network": "absent"},
+    ),
+    (
+        "reconciler removed an unjournaled network",
+        setting("reconciler_removes_decoy", True),
+        {"cleanup.runner_sigkill.sentinel_network": "extra_ids_touched"},
+    ),
+    (
+        "reconciler left the sentinel",
+        setting("reconciler_skips_sentinel", True),
+        {
+            "cleanup.runner_sigkill.sentinel_network": "probe_error",
+            "cleanup.runner_sigkill.reconciled_absent": {
+                "containers": 0,
+                "networks": 1,
+                "processes": 0,
+                "volumes": 0,
+            },
+        },
+    ),
+    (
+        "consumed attempt started again",
+        setting("rerun_accepted", True),
+        {"cleanup.rerun.consumed_marker": "accepted"},
+    ),
+    (
+        "no consumed marker on disk",
+        setting("marker_missing", True),
+        {"cleanup.rerun.consumed_marker": "accepted"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [item[1:] for item in CLEANUP_FAILURES],
+    ids=[item[0] for item in CLEANUP_FAILURES],
+)
+def test_each_cleanup_recovery_failure_is_recorded_and_refused(rw, change, expected):
+    scenario = Scenario()
+    change(scenario)
+    host = rw.host(scenario)
+    record = rw.collector(host, "cleanup").collect()
+    probes = {
+        item["id"]: item for phase in record["phases"] for item in phase["probes"]
+    }
+    for probe_id, value in expected.items():
+        item = probes[probe_id]
+        observed_value = value if isinstance(value, dict) else {"outcome": value}
+        assert item["observed"] == observed_value, probe_id
+        assert item["matched"] is False
+    failure = rw.verify(record)
+    # A leftover the reconciler never removed is also collection residue.
+    assert failure is not None and (
+        "did not match" in failure or "residue is not empty" in failure
+    )
+    # Whatever the failure, the collector's own decoy never outlives it.
+    assert not host.decoys & host.networks
+
+
+def test_launch_journal_parser_accepts_only_the_runtime_encoding():
+    good = journal_line("abc", ["dittobench-abc"], ["ditto-job-abc"])
+    assert COLLECTOR.parse_launch_journal(good + good)[0]["run"] == "abc"
+    assert COLLECTOR.parse_launch_journal(b"") == []
+    assert COLLECTOR.parse_launch_journal(None) is None
+    # A torn final append is ignored; other trailing bytes are not.
+    assert len(COLLECTOR.parse_launch_journal(good + b'{"schema":"ditto')) == 1
+    for raw in (
+        good + b"garbage",
+        good + b'{"schema":"x"}',
+        good.replace(b'{"schema"', b'{ "schema"'),
+        good.replace(b'"attempt":', b'"run":"x","attempt":'),
+        add_env_field(good),
+        good.replace(b"dittobench-abc", b"/var/lib/secret"),
+        good.replace(
+            b'"containers":["dittobench-abc"],"networks":["ditto-job-abc"]',
+            b'"containers":[],"networks":[]',
+        ),
+        journal_line("abc", ["dittobench-abc"], ["bridge"]),
+        b"\xff\n",
+        good * (COLLECTOR.JOURNAL_MAX_ENTRIES + 1),
+    ):
+        assert COLLECTOR.parse_launch_journal(raw) is None, raw[:80]
+
+
+def test_an_interrupted_sigkill_scenario_unwinds_the_decoy_and_the_journal(rw):
+    scenario = Scenario()
+    collector, host = cleanup_collector(rw, scenario)
+    collector.stop_agent()
+
+    def refuse(_pid: int) -> None:
+        raise COLLECTOR.Refusal("kill failed")
+
+    host.kill = refuse  # type: ignore[method-assign]
+    with pytest.raises(COLLECTOR.Refusal, match="kill failed"):
+        collector.scenario_runner_sigkill()
+    assert any(name.startswith("ditto-job-sentinel-") for name in host.networks)
+    collector.stop_agent()
+    collector.unwind()
+    assert host.networks == set() and host.journal == []

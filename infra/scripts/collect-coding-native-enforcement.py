@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Default-off root collector for native enforcement evidence (B5 PR4, PR5).
 
-``network`` (PR4) and ``resource`` (PR5) are collected. ``preexec`` and
-``cleanup`` refuse before any host effect, listing every catalog probe they do
-not collect and why (``NOT_COLLECTED``); the cleanup scenarios that are
-implemented are exercised only by tests until the rest exist. Nothing here
+``network`` (PR4), ``resource`` and ``cleanup`` (PR5) are collected.
+``preexec`` refuses before any host effect, listing every catalog probe it does
+not collect and why (``NOT_COLLECTED``). Nothing here
 mints approval: the collector retains one record in the evidence store, and
 Peyton reviews it with ``coding-native-evidence.py verify`` against a
 post-collection preflight.
@@ -715,6 +714,8 @@ def classify_source(remote: str, container: str, host_addresses: set[str]) -> st
 class Session(Protocol):
     def request(self, value: dict[str, Any], timeout: float) -> dict[str, Any]: ...
 
+    def read(self, timeout: float) -> dict[str, Any]: ...
+
     def close(self) -> None: ...
 
 
@@ -766,6 +767,12 @@ class ProcessSession:
         self.process.stdin.flush()
         return _read_line(self, self.process.stdout.fileno(), timeout)
 
+    def read(self, timeout: float) -> dict[str, Any]:
+        """One line the process wrote without a request (a startup refusal)."""
+
+        assert self.process.stdout is not None
+        return _read_line(self, self.process.stdout.fileno(), timeout)
+
     def close(self) -> None:
         with contextlib.suppress(OSError):
             if self.process.stdin is not None:
@@ -792,6 +799,9 @@ class SocketSession:
 
     def request(self, value: dict[str, Any], timeout: float) -> dict[str, Any]:
         self.socket.sendall(json.dumps(value).encode() + b"\n")
+        return _read_line(self, self.socket.fileno(), timeout)
+
+    def read(self, timeout: float) -> dict[str, Any]:
         return _read_line(self, self.socket.fileno(), timeout)
 
     def close(self) -> None:
@@ -1142,6 +1152,74 @@ class SystemHost:
 
     def terminate(self, pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
+
+    # -- cleanup recovery (B5 PR5) ---------------------------------------------
+
+    def kill(self, pid: int) -> None:
+        os.kill(pid, signal.SIGKILL)
+
+    def make_private_dir(self, path: Path, uid: int, gid: int) -> None:
+        require(path.parent == WORK_DIR, "private directory is outside the work dir")
+        os.mkdir(path, 0o700)
+        os.chown(path, uid, gid, follow_symlinks=False)
+
+    def read_private_file(self, path: Path, uid: int, maximum: int) -> bytes | None:
+        """A file the daemon user owns, read without following a link."""
+
+        require(path.parent.parent == WORK_DIR, "private file is outside the work dir")
+        directory = os.lstat(path.parent)
+        require(
+            stat.S_ISDIR(directory.st_mode)
+            and directory.st_uid == uid
+            and stat.S_IMODE(directory.st_mode) == 0o700,
+            "private directory is not the daemon user's own",
+        )
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(fd)
+            require(
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == uid
+                and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o600
+                and info.st_size <= maximum,
+                "private file is not the daemon user's single-link owner-only file",
+            )
+            return stream.read(maximum + 1)
+
+    def one_shot(self, unit: str, arguments: list[str]) -> tuple[int, bytes]:
+        """One command as a transient unit of the daemon user, like the agent."""
+
+        result = subprocess.run(
+            [
+                "/usr/bin/systemd-run",
+                "--user",
+                f"--machine={USER}@.host",
+                "--pipe",
+                "--quiet",
+                "--wait",
+                "--collect",
+                f"--unit={unit}",
+                f"--setenv=DOCKER_HOST=unix://{SOCKET}",
+                f"--setenv=DOCKER_CONFIG={DOCKER_CONFIG}",
+                f"--setenv=TMPDIR={WORK_DIR}",
+                "--setenv=PATH=/usr/bin:/bin",
+                "--",
+                *arguments,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=300,
+            check=False,
+            cwd="/",
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+        require(len(result.stdout) <= MAX_FILE, "command output too long")
+        return result.returncode, result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -2190,6 +2268,79 @@ WORK_FILES = {
     "enforcement_images": "enforcement-images.json",
 }
 EXECUTOR_LABEL = "io.heyditto.dittobench.coding-executor"
+CLEANUP_CONFIRMATION = "COLLECT NATIVE CLEANUP RECOVERY EVIDENCE"
+# The hosted runtime's launch journal (codinglaunchjournal) and single-use
+# marker (codinghostedruntime.ConsumeAttempt), as the collector reads them.
+JOURNAL_DIR = WORK_DIR / "launch-journal"
+JOURNAL_FILE = "launch-journal"
+JOURNAL_MAX_BYTES = 256 << 10
+JOURNAL_MAX_ENTRIES = 1024
+JOURNAL_ENTRY_SCHEMA = "dittobench-coding-launch-journal-entry-v1"
+JOURNAL_KEYS = ["schema", "attempt", "worker", "run", "containers", "networks"]
+JOURNAL_ATTEMPT = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+JOURNAL_RUN = re.compile(r"[a-z0-9][a-z0-9-]{0,127}")
+JOURNAL_CONTAINER = re.compile(r"dittobench-[a-z0-9][a-z0-9-]{0,100}")
+JOURNAL_NETWORK = re.compile(r"ditto-job-[a-z0-9][a-z0-9-]{0,100}")
+SENTINEL_PREFIX = "ditto-job-sentinel-"
+SENTINEL_LABEL = "io.heyditto.dittobench.launch-sentinel"
+RECONCILE_SCHEMA = "dittobench-coding-launch-journal-reconcile-v1"
+CONSUMED_MARKER = b"dittobench-coding-hosted-runtime-consumed-v2\n"
+
+
+def parse_launch_journal(raw: bytes | None) -> list[dict[str, Any]] | None:
+    """Entries of a launch journal that holds identifiers only, else None.
+
+    Each complete line must be exactly the runtime's encoding of the closed
+    entry: these keys in this order, every value a closed identifier. A torn
+    final append (whose launch never ran) is ignored.
+    """
+
+    if raw is None or len(raw) > JOURNAL_MAX_BYTES:
+        return None
+    *lines, tail = raw.split(b"\n")
+    if tail and not (
+        tail.startswith(b"{")
+        and not tail.endswith(b"}")
+        and all(0x20 <= byte <= 0x7E for byte in tail)
+    ):
+        return None
+    if len(lines) > JOURNAL_MAX_ENTRIES:
+        return None
+    entries = []
+    for line in lines:
+        try:
+            pairs = json.loads(line, object_pairs_hook=list)
+        except ValueError:
+            return None
+        if type(pairs) is not list or [key for key, _ in pairs] != JOURNAL_KEYS:
+            return None
+        entry = dict(pairs)
+        valid = (
+            entry["schema"] == JOURNAL_ENTRY_SCHEMA
+            and type(entry["attempt"]) is str
+            and JOURNAL_ATTEMPT.fullmatch(entry["attempt"]) is not None
+            and type(entry["worker"]) is str
+            and JOURNAL_ATTEMPT.fullmatch(entry["worker"]) is not None
+            and type(entry["run"]) is str
+            and JOURNAL_RUN.fullmatch(entry["run"]) is not None
+            and type(entry["containers"]) is list
+            and type(entry["networks"]) is list
+            and all(
+                type(name) is str and JOURNAL_CONTAINER.fullmatch(name)
+                for name in entry["containers"]
+            )
+            and all(
+                type(name) is str and JOURNAL_NETWORK.fullmatch(name)
+                for name in entry["networks"]
+            )
+            and bool(entry["containers"] or entry["networks"])
+        )
+        if not valid or json.dumps(entry, separators=(",", ":")).encode() != line:
+            return None
+        entries.append(entry)
+    return entries
+
+
 EXECUTOR_RUNNER = "/workspace/dittobench-coding-enforcement-probe"
 ROOTFS_PROBE_PREFIX = "/.dittobench-rootfs-probe-"
 CLASSES = ("harness", "executor_authoring", "executor_grading")
@@ -2253,18 +2404,7 @@ NOT_COLLECTED: dict[str, dict[str, str]] = {
             )
         },
     },
-    "cleanup_recovery": {
-        "cleanup.runner_sigkill.reconciled_absent": "the hosted runtime keeps no "
-        "intent journal of launched container and network ids to reconcile after "
-        "SIGKILL",
-        "cleanup.runner_sigkill.journal_ids_only": "no intent journal exists in "
-        "the hosted runtime (see reconciled_absent)",
-        "cleanup.runner_sigkill.sentinel_network": "reconciliation from a journal "
-        "does not exist, so sparing a sentinel network cannot be shown",
-        "cleanup.rerun.consumed_marker": "the consumed marker is written by "
-        "codinghostedruntime.Run, which needs a full private runtime "
-        "configuration (Platform control, custody inputs) to reach",
-    },
+    "cleanup_recovery": {},
 }
 
 
@@ -2622,6 +2762,11 @@ class ResourceHost(Host, Protocol):
     def remove_work_dir(self) -> None: ...
     def resource_session(self, unit: str, arguments: list[str]) -> Session: ...
     def terminate(self, pid: int) -> None: ...
+    def page_size(self) -> int: ...
+    def kill(self, pid: int) -> None: ...
+    def make_private_dir(self, path: Path, uid: int, gid: int) -> None: ...
+    def read_private_file(self, path: Path, uid: int, maximum: int) -> bytes | None: ...
+    def one_shot(self, unit: str, arguments: list[str]) -> tuple[int, bytes]: ...
 
 
 class ResourceCollector(Collector):
@@ -2726,6 +2871,7 @@ class ResourceCollector(Collector):
         for name in ("seccomp_profile", "apparmor_profile"):
             if self.config[name]:
                 arguments += ["--" + name.replace("_", "-"), self.config[name]]
+        arguments += self.agent_attempt_arguments()
         session = self.host.resource_session(self.daemon_unit, arguments)
         self.sessions.append(session)
         pid = 0
@@ -2757,6 +2903,14 @@ class ResourceCollector(Collector):
             "resource agent read other profile documents",
         )
         self.agent, self.agent_pid = session, pid
+
+    def agent_attempt_arguments(self) -> list[str]:
+        """Resource collection runs the agent without a launch journal."""
+
+        return []
+
+    def unwind(self) -> None:
+        """Remove what an interrupted cleanup scenario left; nothing here."""
 
     def stop_agent(self) -> None:
         if self.agent is not None:
@@ -3324,6 +3478,7 @@ class ResourceCollector(Collector):
             self.phases()
         finally:
             self.stop_agent()
+            self.unwind()
             for session in self.sessions:
                 with contextlib.suppress(Exception):
                     session.close()
@@ -3341,12 +3496,85 @@ class ResourceCollector(Collector):
 class CleanupCollector(ResourceCollector):
     """``cleanup_recovery``: resources are gone after each production cleanup.
 
-    Six scenarios are implemented. The SIGKILL journal reconciliation and the
-    consumed-marker rerun are not (``NOT_COLLECTED``), so ``collect`` refuses
-    before touching the host.
+    Every agent session runs with the hosted runtime's launch journal and a
+    fresh attempt state directory, so each workload is one journaled attempt.
+    After the six in-process scenarios, a new session is killed with SIGKILL
+    mid-attempt and the runtime's reconciler runs from outside; a last session
+    reuses that attempt's state directory and must be refused.
     """
 
     kind = "cleanup_recovery"
+
+    def __init__(
+        self, host: ResourceHost, config: dict[str, Any], checkout: Path = ROOT
+    ) -> None:
+        super().__init__(host, config, checkout)
+        self.sessions_started = 0
+        self.attempt_state: Path | None = None
+        self.decoy: str | None = None
+
+    def agent_attempt_arguments(self) -> list[str]:
+        if self.sessions_started == 0:
+            self.host.make_private_dir(JOURNAL_DIR, self.uid, self.gid)
+        self.sessions_started += 1
+        self.attempt_state = WORK_DIR / f"attempt-{self.sessions_started}"
+        self.host.make_private_dir(self.attempt_state, self.uid, self.gid)
+        return [
+            "--launch-journal",
+            str(JOURNAL_DIR),
+            "--attempt-state",
+            str(self.attempt_state),
+        ]
+
+    def restart_agent(self) -> None:
+        require(self.agent is None, "the previous resource agent is still running")
+        self.daemon_unit = (
+            f"ditto-native-resource-agent-{self.nonce}-{self.sessions_started}.service"
+        )
+        self.start_agent()
+
+    def reconcile_arguments(self) -> list[str]:
+        return [
+            str(self.runner),
+            "reconcile-launch-journal",
+            "--launch-journal",
+            str(JOURNAL_DIR),
+            "--docker-executable",
+            "/usr/bin/docker",
+            "--docker-socket",
+            SOCKET,
+        ]
+
+    def reconcile(self) -> tuple[int, dict[str, Any] | None]:
+        self.sessions_started += 1
+        unit = f"ditto-native-journal-reconcile-{self.nonce}-{self.sessions_started}"
+        code, output = self.host.one_shot(unit + ".service", self.reconcile_arguments())
+        try:
+            report = parse_unique(output.strip(), "reconcile report")
+        except Refusal:
+            return code, None
+        if type(report) is not dict or report.get("schema") != RECONCILE_SCHEMA:
+            return code, None
+        return code, report
+
+    def unwind(self) -> None:
+        """After an interrupted collection: the decoy, then the journal."""
+
+        if self.decoy is not None:
+            with contextlib.suppress(Exception):
+                self.host.docker("network", "rm", self.decoy)
+        with contextlib.suppress(Exception):
+            journal = JOURNAL_DIR / JOURNAL_FILE
+            pending = self.host.read_private_file(journal, self.uid, JOURNAL_MAX_BYTES)
+            if self.sessions_started and pending is not None:
+                self.reconcile()
+
+    def present(self, kind: str, name: str) -> bool:
+        if kind == "container":
+            names = self.host.docker("ps", "--all", "--format", "{{.Names}}")
+        else:
+            names = self.host.docker("network", "ls", "--format", "{{.Name}}")
+        return name.encode() in names.split()
 
     def counts(self) -> dict[str, int]:
         """What remains on the daemon and host, measured from outside."""
@@ -3442,6 +3670,153 @@ class CleanupCollector(ResourceCollector):
             self.agent.close()
         self.agent = None
 
+    def scenario_runner_sigkill(self) -> None:
+        """SIGKILL mid-attempt, leftovers seen, the runtime's reconciler run."""
+
+        self.restart_agent()
+        own = self.own_language
+        argv = workload_args("hang", secrets.token_hex(8), seconds=600)
+        started = self.launch("executor_authoring", own, argv, timeout_ms=600_000)
+        found = self.container(started, "executor_authoring", own)
+        self.workload_process(found, "executor_authoring", argv)
+        inspected = self.inspect(found["id"])
+        require(inspected is not None, "the workload container vanished")
+        assert inspected is not None
+        container_name = str(inspected.get("Name", "")).lstrip("/")
+        # A network shaped and labelled exactly like a sentinel, never
+        # journaled: reconciliation must leave it.
+        suffix = secrets.token_hex(8)
+        self.decoy = SENTINEL_PREFIX + suffix
+        self.host.docker(
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--internal",
+            "--label",
+            f"{RUN_LABEL}=sentinel-{suffix}",
+            "--label",
+            f"{SENTINEL_LABEL}=collector-decoy",
+            self.decoy,
+        )
+        assert self.agent is not None
+        self.host.kill(self.agent_pid)
+        stopped = poll(
+            self.host, lambda: not self.host.cgroup_procs(self.agent_cgroup()), 150
+        )
+        require(stopped, "the resource agent did not stop after SIGKILL")
+        with contextlib.suppress(Exception):
+            self.agent.close()
+        self.agent = None
+
+        try:
+            raw = self.host.read_private_file(
+                JOURNAL_DIR / JOURNAL_FILE, self.uid, JOURNAL_MAX_BYTES
+            )
+        except Refusal:
+            # Not the runtime's owner-only single-link file: not ids-only.
+            raw = b"\xff"
+        entries = parse_launch_journal(raw)
+        journaled_containers = {
+            name for entry in entries or [] for name in entry["containers"]
+        }
+        sentinels = sorted(
+            name
+            for entry in entries or []
+            for name in entry["networks"]
+            if name.startswith(SENTINEL_PREFIX)
+        )
+        # Completeness is what reconciled_absent shows; this is the content.
+        if raw is None or entries == []:
+            ids_outcome = "absent"
+        else:
+            ids_outcome = "journal_ids_only" if entries is not None else "permitted"
+        sentinel = sentinels[0] if len(sentinels) == 1 else None
+        # Leftovers must exist, or the kill proved nothing.
+        left = (
+            sentinel is not None
+            and container_name in journaled_containers
+            and self.present("network", sentinel)
+            and self.present("container", container_name)
+        )
+
+        self.reconcile()
+        decoy_kept = self.present("network", self.decoy)
+        sentinel_gone = sentinel is not None and not self.present("network", sentinel)
+        with contextlib.suppress(Refusal):
+            self.host.docker("network", "rm", self.decoy)
+        require(
+            not self.present("network", self.decoy),
+            "the collector's decoy network could not be removed",
+        )
+        self.decoy = None
+        if not decoy_kept:
+            sentinel_outcome = "extra_ids_touched"
+        elif not left:
+            sentinel_outcome = "absent"
+        elif not sentinel_gone:
+            sentinel_outcome = "probe_error"
+        else:
+            sentinel_outcome = "present"
+        self.record(
+            "cleanup.runner_sigkill.journal_ids_only", None, {"outcome": ids_outcome}
+        )
+        self.record(
+            "cleanup.runner_sigkill.sentinel_network",
+            None,
+            {"outcome": sentinel_outcome},
+        )
+
+    def scenario_rerun(self) -> None:
+        """The killed attempt's state directory refuses a second start."""
+
+        state = self.attempt_state
+        require(state is not None and self.agent is None, "no killed attempt to rerun")
+        assert state is not None
+        marker = self.host.read_private_file(
+            state / "consumed", self.uid, len(CONSUMED_MARKER)
+        )
+        arguments = [str(self.runner), "resource-agent"]
+        for name, file in WORK_FILES.items():
+            arguments += ["--" + name.replace("_", "-"), str(WORK_DIR / file)]
+        arguments += ["--runner", str(self.runner), "--work-dir", str(WORK_DIR)]
+        for name in ("seccomp_profile", "apparmor_profile"):
+            if self.config[name]:
+                arguments += ["--" + name.replace("_", "-"), self.config[name]]
+        arguments += [
+            "--launch-journal",
+            str(JOURNAL_DIR),
+            "--attempt-state",
+            str(state),
+        ]
+        self.sessions_started += 1
+        self.daemon_unit = (
+            f"ditto-native-resource-agent-{self.nonce}-{self.sessions_started}.service"
+        )
+        session = self.host.resource_session(self.daemon_unit, arguments)
+        self.sessions.append(session)
+        try:
+            answer: dict[str, Any] | None = session.read(30)
+        except Refusal:
+            answer = None
+        finally:
+            with contextlib.suppress(Exception):
+                session.close()
+        stopped = poll(
+            self.host, lambda: not self.host.cgroup_procs(self.agent_cgroup()), 30
+        )
+        require(stopped, "the rerun resource agent did not exit")
+        refused = marker == CONSUMED_MARKER and answer == {
+            "schema": RESOURCE_AGENT_SCHEMA,
+            "op": "attempt",
+            "error": "probe: attempt state consumed",
+        }
+        self.record(
+            "cleanup.rerun.consumed_marker",
+            None,
+            {"outcome": "refused" if refused else "accepted"},
+        )
+
     def agent_cgroup(self) -> str:
         return (
             f"user.slice/user-{self.uid}.slice/user@{self.uid}.service/app.slice/"
@@ -3467,6 +3842,14 @@ class CleanupCollector(ResourceCollector):
             "cleanup.runner_sigterm.absent",
             self.scenario_runner_sigterm,
         )
+        self.scenario(
+            "runner_sigkill",
+            "cleanup.runner_sigkill.reconciled_absent",
+            self.scenario_runner_sigkill,
+        )
+        self.phase("rerun")
+        self.scenario_rerun()
+        self.end_phase("rerun")
 
 
 def retain(evidence: Any, store_path: Path, record: dict[str, Any]) -> str:
@@ -3523,11 +3906,11 @@ KIND_OF = {short: kind for kind, short in SUBCOMMANDS.items()}
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = result.add_subparsers(dest="kind", required=True)
-    for name in ("network", "resource"):
+    for name in ("network", "resource", "cleanup"):
         command = commands.add_parser(name, help=f"collect {KIND_OF[name]}")
         command.add_argument("--config", required=True, type=Path)
         command.add_argument("--confirm", required=True)
-    for name in ("preexec", "cleanup"):
+    for name in ("preexec",):
         commands.add_parser(name, help=f"refused: {KIND_OF[name]} is not collectable")
     return result
 
@@ -3554,7 +3937,11 @@ def main(
         for probe, reason in sorted(uncovered.items()):
             print(f"  {probe}: {reason}", file=sys.stderr)
         return 2
-    confirmation = CONFIRMATION if args.kind == "network" else RESOURCE_CONFIRMATION
+    confirmation = {
+        "network": CONFIRMATION,
+        "resource": RESOURCE_CONFIRMATION,
+        "cleanup": CLEANUP_CONFIRMATION,
+    }[args.kind]
     require(args.confirm == confirmation, "collection needs the exact confirmation")
     host = host_factory()
     require(host.euid() == 0, "collection needs root")
@@ -3564,9 +3951,12 @@ def main(
     if args.kind == "network":
         config = parse_config(raw)
         collector = Collector(host, config, checkout)
-    else:
+    elif args.kind == "resource":
         config = parse_resource_config(raw)
         collector = ResourceCollector(host, config, checkout)
+    else:
+        config = parse_resource_config(raw)
+        collector = CleanupCollector(host, config, checkout)
     record = collector.collect()
     digest = retain(collector.evidence, Path(config["store"]), record)
     result = summary(record, digest)
