@@ -216,7 +216,10 @@ async def test_single_specialist_survives_majority_and_transcripts_are_independe
                 "summary": "Bounded test adjudication.",
             }
 
-    archive = _archive(tmp_path, "fn main() { call_model(); }")
+    archive = _archive(
+        tmp_path,
+        "fn main() { call_model(); }\nfn lookup(question) { table.get(question); }",
+    )
     result = await review_archive(
         archive,
         artifact_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
@@ -227,9 +230,18 @@ async def test_single_specialist_survives_majority_and_transcripts_are_independe
     )
     assert peak == 2
     assert len(instances) == 6
-    assert all(not r.kwargs["leads"] for r in instances[:5])
+    for reviewer in instances[:5]:
+        if FOCI["benchmark_engine"] in reviewer.kwargs["focus"]:
+            assert reviewer.kwargs["leads"] == result["semantic_discovery"]["leads"]
+            assert reviewer.kwargs["leads"]
+            assert "not a finding" in reviewer.kwargs["focus"]
+        else:
+            assert not reviewer.kwargs["leads"]
+    assert result["semantic_discovery"]["coverage"]["exhaustive"] is False
     assert all("Exact active policy manifest" in r.kwargs["focus"] for r in instances)
-    assert instances[-1].kwargs["leads"] == []
+    assert all(r.kwargs["timeout_seconds"] == 120 for r in instances)
+    assert all(r.kwargs["max_completion_request_seconds"] == 120 for r in instances)
+    assert instances[-1].kwargs["leads"] == result["semantic_discovery"]["leads"]
     assert result["incremental_candidate"] is True
     assert result["outcome"] == expected
     assert result["usage"]["requests"] == 6
@@ -672,7 +684,9 @@ async def test_raw_contradictory_specialists_reach_always_run_adjudicator(
     key = tmp_path / "key"
     key.write_text("sk-test-private-review")
     key.chmod(0o600)
-    archive = _archive_files(tmp_path, {"src/main.rs": b"fn main() { call_model(); }"})
+    archive = _archive_files(
+        tmp_path, {"src/main.rs": b"fn main() { call_model(); }\nfn helper() {}\n"}
+    )
     stage_two_requests = []
     specialist_requests = []
     policy_invariants = {
@@ -705,7 +719,7 @@ async def test_raw_contradictory_specialists_reach_always_run_adjudicator(
                 _tool(
                     f"read-{index}",
                     "read_file",
-                    {"path": "src/main.rs", "start_line": 1, "end_line": 1},
+                    {"path": "src/main.rs", "start_line": 1, "end_line": 2},
                 )
                 for index in (1, 2)
             ]
@@ -718,6 +732,7 @@ async def test_raw_contradictory_specialists_reach_always_run_adjudicator(
                         "final_review": policy_review(_BENIGN_REVIEW),
                         "candidate_assessments": [],
                         "summary": "Stage two independently cleared the source.",
+                        "obligation_resolutions": _resolved_obligations(payload),
                     },
                 )
             ]
@@ -756,7 +771,7 @@ async def test_raw_contradictory_specialists_reach_always_run_adjudicator(
             transport=transport, **kwargs
         ),
     )
-    assert result["revision"] == "fanout-source-review-v4"
+    assert result["revision"] == "fanout-source-review-v6"
     assert result["coverage_protocol"] == "five-specialists-adjudicator-v2"
     assert result["outcome"] == "no_findings"
     assert result["candidates"] == []
@@ -775,6 +790,12 @@ async def test_raw_contradictory_specialists_reach_always_run_adjudicator(
     assert benchmark["raw_review"]["risk_level"] == []
     assert "TypeError" in benchmark["validation_errors"][0]
     assert len(stage_two_requests) == 2
+    for request in specialist_requests + stage_two_requests:
+        prompt = request["messages"][0]["content"]
+        assert ("I5 causal investigation" in prompt) is (policy_version == 13)
+        if policy_version == 13:
+            assert "finite" in prompt and "not an I5 violation" in prompt
+            assert "not proof of a violation" in prompt
     assert "inconclusive" in json.dumps(stage_two_requests[0]["messages"])
     assert all(
         "provisional specialist note" in row["messages"][0]["content"]
@@ -818,7 +839,7 @@ async def test_adjudicator_reserves_read_repair_after_forced_final(tmp_path):
         payload = json.loads(request.content)
         requests.append(payload)
         turn = len(requests)
-        if turn <= 9:
+        if turn <= 6 or turn in {10, 11}:
             calls = [
                 _tool(
                     f"read-{turn}",
@@ -826,7 +847,7 @@ async def test_adjudicator_reserves_read_repair_after_forced_final(tmp_path):
                     {"path": "src/main.rs", "start_line": 1, "end_line": 1},
                 )
             ]
-        elif turn == 11:
+        elif turn == 8:
             assert "did not read" in json.dumps(payload["messages"])
             assert any(
                 tool["function"]["name"] == "read_file" for tool in payload["tools"]
@@ -845,7 +866,14 @@ async def test_adjudicator_reserves_read_repair_after_forced_final(tmp_path):
                     "submit_fanout_adjudication",
                     {
                         "final_review": final_review,
-                        "candidate_assessments": [],
+                        "candidate_assessments": {
+                            "candidate-001": {
+                                "disposition": "supported",
+                                "supporting_evidence": final_review["evidence"],
+                                "counterevidence": [],
+                                "summary": None if turn == 9 else "Source verified.",
+                            }
+                        },
                         "summary": "Fresh stage two found a source-bound issue.",
                     },
                 )
@@ -877,26 +905,314 @@ async def test_adjudicator_reserves_read_repair_after_forced_final(tmp_path):
     result = await reviewer.adjudicate_review(
         str(archive),
         artifact_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
-        candidates=[],
+        candidates=[
+            {
+                "candidate_id": "candidate-001",
+                "source_pass": "generalist",
+                "finding": {"evidence": final_review["evidence"]},
+            }
+        ],
         all_pass_summaries=[],
         policy_version=13,
         deadline=asyncio.get_running_loop().time() + 60,
     )
-    assert result["outcome"] == "candidate"
+    assert result["outcome"] == "critic_also_flagged"
     assert len(requests) == 12
-    assert [tool["function"]["name"] for tool in requests[9]["tools"]] == [
+    assert [tool["function"]["name"] for tool in requests[6]["tools"]] == [
         "submit_fanout_adjudication"
     ]
     assert [tool["function"]["name"] for tool in requests[11]["tools"]] == [
         "submit_fanout_adjudication"
     ]
-    assert len(reviewer.validation_errors) == 1
+    assert len(reviewer.validation_errors) == 2
+    assert "summary:type=NoneType" in reviewer.validation_errors[1]
     assert reviewer.validation_errors[0].startswith(
         "fanout adjudicator cited source it did not read"
     )
     assert '"line": 2' in reviewer.validation_errors[0]
     assert '"path": "src/main.rs"' in reviewer.validation_errors[0]
     assert reviewer.opened_lines == {("src/main.rs", 1), ("src/main.rs", 2)}
+
+
+async def test_adjudicator_repairs_malformed_atomic_arguments_in_remaining_turns(
+    tmp_path,
+):
+    from .test_source_review import (
+        _BENIGN_REVIEW,
+        _archive_files,
+        _tool,
+        _with_policy_v10_invariants,
+    )
+
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    key.chmod(0o600)
+    archive = _archive_files(tmp_path, {"src/main.rs": b"fn leaked() { send(); }\n"})
+    final_review = _with_policy_v10_invariants(
+        {
+            **_BENIGN_REVIEW,
+            "risk_level": "high",
+            "categories": ["cross_user_access"],
+            "evidence": [
+                {
+                    "path": "src/main.rs",
+                    "line": 1,
+                    "category": "cross_user_access",
+                }
+            ],
+            "summary": "The served path exposes cross-user source content.",
+        }
+    )
+    requests = []
+
+    async def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            calls = [
+                {
+                    "id": "malformed-final",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_fanout_adjudication",
+                        "arguments": '{"final_review":',
+                    },
+                }
+            ]
+        elif turn == 2:
+            assert "JSONDecodeError" in json.dumps(payload["messages"])
+            # The real Router's strict upstream rejects invalid argument JSON
+            # anywhere in replayed tool calls, before it can generate a repair.
+            for message in payload["messages"]:
+                for call in message.get("tool_calls", []):
+                    json.loads(call["function"]["arguments"])
+            failed_output = next(
+                message
+                for message in payload["messages"]
+                if message.get("role") == "assistant"
+                and "Invalid, unexecuted" in message.get("content", "")
+            )
+            original = json.loads(failed_output["content"].split("\n", 1)[1])
+            assert original["tool_calls"][0]["id"] == "malformed-final"
+            assert (
+                original["tool_calls"][0]["function"]["arguments"] == '{"final_review":'
+            )
+            assert not any(
+                message.get("tool_call_id") == "malformed-final"
+                for message in payload["messages"]
+            )
+            assert any(
+                message.get("role") == "user"
+                and "JSONDecodeError" in message.get("content", "")
+                for message in payload["messages"]
+            )
+            assert any(
+                tool["function"]["name"] == "read_file" for tool in payload["tools"]
+            )
+            calls = [
+                _tool(
+                    "read-source",
+                    "read_file",
+                    {"path": "src/main.rs", "start_line": 1, "end_line": 1},
+                )
+            ]
+        else:
+            calls = [
+                _tool(
+                    "corrected-final",
+                    "submit_fanout_adjudication",
+                    {
+                        "final_review": final_review,
+                        "candidate_assessments": [],
+                        "summary": "Fresh stage two found a source-bound issue.",
+                    },
+                )
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "model": "glm-5.3-flash",
+                "choices": [{"message": {"role": "assistant", "tool_calls": calls}}],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 100,
+                    "cost": 0.001,
+                },
+            },
+        )
+
+    reviewer = ExperimentalReviewer(
+        focus="Adjudicator",
+        api_key_file=str(key),
+        model="z-ai/glm-5.3-flash",
+        base_url="https://router.example/v1",
+        max_steps=3,
+        max_read_bytes=180_000,
+        max_completion_tokens=8000,
+        timeout_seconds=60,
+        transport=httpx.MockTransport(handler),
+    )
+    result = await reviewer.adjudicate_review(
+        str(archive),
+        artifact_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        candidates=[],
+        all_pass_summaries=[],
+        policy_version=13,
+        deadline=asyncio.get_running_loop().time() + 60,
+    )
+    assert result["outcome"] == "candidate"
+    assert len(requests) == 3
+    assert reviewer.validation_errors == [
+        "fanout adjudicator arguments are invalid (JSONDecodeError)"
+    ]
+
+
+async def test_malformed_atomic_arguments_on_final_turn_fail_closed(tmp_path):
+    from .test_source_review import _archive_files
+
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    key.chmod(0o600)
+    archive = _archive_files(tmp_path, {"src/main.rs": b"fn main() {}\n"})
+
+    async def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "model": "glm-5.3-flash",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "malformed-final",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "submit_fanout_adjudication",
+                                        "arguments": "{",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 100,
+                    "cost": 0.001,
+                },
+            },
+        )
+
+    reviewer = ExperimentalReviewer(
+        focus="Adjudicator",
+        api_key_file=str(key),
+        model="z-ai/glm-5.3-flash",
+        base_url="https://router.example/v1",
+        max_steps=1,
+        max_read_bytes=180_000,
+        max_completion_tokens=8000,
+        timeout_seconds=60,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(
+        ValueError, match="fanout adjudicator final review remained invalid"
+    ):
+        await reviewer.adjudicate_review(
+            str(archive),
+            artifact_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+            candidates=[],
+            all_pass_summaries=[],
+            policy_version=13,
+            deadline=asyncio.get_running_loop().time() + 60,
+        )
+    assert reviewer.validation_errors == [
+        "fanout adjudicator arguments are invalid (JSONDecodeError)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "calls,error",
+    [
+        (
+            [
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_fanout_adjudication",
+                        "arguments": "{",
+                    },
+                }
+            ],
+            "fanout adjudicator final tool call envelope is invalid",
+        ),
+        (
+            [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "submit_fanout_adjudication",
+                        "arguments": "{",
+                    },
+                }
+                for call_id in ("first", "second")
+            ],
+            "shadow final tool call must be exclusive",
+        ),
+    ],
+)
+async def test_invalid_or_multiple_atomic_tool_envelopes_fail_closed(
+    tmp_path, calls, error
+):
+    from .test_source_review import _archive_files
+
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    key.chmod(0o600)
+    archive = _archive_files(tmp_path, {"src/main.rs": b"fn main() {}\n"})
+    requests = 0
+
+    async def handler(_request):
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "model": "glm-5.3-flash",
+                "choices": [{"message": {"role": "assistant", "tool_calls": calls}}],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 100,
+                    "cost": 0.001,
+                },
+            },
+        )
+
+    reviewer = ExperimentalReviewer(
+        focus="Adjudicator",
+        api_key_file=str(key),
+        model="z-ai/glm-5.3-flash",
+        base_url="https://router.example/v1",
+        max_steps=3,
+        max_read_bytes=180_000,
+        max_completion_tokens=8000,
+        timeout_seconds=60,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ValueError, match=error):
+        await reviewer.adjudicate_review(
+            str(archive),
+            artifact_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+            candidates=[],
+            all_pass_summaries=[],
+            policy_version=13,
+            deadline=asyncio.get_running_loop().time() + 60,
+        )
+    assert requests == 1
 
 
 async def test_default_budget_completes_two_turn_fanout_and_source_read(tmp_path):
@@ -953,6 +1269,7 @@ async def test_default_budget_completes_two_turn_fanout_and_source_read(tmp_path
                             }
                         ],
                         "summary": "The bounded check remains unresolved.",
+                        "obligation_resolutions": _resolved_obligations(payload),
                     },
                 )
             ]
@@ -1030,6 +1347,7 @@ async def test_default_budget_completes_two_turn_fanout_and_source_read(tmp_path
     assert report["usage"]["reserved_tokens"] <= 1_500_000
     assert report["usage"]["reserved_cost_usd"] <= 3
     assert report["usage"]["unmetered_responses"] == 0
+    assert report["budgets"]["timeout_seconds_per_request"] == 120
     assert (
         sum(
             any(message.get("role") == "tool" for message in payload["messages"])
@@ -1254,6 +1572,102 @@ async def test_shadow_schema_correction_is_bounded_and_cannot_coerce_pass(
     assert [t["function"]["name"] for t in seen[-1]["tools"]] == ["submit_review"]
 
 
+def test_policy_v13_bounds_all_invariant_summaries_without_changing_decisions(
+    tmp_path,
+):
+    from ditto_screening_protocol import SourceReviewInvariantAssessment
+
+    from .test_source_review import (
+        _BENIGN_REVIEW,
+        _tool,
+        _with_policy_v10_invariants,
+    )
+
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    key.chmod(0o600)
+    final_review = _with_policy_v10_invariants(dict(_BENIGN_REVIEW))
+    decisions = final_review["invariants"]
+    assert isinstance(decisions, list) and len(decisions) == 8
+    decisions[0] = {
+        **decisions[0],
+        "disposition": "breach",
+        "pass_clause": None,
+        "evidence_indices": [0],
+    }
+    decisions[1] = {
+        **decisions[1],
+        "disposition": "inconclusive",
+        "pass_clause": None,
+        "evidence_indices": [],
+    }
+    for index, decision in enumerate(decisions):
+        decision["summary"] = str(index) + "x" * 239
+    semantic_fields = [
+        {
+            key: decision[key]
+            for key in ("invariant", "disposition", "pass_clause", "evidence_indices")
+        }
+        for decision in decisions
+    ]
+    message = {
+        "role": "assistant",
+        "tool_calls": [
+            _tool(
+                "final",
+                "submit_fanout_adjudication",
+                {
+                    "final_review": final_review,
+                    "candidate_assessments": [],
+                    "summary": "Central adjudication completed.",
+                },
+            )
+        ],
+    }
+    reviewer = ExperimentalReviewer(
+        focus="Adjudicator",
+        api_key_file=str(key),
+        model="z-ai/glm-5.3-flash",
+        base_url="https://router.example/v1",
+        max_steps=1,
+        max_read_bytes=180_000,
+        max_completion_tokens=8000,
+        timeout_seconds=60,
+    )
+    reviewer._review_policy_version = 13
+
+    bounded = reviewer._bound_summary_fields(message)
+    arguments = json.loads(bounded["tool_calls"][0]["function"]["arguments"])
+    bounded_decisions = arguments["final_review"]["invariants"]
+
+    assert [
+        {
+            key: decision[key]
+            for key in ("invariant", "disposition", "pass_clause", "evidence_indices")
+        }
+        for decision in bounded_decisions
+    ] == semantic_fields
+    assert bounded_decisions[0]["disposition"] == "breach"
+    assert bounded_decisions[0]["evidence_indices"] == [0]
+    assert bounded_decisions[1]["disposition"] == "inconclusive"
+    assert bounded_decisions[1]["pass_clause"] is None
+    assert all(len(decision["summary"]) == 210 for decision in bounded_decisions)
+    assert sum(len(decision["summary"]) for decision in bounded_decisions) == 1_680
+    SourceReviewInvariantAssessment.model_validate(
+        {"schema_version": 2, "decisions": bounded_decisions}
+    )
+    assert len(reviewer.full_summaries) == 8
+    assert [row["field"] for row in reviewer.full_summaries] == [
+        f"final_review.invariants[{index}].summary" for index in range(8)
+    ]
+    assert all(row["original_chars"] == 240 for row in reviewer.full_summaries)
+    assert all(
+        row["text"] == str(index) + "x" * 239
+        for index, row in enumerate(reviewer.full_summaries)
+    )
+    assert all(row["truncated"] is False for row in reviewer.full_summaries)
+
+
 @pytest.mark.parametrize("model", [{}, [], 42])
 async def test_malformed_model_identifier_stops_admission_without_crashing(model):
     budget = FanoutBudget(
@@ -1409,3 +1823,27 @@ async def test_conflicting_final_calls_cannot_select_first_clean(tmp_path, corre
     assert result.finding is None
     assert reviewer.usage["requests"] == (2 if corrected else 1)
     assert reviewer.full_summaries == []
+
+
+def _resolved_obligations(payload):
+    tool = next(
+        tool
+        for tool in payload["tools"]
+        if tool["function"]["name"] == "submit_fanout_adjudication"
+    )
+    ids = (
+        tool["function"]["parameters"]["properties"]
+        .get("obligation_resolutions", {})
+        .get("required", [])
+    )
+    return {
+        oid: {
+            "disposition": "resolved",
+            "summary": "Independently traced original source.",
+            "source_evidence": [
+                {"path": "src/main.rs", "line": 1},
+                {"path": "src/main.rs", "line": 2},
+            ],
+        }
+        for oid in ids
+    }
