@@ -664,11 +664,17 @@ func (b ProductionResourceBackend) Start(ctx context.Context, spec WorkloadSpec)
 }
 
 // waitHarness waits for the harness workload container to exit, or its
-// timeout, whichever is first; the harness has no supervisor of its own.
+// timeout, whichever is first; the harness has no supervisor of its own. Every
+// inspect runs under a context bounded by the caller and the workload timeout,
+// so a hung daemon cannot hold the wait past its deadline.
 func (b ProductionResourceBackend) waitHarness(ctx context.Context, name string, timeout time.Duration) (WorkloadReceipt, error) {
-	deadline := time.Now().Add(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for {
-		raw, err := b.Docker.Output(context.Background(), "container", "inspect", "--format", "{{json .State}}", name)
+		raw, err := b.Docker.Output(waitCtx, "container", "inspect", "--format", "{{json .State}}", name)
+		if waitCtx.Err() != nil {
+			return WorkloadReceipt{TimedOut: true}, ctx.Err()
+		}
 		if err != nil {
 			return WorkloadReceipt{}, errors.New("probe: harness workload container could not be inspected")
 		}
@@ -682,9 +688,12 @@ func (b ProductionResourceBackend) waitHarness(ctx context.Context, name string,
 		if !state.Running {
 			return WorkloadReceipt{ReturnCode: state.ExitCode, Completed: true}, nil
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
+		timer := time.NewTimer(harnessPollInterval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
 			return WorkloadReceipt{TimedOut: true}, ctx.Err()
+		case <-timer.C:
 		}
-		time.Sleep(harnessPollInterval)
 	}
 }

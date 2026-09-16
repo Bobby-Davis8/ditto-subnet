@@ -284,3 +284,56 @@ func TestResourceAgentPassesOnlyAHarnessFailedStart(t *testing.T) {
 		t.Fatalf("an ordinary start was marked to fail: %#v", response)
 	}
 }
+
+// hangingDocker blocks every call until its context ends, as a wedged daemon
+// would, and records whether each call carried a deadline.
+type hangingDocker struct {
+	mu        sync.Mutex
+	deadlines []bool
+}
+
+func (h *hangingDocker) Output(ctx context.Context, _ ...string) ([]byte, error) {
+	_, bounded := ctx.Deadline()
+	h.mu.Lock()
+	h.deadlines = append(h.deadlines, bounded)
+	h.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestHarnessWaitBoundsAHungInspectByTheWorkloadTimeout(t *testing.T) {
+	docker := &hangingDocker{}
+	backend := ProductionResourceBackend{Docker: docker}
+	started := time.Now()
+	receipt, err := backend.waitHarness(context.Background(), "harness", 50*time.Millisecond)
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("a hung inspect held the wait for %s", elapsed)
+	}
+	if err != nil || !receipt.TimedOut || receipt.Completed {
+		t.Fatalf("a hung inspect must time the workload out: %+v %v", receipt, err)
+	}
+	if len(docker.deadlines) != 1 || !docker.deadlines[0] {
+		t.Fatalf("inspect did not carry the workload deadline: %v", docker.deadlines)
+	}
+}
+
+func TestHarnessWaitPropagatesCallerCancellationIntoInspect(t *testing.T) {
+	docker := &hangingDocker{}
+	backend := ProductionResourceBackend{Docker: docker}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+	receipt, err := backend.waitHarness(ctx, "harness", time.Hour)
+	if !errors.Is(err, context.Canceled) || !receipt.TimedOut {
+		t.Fatalf("caller cancellation must end a hung inspect: %+v %v", receipt, err)
+	}
+}
+
+func TestHarnessWaitReturnsTheExitedContainerCode(t *testing.T) {
+	docker := &fakeDocker{responses: map[string][]byte{
+		"container inspect --format {{json .State}} harness": []byte(`{"Running":false,"ExitCode":3}`),
+	}}
+	receipt, err := ProductionResourceBackend{Docker: docker}.waitHarness(context.Background(), "harness", time.Minute)
+	if err != nil || !receipt.Completed || receipt.ReturnCode != 3 {
+		t.Fatalf("exited harness receipt: %+v %v", receipt, err)
+	}
+}
