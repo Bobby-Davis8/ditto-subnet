@@ -6,7 +6,7 @@ checks a curator-signed approval against their review. It runs no probes,
 contacts no host, daemon or service, opens no custody paths and never mints
 approval. It checks Peyton's detached curator signature offline. The host's
 ``native.py`` compiles this same file (pinned by ``evidence_tool_sha256`` in
-the signed approval) and runs its ``verify_ed25519`` and ``parse_canonical``
+the signed approval) and runs its ``verify_ed25519`` and ``parse_strict``
 on-host before it consumes an approval.
 """
 
@@ -673,6 +673,20 @@ def canonical_sha256(value: object) -> str:
 def parse_canonical(raw: bytes, label: str) -> Any:
     value = parse_json(raw, label)
     require(canonical_bytes(value) == raw, f"{label} is not canonical JSON")
+    return value
+
+
+def parse_strict(raw: bytes, label: str) -> Any:
+    """Strict JSON that need not be canonical: one UTF-8 value, JSON whitespace
+    around it allowed; duplicate keys, trailing data, non-int64 numbers, lone
+    surrogates and excessive nesting refused.
+
+    Used for the curator-signed approval, whose signature covers its exact
+    stored bytes rather than a re-serialization (Peyton, 2026-09-16).
+    """
+
+    value = parse_json(raw, label)
+    _canonical_value(value, 0)
     return value
 
 
@@ -2895,9 +2909,9 @@ def check_approval(
             f"review {name} differs from the reviewed pin",
         )
 
-    # The signature covers canonical bytes only, so the host and this tool
-    # parse one unambiguous document.
-    approval = parse_canonical(approval_raw, "approval")
+    # The signature covers the exact stored approval bytes, which need not be
+    # canonical; the host and this tool parse those same bytes strictly.
+    approval = parse_strict(approval_raw, "approval")
     require(type(approval) is dict, "approval must be an object")
     require(same(approval.get("schema"), APPROVAL_SCHEMA), "approval schema is unknown")
     require(

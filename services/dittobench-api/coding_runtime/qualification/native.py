@@ -2,8 +2,8 @@
 
 This grants one compatibility run, not competition admission or qualification.
 Host enforcement evidence is independently reviewed, not inferred from metadata.
-The host itself verifies Peyton's detached curator signature over the canonical
-approval bytes and pins the Docker daemon identity the approval names; an
+The host itself verifies Peyton's detached curator signature over the exact
+stored approval bytes and pins the Docker daemon identity the approval names; an
 operator-supplied digest authorizes nothing.
 """
 
@@ -26,7 +26,7 @@ HOME_DIR = Path("/var/lib/ditto-coding-hosted")
 STATE = HOME_DIR / "qualification"
 SOCKET = Path("/run/ditto-coding-hosted/docker.sock")
 OPENSSL = Path("/usr/bin/openssl")
-# The offline evidence tool's own Ed25519 verifier and canonical parser run here
+# The offline evidence tool's own Ed25519 verifier and strict parser run here
 # too, compiled from the exact bytes whose digest the signed approval names.
 VERIFIER = "infra/scripts/coding-native-evidence.py"
 APPROVAL_SCHEMA = "dittobench-coding-native-controls-approval-v3"
@@ -67,6 +67,11 @@ DAEMON_IDENTITY_KEYS = {
     "security_options",
     "default_runtime",
 }
+# Recorded in the identity, but not a hard acceptance key (Peyton, 2026-09-16):
+# a Docker patch upgrade must not void every approval. A different version is
+# reported as an observation; every other identity field must match exactly.
+DAEMON_OBSERVED_KEYS = {"server_version"}
+APPROVAL_MAX_VALIDITY_SECONDS = 86400
 PROFILES = {
     "python": "python-call-ast-v2",
     "node": "node-call-ast-v2",
@@ -246,6 +251,11 @@ def daemon_identity_policy(value, *, socket_path=SOCKET, root_dir=HOME_DIR / "do
     return value
 
 
+def daemon_hard_identity(value):
+    """The identity without fields that are observed rather than enforced."""
+    return {k: v for k, v in value.items() if k not in DAEMON_OBSERVED_KEYS}
+
+
 def daemon_identity_sha256(value):
     return sha(canonical(value))
 
@@ -320,7 +330,7 @@ def policy(value, *, source, plan_sha, helper_sha, controls, jobs, now):
     )
     issued, expires = value["issued_at_unix"], value["expires_at_unix"]
     require(type(issued) is int and type(expires) is int and issued <= now < expires)
-    require(0 < expires - issued <= 86400)
+    require(0 < expires - issued <= APPROVAL_MAX_VALIDITY_SECONDS)
     require(
         type(value["boot_id"]) is str
         and re.fullmatch(
@@ -381,7 +391,7 @@ def load_verifier():
         "__builtins__": builtins,
     }
     exec(compile(raw, str(path), "exec", dont_inherit=True), namespace)
-    for name in ("curator_public_key", "verify_ed25519", "parse_canonical"):
+    for name in ("curator_public_key", "verify_ed25519", "parse_strict"):
         require(callable(namespace.get(name)))
     return namespace, digest_before_execution
 
@@ -390,8 +400,9 @@ def authorize(approval_path, signature_path, *, now, **expected):
     """Verify the detached curator signature on this host, then the approval.
 
     The signature is checked over the exact bytes read once, with the pinned
-    key, before any byte is parsed. Those same bytes must be canonical JSON and
-    are the only approval ever used; the approval digest is derived here.
+    key, before any byte is parsed. Those same in-memory bytes (not a
+    re-serialization, and not necessarily canonical) are then parsed strictly
+    and are the only approval ever used; the approval digest is their sha256.
     """
     raw = read_private(approval_path, MAX_APPROVAL)
     signature = read_private(signature_path, SIGNATURE_BYTES)
@@ -400,8 +411,7 @@ def authorize(approval_path, signature_path, *, now, **expected):
     key = verifier["curator_public_key"](CURATOR_SIGNING_PUBLIC_KEY)
     require(sha(key) == CURATOR_SIGNING_KEY_SHA256)
     verifier["verify_ed25519"](OPENSSL, key, raw, signature)
-    value = verifier["parse_canonical"](raw, "approval")
-    require(canonical(value) == raw)
+    value = verifier["parse_strict"](raw, "approval")
     value = policy(value, now=now, **expected)
     require(value["curator_signing_key_sha256"] == CURATOR_SIGNING_KEY_SHA256)
     require(value["evidence_tool_sha256"] == verifier_sha)
@@ -506,6 +516,7 @@ class Binding:
         self.image_policy = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.image_policy)
         self.daemon = None
+        self.daemon_observations = []
         self.consumed = False
         self.check_current()
 
@@ -529,14 +540,29 @@ class Binding:
         self.check_current()
         require(type(info) is dict)
         self.image_policy.validate_daemon(info)
-        # The approved daemon, by the full identity the signed approval names,
-        # reached through the fixed socket and served by this principal.
+        # The approved daemon, by every hard field of the identity the signed
+        # approval names, reached through the fixed socket and served by this
+        # principal. A server_version change is observed, never refused.
         identity = daemon_identity(info)
-        require(canonical(identity) == canonical(self.value["daemon_identity"]))
+        approved = self.value["daemon_identity"]
+        require(
+            canonical(daemon_hard_identity(identity))
+            == canonical(daemon_hard_identity(approved))
+        )
         require(socket_peer_uid() == os.geteuid())
-        identity_sha = daemon_identity_sha256(identity)
-        require(self.daemon is None or self.daemon == identity_sha)
-        self.daemon = identity_sha
+        observations = [
+            {
+                "field": name,
+                "approved": approved[name],
+                "observed": identity[name],
+            }
+            for name in sorted(DAEMON_OBSERVED_KEYS)
+            if identity[name] != approved[name]
+        ]
+        self.daemon = daemon_identity_sha256(approved)
+        for observation in observations:
+            if observation not in self.daemon_observations:
+                self.daemon_observations.append(observation)
 
     def select_image(self, language, reference, inspected):
         self.check_current()
@@ -594,4 +620,5 @@ class Binding:
             "boot_id": self.value["boot_id"],
             "evidence_sha256": self.value["evidence_sha256"],
             "daemon_identity_sha256": self.daemon,
+            "daemon_identity_observations": list(self.daemon_observations),
         }

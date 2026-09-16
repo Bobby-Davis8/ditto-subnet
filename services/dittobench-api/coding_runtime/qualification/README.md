@@ -111,12 +111,15 @@ line. `native.py` takes these steps, in order:
    scrubbed environment and a private work directory. The public key is pinned
    in `native.py` source (`CURATOR_SIGNING_KEY_SHA256`, the stage 3 custody
    identity). It never comes from a path, argument or environment variable.
-4. Only then does it parse the bytes. They must be canonical JSON, with no
-   duplicate keys.
+4. Only then does it parse those same in-memory bytes, with the tool's
+   `parse_strict`. The signature covers the exact stored bytes, not a
+   re-serialization, so they need not be canonical JSON (Peyton, 2026-09-16).
+   Duplicate keys, trailing data, non-integer numbers and any schema or key-set
+   mismatch are still refused.
 5. The approval must name the pinned key and the verifier digest that was
    compiled.
 
-The approval digest is derived from the verified bytes. `run.py` compiles
+The approval digest is the sha256 of exactly those verified bytes. `run.py` compiles
 `native.py` from one read and records its digest (`LOADED_SHA256`), so cached
 bytecode or a later file swap can't stand in for the reviewed binding. Before
 compiling, `run.py` refuses a `native.py` that is not a single-link file owned
@@ -137,9 +140,9 @@ The closed approval record uses schema
 | `evidence_tool_sha256` | Exact `infra/scripts/coding-native-evidence.py` bytes whose signature verifier ran on-host |
 | `curator_signing_key_sha256` | The pinned offline curator key identity (sha256 of the raw 32-byte Ed25519 key) |
 | `machine_id_sha256`, `boot_id` | Intended host's stripped machine-ID hash and current boot UUID |
-| `daemon_identity` | The dedicated rootless dockerd, `dittobench-coding-native-daemon-identity-v1` (below); its canonical digest equals every evidence record's `host.daemon_identity_sha256` |
+| `daemon_identity` | The dedicated rootless dockerd, `dittobench-coding-native-daemon-identity-v1` (below); its canonical digest equals every evidence record's `host.daemon_identity_sha256` (the identity object is hashed canonically; the approval file itself is not) |
 | `profile_pins` | `connectivity_endpoint_set_sha256`, `enforcement_images_sha256` (per-language probe images and commands), `execution_profile_sha256`, `grading_profile_sha256`, equal to the reviewed pins `check-approval` requires |
-| `issued_at_unix`, `expires_at_unix` | Current validity window, at most 24 hours |
+| `issued_at_unix`, `expires_at_unix` | Current validity window (`issued_at_unix <= now < expires_at_unix`), at most 24 hours (`APPROVAL_MAX_VALIDITY_SECONDS`, Peyton 2026-09-16) |
 | `controls`, `max_jobs` | Exact plan case count times two; at most 1024 controls and 1, 2 or 4 parallel jobs |
 | `images` | Exactly `python`, `node`, `go`, `rust`, each with approved `image_ref`, `config_digest`, `approval_sha256`, `driver_profile` matching the release index |
 | `evidence_sha256` | Nonzero digests for `host_preflight`, `network_enforcement`, `resource_enforcement`, `preexec_confinement`, `cleanup_recovery`, `private_input_custody` |
@@ -175,9 +178,17 @@ socket and a clean environment. It never uses an ambient `DOCKER_HOST`,
 
 ### Daemon identity
 
-Before and after the matrix, `docker info` must yield exactly the
-`daemon_identity` the signed approval names, and the socket's `SO_PEERCRED` uid
-must be this principal. The identity keeps only fields that change when the
+Before and after the matrix, `docker info` must yield the `daemon_identity` the
+signed approval names in every field except `server_version`, and the socket's
+`SO_PEERCRED` uid must be this principal. `server_version` is recorded in the
+identity (and so in its digest) but is not a hard acceptance key (Peyton,
+2026-09-16): a Docker patch upgrade must not void every approval. A different
+version is reported, not refused, as
+`native_control_authority.daemon_identity_observations`
+(`{"field": "server_version", "approved": ..., "observed": ...}`) in
+`provenance.json` and `summary.json`, whose `daemon_identity_sha256` stays the
+approved identity's digest. A different `engine_id`, data root, socket or any
+other field is refused. The identity keeps only fields that change when the
 daemon itself changes:
 
 - `engine_id` (Docker's persisted engine ID), `server_version`, `rootless`;

@@ -591,13 +591,16 @@ identity is bound into the signed approval and the evidence.
   - `run.py` takes `--native-approval` and `--native-approval-signature`.
     `--native-approval-sha256` is refused before any input is read.
   - The host compiles this tool from one read of its bytes and runs its own
-    `verify_ed25519` over the exact approval bytes, with the curator key pinned
-    in `native.py` source. Only after that does it parse them with
-    `parse_canonical`.
+    `verify_ed25519` over the exact stored approval bytes, with the curator key
+    pinned in `native.py` source. Only after that does it parse those same
+    bytes with `parse_strict`.
   - The approval (`dittobench-coding-native-controls-approval-v3`) names
     `curator_signing_key_sha256` and `evidence_tool_sha256`. The host refuses a
-    different key or verifier. `check-approval` refuses them offline too, and
-    now also requires canonical approval bytes.
+    different key or verifier. `check-approval` refuses them offline too.
+  - Peyton (2026-09-16): the signature covers the exact stored bytes, not a
+    re-serialization, so the approval need not be canonical JSON. Both the host
+    and `check-approval` parse it strictly (no duplicate keys, trailing data or
+    non-integer numbers) and bind `sha256` of those exact bytes.
 - **Daemon identity.** `dittobench-coding-native-daemon-identity-v1` is a
   closed object; see the qualification README for its fields and why each is
   included.
@@ -610,6 +613,9 @@ identity is bound into the signed approval and the evidence.
     equal the evidence daemon. `native.policy` fixes the socket and data root.
   - On the host, `docker info` must reproduce the approved identity before and
     after the run, served over the fixed socket by the native principal.
+    `server_version` is recorded but not a hard key (Peyton, 2026-09-16): a
+    different version is reported in `daemon_identity_observations`, not
+    refused. Every other field, including `engine_id`, must match.
 - **Endpoint set in the signed document.** `approval.profile_pins` carries
   the endpoint-set, execution-profile and grading-profile pins. They must equal
   the reviewed pins given to `check-approval`.
@@ -621,9 +627,10 @@ identity is bound into the signed approval and the evidence.
   side (`daemon-identity-vector-v1.json`, `approval-vector-v3.json`). Go can
   read an approval's daemon digest to refuse a different daemon. It verifies no
   signature and can't create an approval.
-- **Still open:** `expires_at_unix` may be up to 24 hours after
-  `issued_at_unix`, although the evidence is only fresh for six hours at
-  issuance.
+- **Validity.** Peyton (2026-09-16): an approval is valid for at most 24 hours
+  (`expires_at_unix - issued_at_unix <= 86400`); expired and not-yet-valid
+  approvals are refused. This is separate from evidence freshness: every
+  collection record must still fall within six hours of `issued_at_unix`.
 
 ## Not covered
 

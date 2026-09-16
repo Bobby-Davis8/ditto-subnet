@@ -3189,13 +3189,51 @@ def test_check_approval_accepts_a_signed_consistent_approval(signed, capsys):
 
 
 @needs_openssl
-def test_check_approval_refuses_a_signed_noncanonical_approval(signed):
-    body = json.dumps(signed.value, indent=2, sort_keys=True).encode() + b"\n"
+def test_check_approval_accepts_a_signed_noncanonical_approval(signed):
+    """Peyton, 2026-09-16: the signature covers the exact stored bytes, which
+    need not be canonical; the checked digest is sha256 of those bytes."""
+
+    body = json.dumps(signed.value, indent=2).encode() + b"\n"
+    assert body != canonical(signed.value)
     approval = signed.directory / "noncanonical.json"
     approval.write_bytes(body)
     signature = signed.curator.sign(body, signed.directory / "noncanonical.sig")
-    with pytest.raises(EVIDENCE.Refusal, match="not canonical"):
+    result = signed.check(approval=approval, signature=signature)
+    assert result["checked_approval_sha256"] == hashlib.sha256(body).hexdigest()
+    # One changed byte voids the signature.
+    approval.write_bytes(body.replace(b"\n", b" \n", 1))
+    with pytest.raises(EVIDENCE.Refusal, match="does not verify"):
         signed.check(approval=approval, signature=signature)
+
+
+@needs_openssl
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda b: b[:-1] + b',"schema":"x"}', "duplicate key"),
+        (lambda b: b + b"{}", "not valid JSON"),
+        (lambda b: b.replace(b'"controls":', b'"controls":1.5,"c":', 1), "integers"),
+    ],
+)
+def test_check_approval_parses_signed_bytes_strictly(signed, mutate, reason):
+    body = mutate(canonical(signed.value))
+    approval = signed.directory / "strict.json"
+    approval.write_bytes(body)
+    signature = signed.curator.sign(body, signed.directory / "strict.sig")
+    with pytest.raises(EVIDENCE.Refusal, match=reason):
+        signed.check(approval=approval, signature=signature)
+
+
+def test_strict_parse_is_not_a_canonical_requirement():
+    assert EVIDENCE.parse_strict(b' {"b": 1,\n "a": [2]}\n', "value") == {
+        "b": 1,
+        "a": [2],
+    }
+    for raw in (b'{"a":1,"a":2}', b'{"a":1}x', b'{"a":1.0}', b'{"a":NaN}'):
+        with pytest.raises(EVIDENCE.Refusal):
+            EVIDENCE.parse_strict(raw, "value")
+    with pytest.raises(EVIDENCE.Refusal, match="lone surrogate"):
+        EVIDENCE.parse_strict(b'{"a":"\\ud800"}', "value")
 
 
 @needs_openssl

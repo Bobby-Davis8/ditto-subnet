@@ -149,6 +149,7 @@ def bare_binding(monkeypatch):
     binding.signature_sha = "f" * 64
     binding.deadline, binding.consumed = 2000, False
     binding.daemon = DAEMON_VECTOR["identity_sha256"]
+    binding.daemon_observations = []
     binding.image_policy = IMAGE
     monkeypatch.setattr(binding, "check_current", lambda: None)
     return binding
@@ -673,7 +674,7 @@ def host_approval(tmp_path, monkeypatch):
 
 
 @needs_openssl
-def test_host_verifies_the_curator_signature_over_the_canonical_approval(
+def test_host_verifies_the_curator_signature_over_the_stored_approval(
     host_approval,
 ):
     path, signature = host_approval.write()
@@ -741,15 +742,95 @@ def test_host_refuses_a_missing_or_malformed_signature(host_approval):
 
 
 @needs_openssl
-def test_host_refuses_a_signed_but_noncanonical_approval(host_approval):
-    raw = json.dumps(host_approval.value(), indent=2, sort_keys=True).encode()
+def test_host_accepts_a_signed_noncanonical_approval_by_its_exact_bytes(
+    host_approval,
+):
+    """Peyton, 2026-09-16: the signature covers the stored bytes, not a
+    re-serialization, so a pretty-printed signed approval is accepted and its
+    digest is the sha256 of exactly those bytes."""
+
+    raw = json.dumps(host_approval.value(), indent=2).encode() + b"\n"
+    assert raw != NATIVE.canonical(host_approval.value())
     path, signature = host_approval.write(raw=raw)
-    with pytest.raises(ValueError, match="not canonical"):
+    value, approval_sha, _signature_sha = host_approval.authorize(path, signature)
+    assert value == host_approval.value()
+    assert approval_sha == NATIVE.sha(raw)
+    assert approval_sha != NATIVE.sha(NATIVE.canonical(value))
+    assert host_approval.reads == [path, signature]
+
+
+@needs_openssl
+@pytest.mark.parametrize("pretty", [False, True])
+def test_host_refuses_a_one_byte_tampered_approval(host_approval, pretty):
+    body = (
+        json.dumps(host_approval.value(), indent=2).encode()
+        if pretty
+        else NATIVE.canonical(host_approval.value())
+    )
+    path, signature = host_approval.write(raw=body)
+    host_approval.authorize(path, signature)
+    # Even a semantically neutral byte (whitespace) voids the signature.
+    for index, replacement in ((len(body) - 1, b" }"), (1, b" " + body[1:2])):
+        tampered = body[:index] + replacement + body[index + 1 :]
+        path.write_bytes(tampered)
+        with pytest.raises(ValueError, match="does not verify"):
+            host_approval.authorize(path, signature)
+    flipped = bytearray(body)
+    flipped[len(body) // 2] ^= 1
+    path.write_bytes(bytes(flipped))
+    with pytest.raises(ValueError, match="does not verify"):
         host_approval.authorize(path, signature)
-    duplicate = NATIVE.canonical(host_approval.value())[:-1] + b',"schema":"x"}'
-    path, signature = host_approval.write(raw=duplicate)
+
+
+@needs_openssl
+@pytest.mark.parametrize(
+    "raw",
+    [
+        lambda b: b[:-1] + b',"schema":"x"}',
+        lambda b: b + b"{}",
+        lambda b: b + b"x",
+        lambda b: b.replace(NATIVE.APPROVAL_SCHEMA.encode(), b"other-schema-v3"),
+        lambda b: b.replace(b'"controls":32', b'"controls":32.0'),
+        lambda b: b"\xef\xbb\xbf" + b,
+        lambda b: b[:-1] + b',"extra":true}',
+    ],
+    ids=[
+        "duplicate",
+        "trailing-json",
+        "trailing-text",
+        "schema",
+        "float",
+        "bom",
+        "extra",
+    ],
+)
+def test_host_parses_signed_approval_bytes_strictly(host_approval, raw):
+    path, signature = host_approval.write(
+        raw=raw(NATIVE.canonical(host_approval.value()))
+    )
     with pytest.raises(ValueError):
         host_approval.authorize(path, signature)
+
+
+@needs_openssl
+def test_host_caps_approval_validity_at_24_hours(host_approval):
+    path, signature = host_approval.write(
+        host_approval.value(issued_at_unix=900, expires_at_unix=900 + 86400)
+    )
+    host_approval.authorize(path, signature)
+    path, signature = host_approval.write(
+        host_approval.value(issued_at_unix=900, expires_at_unix=900 + 86401)
+    )
+    with pytest.raises(ValueError, match="native control approval rejected"):
+        host_approval.authorize(path, signature)
+    assert NATIVE.APPROVAL_MAX_VALIDITY_SECONDS == 24 * 60 * 60
+    # Expired and not-yet-valid approvals are refused as before.
+    for issued, expires in ((500, 1000), (1001, 2000)):
+        path, signature = host_approval.write(
+            host_approval.value(issued_at_unix=issued, expires_at_unix=expires)
+        )
+        with pytest.raises(ValueError, match="native control approval rejected"):
+            host_approval.authorize(path, signature)
 
 
 @needs_openssl
@@ -882,15 +963,51 @@ def test_daemon_identity_must_equal_the_approved_identity(monkeypatch):
     binding.check_daemon(copy.deepcopy(DAEMON_VECTOR["info"]))
     assert binding.daemon == DAEMON_VECTOR["identity_sha256"]
     assert binding.provenance()["daemon_identity_sha256"] == binding.daemon
-    for key, value in DAEMON_VECTOR["binding"].items():
+    assert binding.provenance()["daemon_identity_observations"] == []
+    hard = {k: v for k, v in DAEMON_VECTOR["binding"].items() if k != "ServerVersion"}
+    assert {"ID", "DockerRootDir", "Driver", "Containerd"} <= set(hard)
+    for key, value in hard.items():
         other = daemon_binding(monkeypatch)
         with pytest.raises(ValueError):
             other.check_daemon({**DAEMON_VECTOR["info"], key: value})
         assert other.daemon is None
-    # The daemon cannot change between the checks before and after the matrix.
-    binding.value["daemon_identity"]["server_version"] = "29.1.4"
+    # A different daemon (engine ID) is refused even if its version matches.
+    other = daemon_binding(monkeypatch)
     with pytest.raises(ValueError):
-        binding.check_daemon({**DAEMON_VECTOR["info"], "ServerVersion": "29.1.4"})
+        other.check_daemon(
+            {**DAEMON_VECTOR["info"], "ID": DAEMON_VECTOR["binding"]["ID"]}
+        )
+    # The daemon cannot change between the checks before and after the matrix.
+    with pytest.raises(ValueError):
+        binding.check_daemon(
+            {**DAEMON_VECTOR["info"], "ID": DAEMON_VECTOR["binding"]["ID"]}
+        )
+    assert binding.provenance()["daemon_identity_observations"] == []
+
+
+def test_daemon_server_version_change_is_observed_not_refused(monkeypatch):
+    """Peyton, 2026-09-16: a Docker patch upgrade must not void every approval."""
+
+    binding = daemon_binding(monkeypatch)
+    upgraded = {**DAEMON_VECTOR["info"], "ServerVersion": "29.1.4"}
+    assert NATIVE.daemon_identity(copy.deepcopy(upgraded))["server_version"] == "29.1.4"
+    binding.check_daemon(copy.deepcopy(upgraded))
+    binding.check_daemon(copy.deepcopy(upgraded))
+    # Provenance keeps binding the approved identity digest (the evidence
+    # daemon) and reports the version drift once.
+    provenance = binding.provenance()
+    assert provenance["daemon_identity_sha256"] == DAEMON_VECTOR["identity_sha256"]
+    assert provenance["daemon_identity_observations"] == [
+        {
+            "field": "server_version",
+            "approved": DAEMON_VECTOR["identity"]["server_version"],
+            "observed": "29.1.4",
+        }
+    ]
+    # A version change never excuses a different daemon.
+    with pytest.raises(ValueError):
+        binding.check_daemon({**upgraded, "ID": DAEMON_VECTOR["binding"]["ID"]})
+    assert {"server_version"} == NATIVE.DAEMON_OBSERVED_KEYS
 
 
 def test_daemon_socket_must_be_served_by_the_native_principal(monkeypatch):
