@@ -95,6 +95,7 @@ import {
   screenerFanoutShadowInputSchema,
   applyCopyCourtSettingsInputSchema,
   copyCourtRecommendationsInputSchema,
+  confirmationSeedAnchorsInputSchema,
   rotateScreenerPolicyManifestInputSchema,
   setQueuePolicySettingsInputSchema,
   scheduleScreenerPolicyActivationInputSchema,
@@ -221,6 +222,7 @@ import {
   fetchScreenerFanoutShadow,
   fetchCopyCourtControl,
   fetchCopyCourtRecommendations,
+  fetchConfirmationSeedAnchors,
   applyCopyCourtSettings,
   applyScreenerReviewSettings,
   fetchScreenerPolicyManifestControl,
@@ -575,6 +577,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read bounded baseline/fan-out shadow comparisons, coverage, disagreements, latency, and spend.',
   get_copy_court_settings:
     'Read the copy-hold triage court posture and revision history.',
+  get_confirmation_seed_anchors:
+    'Read bench v13+ finalized-block confirmation seed anchors: pinned and still-waiting reigns, floor, and delta.',
   list_copy_court_recommendations:
     'Page the shadow court\'s non-authoritative verdicts for pending copy holds.',
   apply_screener_review_settings:
@@ -1096,7 +1100,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening disputes',
       description:
-        'Page through pending, resolved, or all one-time miner disputes oldest first by created_at then dispute_id. This is intentionally queue order: pending appeals are handled fairly instead of letting new disputes starve old ones. Returns count, limit, and offset.',
+        'Page through pending, resolved, or all one-time miner disputes oldest first by created_at then dispute_id. This is intentionally queue order: pending appeals are handled fairly instead of letting new disputes starve old ones. `kind`: `screening` (rejected quarantine) or `gate_notes` (a scored submission appeals its cited v13+ notes). Returns count, limit, and offset.',
       inputSchema: {
         status: z.enum(['pending', 'resolved', 'all']).default('pending'),
         ...MCP_PAGINATION_INPUT,
@@ -1657,7 +1661,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get authoritative agent scores',
       description:
-        "Authoritative production scores for one SN118 agent, by agent UUID or miner hotkey (a hotkey resolves to that miner's current leaderboard submission). Returns the finalized median composite, every accepted per-validator score with its per-axis tool/memory means, seed, run id, bench version, and transcript hash, the pinned dataset (seed + sha256 + seed block), the active and desired bench versions, and the agent's leaderboard context: rank, quorum vs provisional state, emission eligibility, and the composite breakdown with the aggregate benchmark-quality gate and token-efficiency penalty multipliers. A submission below quorum answers with `finalized: false` instead of an error: score_count of quorum, the accepted scores that DO exist with their composites and exact seeds, and median_composite null because no canonical aggregate exists yet. Those pre-quorum rows carry `validator_hotkey: null` (also run_id, tool_mean, memory_mean, median_ms, n) because the platform withholds validator identity until quorum — null means not published yet, never that no validator scored it; use list_stuck_submissions or agent_scoring_readiness for per-validator ticket state. Dataset pin fields are null before quorum; each accepted row carries the exact seed it was graded against. Only a genuinely unknown agent UUID errors. Reads the same public score ledger that drives validator weights, never influences it, and exposes no miner source. Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. Requires backroom:read.",
+        "Authoritative production scores for one SN118 agent, by agent UUID or miner hotkey (a hotkey resolves to that miner's current leaderboard submission). Returns the finalized median composite, every accepted per-validator score with its per-axis tool/memory means, seed, run id, bench version, and transcript hash, the pinned dataset (seed + sha256 + seed block), the active and desired bench versions, and the agent's leaderboard context: rank, quorum vs provisional state, emission eligibility, and the composite breakdown with the aggregate benchmark-quality gate and token-efficiency penalty multipliers. A submission below quorum answers with `finalized: false` instead of an error: score_count of quorum, the accepted scores that DO exist with their composites and exact seeds, and median_composite null because no canonical aggregate exists yet. Those pre-quorum rows carry `validator_hotkey: null` (also run_id, tool_mean, memory_mean, median_ms, n) because the platform withholds validator identity until quorum — null means not published yet, never that no validator scored it; use list_stuck_submissions or agent_scoring_readiness for per-validator ticket state. Dataset pin fields are null before quorum; each accepted row carries the exact seed it was graded against. Only a genuinely unknown agent UUID errors. Reads the same public score ledger that drives validator weights, never influences it, and exposes no miner source. Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. v13+ rows add `gate_evidence` (gate posture, gate summaries, flagged_case_count/share, gate_counts; aggregates only). Requires backroom:read.",
       inputSchema: agentScoresLookupInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1703,7 +1707,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get agent score history across bench versions',
       description:
-        "One SN118 agent's accepted validator scores grouped per benchmark version, by agent UUID or miner hotkey, so version-over-version deltas come from the authoritative ledger instead of dashboard scraping. Each version group returns the accepted-score count, median/min/max composite, median tool and memory means, scoring window, validator hotkeys, seeds, and the median-composite delta against the previous version. A submission only carries rows for versions it was actually scored or re-scored on. Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. Requires backroom:read and exposes no miner source.",
+        "One SN118 agent's accepted validator scores grouped per benchmark version, by agent UUID or miner hotkey, so version-over-version deltas come from the authoritative ledger instead of dashboard scraping. Each version group returns the accepted-score count, median/min/max composite, median tool and memory means, scoring window, validator hotkeys, seeds, and the median-composite delta against the previous version. A submission only carries rows for versions it was actually scored or re-scored on. v13+ groups add `gate_posture` and `median_flagged_case_share` (null below v13). Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. Requires backroom:read and exposes no miner source.",
       inputSchema: agentScoresLookupInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1963,6 +1967,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchCopyCourtControl()),
+  )
+
+  registerTool(
+    'get_confirmation_seed_anchors',
+    {
+      title: 'Get confirmation seed anchors',
+      description:
+        'Read the bench v13+ finalized-block confirmation seed anchors for one version (default: active), oldest first: one row per (champion, bench_version) reign with ready_block, anchor_block, the pinned hash or null while the reign waits for finality, pinned_at, plus binding_active, floor, and delta. The ledger serves pinned rows only; a waiting row means catch-up-only issuance and deferral under enforce. Requires backroom:read.',
+      inputSchema: confirmationSeedAnchorsInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchConfirmationSeedAnchors(input)),
   )
 
   registerTool(
@@ -2763,7 +2779,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Resolve screening dispute',
       description:
-        'Accept and release, or uphold, one miner dispute with an auditable miner-visible reason.',
+        'Accept (release) or uphold one miner dispute with an auditable miner-visible reason. A `gate_notes` resolution only records the verdict; status and scores never change.',
       inputSchema: {
         disputeId: z.string().uuid(),
         resolution: screeningDisputeResolutionSchema,
