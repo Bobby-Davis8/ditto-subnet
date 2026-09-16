@@ -29,6 +29,8 @@ type FactoryConfig struct {
 	// factory creates. Empty inherits the process DOCKER_HOST.
 	DockerHost string
 	Now        func() time.Time
+	// LaunchIntent is passed to every executor this factory creates.
+	LaunchIntent LaunchIntent
 }
 
 // PhaseFactory creates a fresh executor after each phase has verified its own
@@ -102,7 +104,8 @@ func (factory *PhaseFactory) executorConfig(manifest codinggrader.Manifest, auth
 		RequireRootless:       factory.config.RequireRootless,
 		RequireIsolatedDaemon: factory.config.RequireIsolatedDaemon,
 		SeccompProfile:        factory.config.SeccompProfile, AppArmorProfile: factory.config.AppArmorProfile,
-		DockerHost: factory.config.DockerHost,
+		DockerHost:   factory.config.DockerHost,
+		LaunchIntent: factory.config.LaunchIntent,
 	}
 }
 
