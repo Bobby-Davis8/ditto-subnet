@@ -73,6 +73,8 @@ _SUPPORTED_POLICY_VERSIONS = tuple(
 
 def _prompt_revision(policy_version: int) -> str:
     """Prompt revision recorded in findings and audits for one policy version."""
+    if policy_version == 13:
+        return "source-review-v25-policy-v13"
     return f"source-review-v24-policy-v{policy_version}"
 
 
@@ -1893,6 +1895,14 @@ Private behavioral testing is mandatory only when that role requires it or
 source causality remains unresolved. Tests, diagnostics, and helpers require
 effective build/startup/runtime reachability; refuting one dormant lead does
 not clear the rest of the artifact.
+
+Merge submission evidence with exact path-and-digest starter-kit provenance
+supplied by the platform. A matched official component satisfies only the
+fields and role recorded there, but its README, metadata sidecar, or duplicate
+self-report need not be present in the archive. Recheck changed configuration,
+loaders, candidate boundaries, inputs, outputs, and downstream authority. A
+null score or leaderboard field does not prove that an artifact-bound
+screening package is absent.
 
 Security review covers unauthorized cross-user access, credential access,
 secret emission, private-data exfiltration, host-resource access, hidden
@@ -3793,6 +3803,15 @@ class OpenRouterSourceReviewAgent:
 
         raise AssertionError("model retry loop exhausted without a result")
 
+    def _completion_request_headers(
+        self, api_key: str, _effective_timeout: float
+    ) -> dict[str, str]:
+        """Gateway headers; subclasses can communicate an already bounded deadline."""
+        return {
+            "Authorization": f"Bearer {api_key}",
+            **review_gateway_headers(self._inference_provider),
+        }
+
     async def _post_completion(
         self,
         client: httpx.AsyncClient,
@@ -3834,10 +3853,7 @@ class OpenRouterSourceReviewAgent:
         async with asyncio.timeout(effective_timeout):
             response = await client.post(
                 f"{self._base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    **review_gateway_headers(self._inference_provider),
-                },
+                headers=self._completion_request_headers(api_key, effective_timeout),
                 json=request,
                 timeout=effective_timeout,
             )
