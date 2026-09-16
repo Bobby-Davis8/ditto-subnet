@@ -119,8 +119,10 @@ def _unlink_name(dir_fd, name, uid, check_mode):
 
 
 def _remove_leftover_temps(dir_fd, uid, check_mode):
+    # Returns what was removed and any refusal, so a refused temporary does not
+    # hide the credentials and temporaries already unlinked before it.
     removed = []
-    for entry in os.listdir(dir_fd):
+    for entry in sorted(os.listdir(dir_fd)):
         if not _TMP.match(entry):
             continue
         try:
@@ -128,11 +130,11 @@ def _remove_leftover_temps(dir_fd, uid, check_mode):
         except FileNotFoundError:
             continue
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != uid:
-            raise Unsafe(f"{entry} is not a removable worker temporary")
+            return removed, f"{entry}: not a removable worker temporary"
         if not check_mode:
             os.unlink(entry, dir_fd=dir_fd)
         removed.append(entry)
-    return sorted(removed)
+    return removed, None
 
 
 def remove_all(private_dir, owner_uid, *, check_mode=False):
@@ -165,7 +167,9 @@ def remove_all(private_dir, owner_uid, *, check_mode=False):
                 break
             (already_absent if state == "absent" else removed).append(name)
         else:
-            temps = _remove_leftover_temps(dir_fd, owner_uid, check_mode)
+            temps, temp_refusal = _remove_leftover_temps(dir_fd, owner_uid, check_mode)
+            if temp_refusal:
+                refused.append(temp_refusal)
             if not check_mode:
                 os.fsync(dir_fd)
                 for name in NAMES:

@@ -418,7 +418,8 @@ returns `removed`, `already_absent`, `refused` and `not_attempted` lists on ever
 path, so a partial removal (for example a later name that is a symlink after
 earlier names were unlinked) names exactly what was removed, what refused and
 why, and what was not attempted. It also removes and reports any leftover
-`.<name>.*.tmp` a partial write may have left. It reads no secret, so export
+`.<name>.*.tmp` a partial write may have left; a temporary it must refuse fails
+the task with that same receipt of what was already removed. It reads no secret, so export
 nothing for it. It keeps the directories.
 
 Asymmetry with the write module: the write module requires the private directory

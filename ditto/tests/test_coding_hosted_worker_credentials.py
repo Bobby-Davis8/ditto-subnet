@@ -291,6 +291,64 @@ def test_unlink_module_reports_every_path() -> None:
     assert "is not owned by the worker" in src
 
 
+def test_unlink_refused_leftover_temp_keeps_the_removal_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    import importlib.util
+    import sys
+    import types
+
+    spec = importlib.util.spec_from_file_location("unlink_module", UNLINK_MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    private = tmp_path / "home" / "private"
+    private.mkdir(parents=True)
+    (tmp_path / "home").chmod(0o700)
+    private.chmod(0o700)
+    for name in module.NAMES:
+        (private / name).write_text("stand-in")
+    (private / ".image-storage.json.1.ab.tmp").write_text("partial")
+    (private / ".provider-key.1.ab.tmp").symlink_to(tmp_path / "elsewhere")
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd)))
+
+    class Failed(Exception):
+        pass
+
+    class FakeModule:
+        check_mode = False
+
+        def __init__(self, **_):
+            self.params = {"private_dir": str(private), "owner": "worker"}
+
+        def fail_json(self, **result):
+            raise Failed(result)
+
+        def exit_json(self, **result):
+            raise AssertionError(result)
+
+    basic = types.ModuleType("ansible.module_utils.basic")
+    basic.AnsibleModule = FakeModule
+    for name in ("ansible", "ansible.module_utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "ansible.module_utils.basic", basic)
+    account = types.SimpleNamespace(pw_uid=os.getuid())
+    monkeypatch.setattr(module.pwd, "getpwnam", lambda _: account)
+    with pytest.raises(Failed) as failed:
+        module.main()
+    (result,) = failed.value.args
+    assert "nothing was removed" not in result["msg"]
+    assert result["removed"] == list(module.NAMES)
+    assert result["not_attempted"] == []
+    assert result["leftover_temps"] == [".image-storage.json.1.ab.tmp"]
+    assert result["refused"] == [
+        ".provider-key.1.ab.tmp: not a removable worker temporary"
+    ]
+    assert result["changed"] is True and len(synced) == 1
+    assert sorted(p.name for p in private.iterdir()) == [".provider-key.1.ab.tmp"]
+
+
 def test_no_role_internal_data_flows_through_overridable_include_vars() -> None:
     # The idle checks are inlined asserts reading the register directly, not an
     # include whose vars: an extra var could override.
