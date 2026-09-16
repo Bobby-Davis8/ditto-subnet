@@ -203,6 +203,8 @@ import {
   copyCourtRevisionSchema,
   copyCourtRecommendationListSchema,
   copyCourtRecommendationsInputSchema,
+  confirmationSeedAnchorListSchema,
+  confirmationSeedAnchorsInputSchema,
   screenerCapacityViewSchema,
   createScreenerBootstrapGrantInputSchema,
   screenerBootstrapGrantResponseSchema,
@@ -504,6 +506,19 @@ export async function fetchScreenerFanoutShadow(rawInput: unknown = {}) {
 export async function fetchCopyCourtControl() {
   const payload = await platformAdminRequest('/api/v1/admin/copy-court/settings')
   return copyCourtControlSchema.parse(payload)
+}
+
+export async function fetchConfirmationSeedAnchors(rawInput: unknown) {
+  const input = confirmationSeedAnchorsInputSchema.parse(rawInput)
+  const params = new URLSearchParams()
+  if (input.benchVersion !== undefined) {
+    params.set('bench_version', String(input.benchVersion))
+  }
+  params.set('limit', String(input.limit))
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/confirmation-seed-anchors?${params.toString()}`,
+  )
+  return confirmationSeedAnchorListSchema.parse(payload)
 }
 
 export async function fetchCopyCourtRecommendations(rawInput: unknown) {
@@ -3012,6 +3027,13 @@ export async function fetchAgentScoreHistory(rawInput: unknown) {
     const composites = rows.map((row) => row.composite)
     const medianComposite = median(composites)
     const generatedAt = rows.map((row) => row.generated_at).sort()
+    // Bench v13+ gate verdicts, over the rows that carry one. A mixed posture
+    // across validators is reported as null rather than picking a winner.
+    const gated = rows.flatMap((row) => (row.gate_evidence ? [row.gate_evidence] : []))
+    const postures = new Set(gated.map((evidence) => evidence.posture ?? null))
+    const shares = gated.flatMap((evidence) =>
+      typeof evidence.flagged_case_share === 'number' ? [evidence.flagged_case_share] : [],
+    )
     const version = {
       bench_version: benchVersion,
       score_count: rows.length,
@@ -3026,6 +3048,8 @@ export async function fetchAgentScoreHistory(rawInput: unknown) {
       seeds: [...new Set(rows.map((row) => row.seed))],
       composite_delta_vs_previous:
         previousMedian === null ? null : medianComposite - previousMedian,
+      gate_posture: postures.size === 1 ? ([...postures][0] ?? null) : null,
+      median_flagged_case_share: shares.length ? median(shares) : null,
     }
     previousMedian = medianComposite
     return version
