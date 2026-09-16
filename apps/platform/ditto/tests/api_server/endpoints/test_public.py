@@ -39,6 +39,7 @@ from ditto.api_models.confirmation_bundles import (
     ConfirmationBundleMode,
     ConfirmationBundleSettings,
 )
+from ditto.api_models.continual_retest_settings import ContinualRetestSettings
 from ditto.api_models.public import (
     PublicBenchmarkProgress,
     PublicLeaderboardEntry,
@@ -94,8 +95,10 @@ from ditto.db.models import (
     BenchmarkRolloutAudit,
     BenchmarkRolloutCarryover,
     BenchmarkRolloutMember,
+    ContinualRetestSettingsRevision,
     EvaluationPayment,
     InferenceGrant,
+    LedgerEpochSnapshot,
     OwnerAttestation,
     Score,
     ScreeningAttempt,
@@ -931,6 +934,61 @@ def test_public_leaderboard_serializes_shadow_longmem_zero() -> None:
     assert payload["v9_longmem_mean_composite"] == 0.0
 
 
+def test_public_leaderboard_serializes_router_shadow_state() -> None:
+    """The router shadow surface is display-only: measured composite keyed by
+    hotkey, queued marker when a ledger exists, nothing at all without one."""
+    row = LedgerRow(
+        miner_hotkey=_MINER_A,
+        agent_id=UUID(int=9),
+        composite=0.75,
+        tool_mean=0.75,
+        memory_mean=0.75,
+        first_seen=datetime(2026, 8, 8, tzinfo=UTC),
+        sha256="ab" * 32,
+        size_bytes=123,
+        run_id="router-shadow-serialization",
+        seed=42,
+        validator_hotkey=_VALIDATOR_C,
+        signature=None,
+        status=AgentStatus.SCORED,
+        bench_version=9,
+        n=280,
+        eligible=True,
+    )
+    measured = public_endpoint._public_entry(
+        1,
+        row,
+        "v9-agent",
+        1,
+        finalized=True,
+        router_shadow_by_hotkey={_MINER_A: 0.4285},
+    ).model_dump(mode="json")
+    assert measured["router_shadow_composite"] == pytest.approx(0.4285)
+    assert measured["router_shadow_status"] == "measured"
+
+    queued = public_endpoint._public_entry(
+        1,
+        row,
+        "v9-agent",
+        1,
+        finalized=True,
+        router_shadow_by_hotkey={_MINER_B: 0.9},
+        router_shadow_queued=True,
+    ).model_dump(mode="json")
+    assert "router_shadow_composite" not in queued
+    assert queued["router_shadow_status"] == "queued"
+
+    off = public_endpoint._public_entry(
+        1,
+        row,
+        "v9-agent",
+        1,
+        finalized=True,
+    ).model_dump(mode="json")
+    assert "router_shadow_composite" not in off
+    assert "router_shadow_status" not in off
+
+
 def test_public_v9_base_projection_is_typed_and_fails_closed() -> None:
     vector_path = (
         Path(__file__).resolve().parents[6]
@@ -987,6 +1045,25 @@ _PASSING_V12_MODEL_DEPENDENCE = {
 }
 
 
+# Passing v13 claim-provenance summary: required on every bench_version>=13
+# digest (the scorer attaches it to every v13 run). Identity factor.
+_PASSING_V13_CLAIM_PROVENANCE = {
+    "administered_cases": 10,
+    "eligible_cases": 10,
+    "not_model_emitted_cases": 0,
+    "answer_in_prompt_cases": 0,
+    "flagged_cases": 0,
+    "unattributed_call_cases": 0,
+    "unsettled_cases": 0,
+    "zeroed_cases": 0,
+    "attribution_complete": True,
+    "posture": "shadow",
+    "flagged_bps": 0,
+    "result": "passed",
+    "factor_bps": 10000,
+}
+
+
 def _score_gates_for_version(score_gates: dict, bench_version: int) -> dict:
     """Rewrite a v9+ gate payload for another epoch of the same contract."""
     payload = dict(score_gates)
@@ -997,6 +1074,10 @@ def _score_gates_for_version(score_gates: dict, bench_version: int) -> dict:
         payload.pop("model_dependence", None)
         payload.pop("inference_latency", None)
         payload.pop("answer_stuffing", None)
+    if bench_version >= 13:
+        payload.setdefault("claim_provenance", dict(_PASSING_V13_CLAIM_PROVENANCE))
+    else:
+        payload.pop("claim_provenance", None)
     return payload
 
 
@@ -1643,6 +1724,350 @@ def _chain_epoch() -> ChainEpoch:
     )
 
 
+async def _seed_pin(
+    maker: async_sessionmaker[AsyncSession],
+    *,
+    epoch_index: int,
+    champion: tuple[UUID, str],
+    tail: tuple[UUID, str],
+    incumbent: UUID | None = None,
+    crown_mode: str | None = None,
+) -> None:
+    """One pin whose stored entries fold to ``champion`` then ``tail``."""
+    first_seen = datetime(2026, 9, 1, tzinfo=UTC)
+
+    def entry(agent_id: UUID, hotkey: str, composite: float, seen: datetime) -> dict:
+        return {
+            "miner_hotkey": hotkey,
+            "agent_id": str(agent_id),
+            "composite": composite,
+            "n": 120,
+            "first_seen": seen.isoformat(),
+            "sha256": "ab" * 32,
+            "run_id": "run",
+            "seed": 1,
+            "validator_hotkey": _VALIDATOR_C,
+            "status": "scored",
+            "bench_version": _ERA,
+        }
+
+    async with maker() as session, session.begin():
+        session.add(
+            LedgerEpochSnapshot(
+                snapshot_id=uuid4(),
+                netuid=118,
+                epoch_index=epoch_index,
+                last_epoch_block=epoch_index * 360,
+                pinned_block=epoch_index * 360 + 2,
+                pinned_block_hash="0x" + "ab" * 32,
+                pinned_at=datetime(2026, 9, 10, tzinfo=UTC),
+                bench_version=_ERA,
+                entries=[
+                    entry(champion[0], champion[1], 0.80, first_seen),
+                    entry(tail[0], tail[1], 0.79, first_seen + timedelta(hours=1)),
+                ],
+                context={
+                    "served": {"crown_mode": crown_mode, "burn_share": 0.0},
+                    "schedule": {"next_epoch_block": epoch_index * 360 + 360},
+                },
+                champion_agent_id=champion[0],
+                champion_owner_root="owner:" + champion[1],
+                incumbent_agent_id=incumbent,
+                ledger_digest=f"{epoch_index:064x}",
+            )
+        )
+
+
+class TestPublicLedgerEpochs:
+    async def test_lists_pins_newest_first_with_crown_changes(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        app.state.session_maker = session_maker
+        a, b = uuid4(), uuid4()
+        async with session_maker() as session, session.begin():
+            for agent_id, hotkey, name in (
+                (a, _MINER_A, "alpha"),
+                (b, _MINER_B, "beta"),
+            ):
+                session.add(
+                    Agent(
+                        agent_id=agent_id,
+                        miner_hotkey=hotkey,
+                        name=name,
+                        version=3,
+                        sha256="ab" * 32,
+                        size_bytes=1024,
+                        status=AgentStatus.SCORED,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_026,
+            champion=(a, _MINER_A),
+            tail=(b, _MINER_B),
+        )
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_027,
+            champion=(b, _MINER_B),
+            tail=(a, _MINER_A),
+            incumbent=a,
+            crown_mode="incumbent",
+        )
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_028,
+            champion=(b, _MINER_B),
+            tail=(a, _MINER_A),
+        )
+
+        response = await client.get("/api/v1/public/ledger-epochs?limit=2")
+        assert response.status_code == 200, response.text
+        assert (
+            response.headers["cache-control"]
+            == "public, max-age=30, stale-while-revalidate=120"
+        )
+        body = response.json()
+        assert body["mode"] == "epoch"
+        assert body["count"] == 2
+        newest, previous = body["epochs"]
+        assert [row["epoch_index"] for row in (newest, previous)] == [25_028, 25_027]
+        assert newest["champion"]["agent_id"] == str(b)
+        assert newest["champion"]["agent_name"] == "beta"
+        assert newest["champion"]["agent_version"] == 3
+        assert newest["crown_changed"] is False
+        assert newest["crown_mode"] is None
+        assert newest["pinned_block"] == 25_028 * 360 + 2
+        assert newest["ledger_digest"] == f"{25_028:064x}"
+        # 25_027 crowned b after 25_026 crowned a, with a as the served incumbent.
+        assert previous["crown_changed"] is True
+        assert previous["crown_mode"] == "incumbent"
+        assert previous["incumbent"]["agent_id"] == str(a)
+        roles = [(r["role"], r["agent_id"]) for r in newest["recipients"]]
+        assert roles[0] == ("champion", str(b))
+        assert roles[1][0] == "tail"
+        assert sum(
+            r["share_of_miner_pool"] for r in newest["recipients"]
+        ) == pytest.approx(1.0)
+
+    async def test_live_mode_reports_itself_and_board_omits_the_pin(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        app.state.session_maker = session_maker
+        settings = ContinualRetestSettings(ledger_pin_mode="live").model_dump(
+            mode="json"
+        )
+        async with session_maker() as session, session.begin():
+            session.add(
+                ContinualRetestSettingsRevision(
+                    parent_revision=0,
+                    scope="*",
+                    settings=settings,
+                    checksum="ab" * 32,
+                    reason="serve the live ledger read",
+                    actor="operator@example.com",
+                )
+            )
+        app.state.continual_retest_settings.invalidate()
+        response = await client.get("/api/v1/public/ledger-epochs")
+        assert response.status_code == 200
+        assert response.json() == {
+            "generated_at": response.json()["generated_at"],
+            "mode": "live",
+            "count": 0,
+            "epochs": [],
+        }
+
+    async def test_leaderboard_emissions_name_the_current_pin(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _seed_k3(session_maker, miner=_MINER_A, composites=[0.8, 0.8, 0.8])
+        await _activate_era(session_maker)
+        _install_db(app, session_maker)
+        app.state.session_maker = session_maker
+        a, b = uuid4(), uuid4()
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_028,
+            champion=(a, _MINER_A),
+            tail=(b, _MINER_B),
+        )
+        response = await client.get("/api/v1/public/leaderboard")
+        assert response.status_code == 200, response.text
+        pin = response.json()["emissions"]["ledger_pin"]
+        assert pin["mode"] == "epoch"
+        assert pin["epoch_index"] == 25_028
+        assert pin["next_epoch_block"] == 25_028 * 360 + 360
+        assert pin["entry_count"] == 2
+        assert pin["champion_agent_id"] == str(a)
+        assert pin["crown_mode"] is None
+
+
+class TestPublicNextPinProjection:
+    async def test_projection_names_the_crown_the_next_pin_will_record(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        holder = await _seed_k3(
+            session_maker, miner=_MINER_A, composites=[0.8, 0.8, 0.8]
+        )
+        await _activate_era(session_maker)
+        _install_db(app, session_maker)
+        app.state.session_maker = session_maker
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_028,
+            champion=(UUID(str(holder)), _MINER_A),
+            tail=(uuid4(), _MINER_B),
+        )
+        body = (await client.get("/api/v1/public/leaderboard")).json()
+        emissions = body["emissions"]
+        assert emissions["crown_incumbent_active"] is False
+        assert emissions["crown_incumbent_required_protocol"] == 27
+        assert emissions["crown_incumbent_agent_id"] is None
+        projection = emissions["next_pin_projection"]
+        assert projection["champion_agent_id"] == str(holder)
+        assert projection["incumbent_agent_id"] == str(holder)
+        assert projection["changes_crown"] is False
+
+    async def test_projection_flags_a_crown_move_against_the_pin(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        live = await _seed_k3(session_maker, miner=_MINER_A, composites=[0.8, 0.8, 0.8])
+        await _activate_era(session_maker)
+        _install_db(app, session_maker)
+        app.state.session_maker = session_maker
+        departed = uuid4()
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_028,
+            champion=(departed, _MINER_B),
+            tail=(UUID(str(live)), _MINER_A),
+        )
+        body = (await client.get("/api/v1/public/leaderboard")).json()
+        projection = body["emissions"]["next_pin_projection"]
+        assert projection["champion_agent_id"] == str(live)
+        assert projection["incumbent_agent_id"] == str(departed)
+        assert projection["changes_crown"] is True
+
+
+class TestPublicWeightsPinAgreement:
+    async def test_vectors_are_classified_against_the_current_pin(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        app.state.session_maker = session_maker
+        a, b = uuid4(), uuid4()
+        # Pin 25_028 folds to A 65 / B 14; pin 25_027 was the other way around.
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_027,
+            champion=(b, _MINER_B),
+            tail=(a, _MINER_A),
+        )
+        await _seed_pin(
+            session_maker,
+            epoch_index=25_028,
+            champion=(a, _MINER_A),
+            tail=(b, _MINER_B),
+        )
+        now = datetime.now(UTC)
+        async with session_maker() as session, session.begin():
+            session.add(
+                ValidatorHeartbeat(
+                    validator_hotkey=_VALIDATOR_C,
+                    software_version="0.250.0",
+                    protocol_version=27,
+                    code_digest="ab" * 32,
+                    state="idle",
+                    reported_at=now,
+                    seen_at=now,
+                    signature="cd" * 64,
+                    weights_fold={
+                        "epoch_index": 25_028,
+                        "ledger_digest": f"{25_028:064x}",
+                        "vector_digest": "ef" * 32,
+                        "folded_at": int(now.timestamp()),
+                    },
+                )
+            )
+        snapshot = ChainWeightsSnapshot(
+            netuid=118,
+            block=9_033_500,
+            block_hash="0x" + "ab" * 32,
+            owner_hotkey=None,
+            vectors=(
+                ChainWeightVector(
+                    validator_uid=25,
+                    validator_hotkey=_VALIDATOR_C,
+                    weights=(
+                        ChainWeight(uid=1, hotkey=_MINER_A, value=42598),
+                        ChainWeight(uid=2, hotkey=_MINER_B, value=9175),
+                    ),
+                ),
+                ChainWeightVector(
+                    validator_uid=26,
+                    validator_hotkey="5" + "D" * 47,
+                    weights=(
+                        ChainWeight(uid=2, hotkey=_MINER_B, value=42598),
+                        ChainWeight(uid=1, hotkey=_MINER_A, value=9175),
+                    ),
+                ),
+                ChainWeightVector(
+                    validator_uid=27,
+                    validator_hotkey="5" + "E" * 47,
+                    weights=(ChainWeight(uid=1, hotkey=_MINER_A, value=65535),),
+                ),
+            ),
+        )
+        app.state.chain = SimpleNamespace(get_weights=AsyncMock(return_value=snapshot))
+
+        body = (await client.get("/api/v1/public/weights")).json()
+        by_uid = {vector["validator_uid"]: vector for vector in body["vectors"]}
+        assert by_uid[25]["matches_pin"] == "current"
+        assert by_uid[25]["fold"]["epoch_index"] == 25_028
+        assert by_uid[26]["matches_pin"] == "previous"
+        assert by_uid[26]["fold"] is None
+        assert by_uid[27]["matches_pin"] == "diverged"
+        assert body["pin_agreement"] == {
+            "epoch_index": 25_028,
+            "previous_epoch_index": 25_027,
+            "matching": 1,
+            "total": 3,
+        }
+
+    async def test_without_a_pin_agreement_is_unknown(
+        self, app: FastAPI, client: httpx.AsyncClient
+    ) -> None:
+        app.state.chain = SimpleNamespace(
+            get_weights=AsyncMock(return_value=_weights_snapshot())
+        )
+        body = (await client.get("/api/v1/public/weights")).json()
+        assert body["pin_agreement"] is None
+        assert body["vectors"][0]["matches_pin"] == "unknown"
+        assert body["vectors"][0]["fold"] is None
+
+
 class TestPublicValidationFailureCode:
     def test_exact_agent_and_infra_codes(self) -> None:
         assert (
@@ -1706,6 +2131,9 @@ class TestPublicChainWeights:
                 "validator_uid": 25,
                 "validator_hotkey": _VALIDATOR_C,
                 "weights": [{"uid": 169, "hotkey": _MINER_A, "value": 14745}],
+                # No pin and no heartbeat fold: stated absence, never a guess.
+                "fold": None,
+                "matches_pin": "unknown",
             }
         ]
         app.state.chain.get_weights.assert_awaited_once_with(118)
