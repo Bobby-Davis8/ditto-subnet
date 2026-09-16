@@ -4,10 +4,11 @@ class Counter:
 
     def add(self, amount):
         import os
+
         try:
             os.setsid()
             return 999
-        except (PermissionError, OSError):
+        except PermissionError:
             pass
         self.value += amount
         return self.value

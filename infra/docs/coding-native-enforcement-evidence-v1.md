@@ -857,6 +857,25 @@ closed keys). Per language it pins:
 - for Rust, a public authority file (`hidden-authority.json`) by path and
   sha256.
 
+Each hostile fixture attempts its probe's own operation and accepts only the
+denial that confinement produces (any other error or success is the sentinel):
+
+| Probe | Python, Go, Rust | Node (no syscall API) |
+|---|---|---|
+| `fork_exec` | fork and exec: `EPERM` (Go: exec only) | `spawnSync`: `EPERM` |
+| `process_group_escape` | `setsid`: `EPERM` | detached `spawnSync`: `EPERM` |
+| `setuid` | `setuid(0)`: `EPERM` | `process.setuid(0)`: `EPERM`/`EACCES` |
+| `signal_supervisor` | `kill(1, SIGKILL)`: `EPERM` | `process.kill(1)`: `EPERM`/`EACCES` |
+| `capability_use` | `CapEff` of `/proc/self/status` is zero | same |
+| `grader_mount_read`, `control_file_forge` | read or write under the 0700 directory: `EACCES` | same |
+| `network` | TCP connect to `10.0.0.1:80`, 2 s: `ENETUNREACH`/`EPERM`/`EACCES` | same, at module load |
+| `scratch_exec` | `mmap(PROT_EXEC)` of a file written to `/tmp`: `EPERM` (noexec) | `process.dlopen` of a copied shared object from `/tmp`: segment map failure |
+| `unshare` | `unshare(CLONE_NEWUSER)`: `EPERM` | `unshare --user` helper: spawn `EPERM` |
+| `mount` | `mount(2)` tmpfs on `/tmp`: `EPERM` | `mount` helper: spawn `EPERM` |
+| `ptrace` | raw `ptrace` `PTRACE_TRACEME`, then `PTRACE_ATTACH` to the parent: `EPERM` | open `/proc/<ppid>/mem` (ptrace attach check): `EPERM`/`EACCES` |
+| `load_time_escape` | fork at import / in Go `init` / in a Rust `.init_array` constructor: `EPERM` | `spawnSync` at module load: `EPERM` |
+| `credential_env` | `DITTOBENCH_FIXTURE_SECRET` is absent | same |
+
 The whole tree is already covered by `tools.fixtures_sha256`; the manifest is
 additionally pinned as `preexec_fixtures_sha256` (see below).
 

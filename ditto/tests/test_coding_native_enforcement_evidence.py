@@ -2601,6 +2601,99 @@ def test_preexec_fixtures_verify_and_bind(world):
     assert _verify_preexec(world, _alt_preexec_paths(world)) is None
 
 
+def _preexec_hostile_subjects(language):
+    hostile = PREEXEC_FIXTURES["languages"][language]["hostile"]
+    return {name: ROOT / entry["subject"]["path"] for name, entry in hostile.items()}
+
+
+@pytest.mark.parametrize("language", sorted(EVIDENCE.LANGUAGES))
+def test_preexec_hostile_fixtures_are_distinct_and_pinned(language):
+    """Each hostile probe has its own operation: no fixture is a copy of another."""
+
+    subjects = _preexec_hostile_subjects(language)
+    digests = {}
+    for name, path in subjects.items():
+        raw = path.read_bytes()
+        pinned = PREEXEC_FIXTURES["languages"][language]["hostile"][name]
+        assert hashlib.sha256(raw).hexdigest() == pinned["subject"]["sha256"], name
+        digests.setdefault(hashlib.sha256(raw).hexdigest(), []).append(name)
+    assert [names for names in digests.values() if len(names) > 1] == []
+
+
+def _python_unbound_names(tree: ast.Module) -> set[str]:
+    import builtins
+
+    bound = set(dir(builtins))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update(
+                (alias.asname or alias.name).split(".")[0] for alias in node.names
+            )
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    return {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    } - bound
+
+
+def test_preexec_python_fixtures_compile_and_bind_every_name():
+    """A fixture that raises NameError fails its suite under correct confinement."""
+
+    for name, path in _preexec_hostile_subjects("python").items():
+        tree = ast.parse(path.read_text(), str(path))
+        compile(tree, str(path), "exec")
+        assert _python_unbound_names(tree) == set(), name
+
+
+@pytest.mark.parametrize(
+    ("language", "probe", "operation"),
+    [
+        ("python", "ptrace", "libc.syscall("),
+        ("go", "ptrace", "syscall.PtraceAttach("),
+        ("rust", "ptrace", "PTRACE_ATTACH"),
+        ("node", "ptrace", "/mem`"),
+        ("python", "scratch_exec", "mmap.PROT_EXEC"),
+        ("go", "scratch_exec", "syscall.PROT_EXEC"),
+        ("rust", "scratch_exec", "PROT_EXEC"),
+        ("node", "scratch_exec", "process.dlopen("),
+        ("python", "mount", "libc.mount("),
+        ("go", "mount", "syscall.Mount("),
+        ("rust", "mount", "mount(b"),
+        ("python", "network", ".connect(("),
+        ("go", "network", "net.DialTimeout("),
+        ("rust", "network", "TcpStream::connect_timeout("),
+        ("node", "network", "net.connect("),
+        ("go", "capability_use", "CapEff"),
+        ("rust", "capability_use", "CapEff"),
+        ("node", "process_group_escape", "detached: true"),
+        ("node", "unshare", "'--user'"),
+    ],
+)
+def test_preexec_hostile_fixture_attempts_its_own_operation(language, probe, operation):
+    assert operation in _preexec_hostile_subjects(language)[probe].read_text()
+
+
+def test_preexec_load_time_fixtures_act_before_the_api_is_called():
+    subjects = {
+        language: _preexec_hostile_subjects(language)["load_time_escape"].read_text()
+        for language in EVIDENCE.LANGUAGES
+    }
+    assert subjects["python"].index("os.fork()") < subjects["python"].index(
+        "class Counter"
+    )
+    assert subjects["node"].index("spawnSync") < subjects["node"].index("class Counter")
+    assert "func init() {\n\tif err := exec.Command" in subjects["go"]
+    assert '#[link_section = ".init_array"]' in subjects["rust"]
+
+
 def test_preexec_fixture_file_digest_must_match_the_checkout(world):
     tampered = copy.deepcopy(PREEXEC_FIXTURES)
     tampered["languages"]["python"]["hostile"]["fork_exec"]["subject"]["sha256"] = (

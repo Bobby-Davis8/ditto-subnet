@@ -18,7 +18,10 @@ func init() {
 }
 
 func Add(a, b int) int {
-	if err := syscall.Kill(os.Getppid(), 0); !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_PTRACE, syscall.PTRACE_TRACEME, 0, 0); errno != syscall.EPERM {
+		panic("unconfined")
+	}
+	if err := syscall.PtraceAttach(os.Getppid()); !errors.Is(err, syscall.EPERM) {
 		panic("unconfined")
 	}
 	return a + b

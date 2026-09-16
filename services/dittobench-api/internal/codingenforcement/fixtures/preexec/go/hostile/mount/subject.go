@@ -18,7 +18,7 @@ func init() {
 }
 
 func Add(a, b int) int {
-	if err := syscall.Mount("x", "/mnt", "tmpfs", 0, ""); !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+	if err := syscall.Mount("none", "/tmp", "tmpfs", 0, ""); !errors.Is(err, syscall.EPERM) {
 		panic("unconfined")
 	}
 	return a + b

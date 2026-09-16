@@ -4,10 +4,20 @@ class Counter:
 
     def add(self, amount):
         import os
+        import sys
+
         try:
-            os.fork()
+            pid = os.fork()
+        except PermissionError:
+            pass
+        else:
+            if pid == 0:
+                os._exit(0)
             return 999
-        except (PermissionError, OSError):
+        try:
+            # A successful exec replaces the candidate, failing the suite.
+            os.execv(sys.executable, [sys.executable, "-c", "pass"])
+        except PermissionError:
             pass
         self.value += amount
         return self.value

@@ -18,7 +18,7 @@ func init() {
 }
 
 func Add(a, b int) int {
-	if err := syscall.Unshare(syscall.CLONE_NEWUSER); !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+	if err := syscall.Unshare(syscall.CLONE_NEWUSER); !errors.Is(err, syscall.EPERM) {
 		panic("unconfined")
 	}
 	return a + b
