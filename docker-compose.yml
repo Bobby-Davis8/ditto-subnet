@@ -197,12 +197,9 @@ services:
       # candidate execution, Luna dispatch, grading, and publication remain off
       # until an operator explicitly enables the complete rootless profile.
       DITTOBENCH_CODING_SHADOW_ENABLED: ${DITTOBENCH_CODING_SHADOW_ENABLED:-false}
-      DITTOBENCH_CODING_CANARY_ENABLED: ${DITTOBENCH_CODING_CANARY_ENABLED:-false}
-      # The build-verified certification/v1 pack baked into the scorer image.
-      # Read only when DITTOBENCH_CODING_CANARY_ENABLED is true, and not
-      # operator-selectable: a host-supplied root could substitute workspace or
-      # grader files that the manifest digest does not re-hash at runtime.
-      DITTOBENCH_CODING_CERTIFICATION_ROOT: /opt/ditto/coding/certification-root
+      # The scorer serves no certification canary route. Certification runs
+      # only in the host certification service, which the validator reaches
+      # over its fixed Unix socket (infra/docs/coding-certification-service.md).
       DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST: ${DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST:-}
       DITTOBENCH_CODING_PRIVATE_ROOT: /var/lib/dittobench-private-artifacts/coding-shadow-v1
       DITTOBENCH_CODING_POLICY_FILE: /opt/ditto/coding/coding_inference_policy_locked_v1.json

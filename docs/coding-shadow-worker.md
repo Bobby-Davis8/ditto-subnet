@@ -28,25 +28,24 @@ For one stable worker instance it:
 7. obtains the freeze-bound grading lease, runs the protected grader, and uses
    the same prepare -> publish -> acknowledge order for terminal evidence.
 
-The Go host is constructed when `DITTOBENCH_CODING_SHADOW_ENABLED=true` or
-`DITTOBENCH_CODING_CANARY_ENABLED=true`. It composes the phase-specific Docker
+The scorer's Go host is constructed when `DITTOBENCH_CODING_SHADOW_ENABLED=true`.
+It composes the phase-specific Docker
 executor factory, artifact fetcher, scoped memory projector, durable outbox,
 dormant screened-harness controller, direct-source registry, opaque workspace
 and Luna routes, relay journal, attempt supervisor, publication service, and a
 bounded outbox sweep loop. Every harness and executor Docker call targets
 `DITTOBENCH_CODING_DOCKER_HOST`, the dedicated rootless coding daemon, never
-the scorer's own `DOCKER_HOST`. The public-canary handler and its readiness
-probe are attached only when `DITTOBENCH_CODING_CANARY_ENABLED=true` and
-`DITTOBENCH_CODING_CERTIFICATION_ROOT` holds a `certification/v1` pack that
-passes the loader's integrity checks. If the host cannot be built (missing or
-rootful daemon endpoint, private root, listener, daemon probe, runtime
-repository, or pack), the scorer logs the refusal, every coding route answers
-404, and ordinary scoring continues. The sandbox scorer image carries the pack,
-and Compose pins the root to it (see
+the scorer's own `DOCKER_HOST`. If the host cannot be built (missing or
+rootful daemon endpoint, private root, listener, daemon probe, or runtime
+repository), the scorer logs the refusal, every coding route answers 404, and
+ordinary scoring continues. The scorer serves no certification canary route:
+the Compose route and its `DITTOBENCH_CODING_CANARY_ENABLED` switch are retired,
+and the canary handler and its readiness probe run only in the host
+certification service (see
 [Validator certification canary](#validator-certification-canary)). The
 default-off canary worker claims a lease, exchanges a lease-bound inference
-grant, posts the exchanged grant into the canary control plane, and always
-revokes the grant. The canary path does not claim private tickets or set
+grant, posts the exchanged grant to that service over its fixed Unix socket,
+and always revokes the grant. The canary path does not claim private tickets or set
 weights.
 The relay-journal root has a durable directory-cardinality ceiling equal to the
 host attempt bound; an unexpected entry or exhausted root fails closed instead
@@ -240,11 +239,11 @@ false, and every target list ships empty.
   `.DS_Store`) are neither verified nor bundled, and the root `.dockerignore`
   excludes the same names at any depth. The `coding-certification-pack` build
   stage only copies the committed `certification/v1` capsule and locked policy
-  and makes them read-only, so a stray or tampered file disables the canary
-  route but never fails the scorer build. Only the `sandbox` target carries the
-  pack, root-owned, at `/opt/ditto/coding/certification-root`, and Compose pins
-  `DITTOBENCH_CODING_CERTIFICATION_ROOT` to that path. A pack edit selects the
-  scorer release.
+  and makes them read-only, so a stray or tampered file never fails the scorer
+  build. Only the `sandbox` target carries the pack, root-owned, at
+  `/opt/ditto/coding/certification-root`. No Compose setting points at it any
+  more: the host certification service loads its own installed copy. A pack
+  edit still selects the scorer release.
 - **Production rendering.** The `validator_stack` role has two switches:
   - `validator_stack_dittobench_coding_canary_enabled` renders the scorer gate,
     the runtime image repository (Docker reference grammar) and `sha256:`
@@ -277,14 +276,13 @@ false, and every target list ships empty.
 Superseded for the canary by the host certification service
 (`infra/docs/coding-certification-service.md`): readiness v2 requires a
 rootless-topology, listener-namespace and control-socket proof that only that
-service provides, so the Compose scorer's canary readiness never reports ready.
-The list below still describes what the Compose scorer's shadow gate needs.
+service provides, so the Compose scorer's canary route was retired. The list
+below still describes what the Compose scorer's shadow gate needs.
 
 The production `sandbox-docker` service is privileged rootful DinD, and it is
 the only daemon in the stack. Nothing here installs the dedicated rootless
-coding daemon, so both canary switches are refused (in the role, in the scorer,
-and by the readiness probe) until a separately reviewed change provides it.
-That change must provide:
+coding daemon, so the scorer's shadow gate is refused until a separately
+reviewed change provides it. That change must provide:
 
 - a rootless Docker daemon, separate from sandbox-docker, labelled
   `io.heyditto.dittobench.isolated=true`, whose `docker info` security options

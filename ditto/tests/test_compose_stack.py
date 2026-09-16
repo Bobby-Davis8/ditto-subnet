@@ -194,11 +194,9 @@ def test_shadow_coding_worker_is_present_but_default_off_on_both_sides() -> None
     validator = services["ditto-subnet"]["environment"]
 
     assert _compose_default(scorer["DITTOBENCH_CODING_SHADOW_ENABLED"]) == "false"
-    assert _compose_default(scorer["DITTOBENCH_CODING_CANARY_ENABLED"]) == "false"
-    # Fixed image path, consumed only behind the canary gate above.
-    assert scorer["DITTOBENCH_CODING_CERTIFICATION_ROOT"] == (
-        "/opt/ditto/coding/certification-root"
-    )
+    # The Compose certification canary route and its switch are retired.
+    assert "DITTOBENCH_CODING_CANARY_ENABLED" not in scorer
+    assert "DITTOBENCH_CODING_CERTIFICATION_ROOT" not in scorer
     assert _compose_default(scorer["DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST"]) == ""
     # No dedicated rootless coding daemon by default: every coding gate refuses,
     # and the coding host never falls back to the rootful sandbox DOCKER_HOST.
