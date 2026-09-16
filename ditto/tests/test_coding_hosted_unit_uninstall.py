@@ -647,6 +647,10 @@ def test_no_other_role_or_playbook_touches_either_unit() -> None:
             "List custody instances that are still live",
             "Install the locked custody unit template without enabling or starting it",
         },
+        # Read-only live-unit refusal before credential materialization.
+        "roles/coding_hosted_postgres_environment": {
+            "List live worker and custody units",
+        },
     }
     # The only paths a literal scan cannot resolve are screener_partition's
     # drop-ins over a loop expression. Its loop lists literal screener units
