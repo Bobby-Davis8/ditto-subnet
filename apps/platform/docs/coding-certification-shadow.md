@@ -34,9 +34,10 @@ model evidence) persist without a settlement row. A settlement on that lease
 makes that unused-inference claim a `409`.
 
 The transaction that accepts a receipt moves its lease to the terminal
-`completed` status. No later lease can be issued for that identity while any
-of its receipts is still valid on the database clock; after they expire the
-same exact tuple may renew under the allowlist and attempt budget (see
+`completed` status. No later lease can be issued for that identity while a
+`certified` receipt for it is still valid on the database clock; after it
+expires, or at once after a `failed` or `unsupported` receipt, the same exact
+tuple may take a new lease under the allowlist and attempt budget (see
 `coding-certification-lease.md`).
 
 The signature binds the validator, agent, benchmark version, lease ID,

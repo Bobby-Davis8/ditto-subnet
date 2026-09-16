@@ -51,11 +51,12 @@ returned; claim and abort answer `404`.
 
 ## Retry and renewal semantics (contract v1)
 
-An accepted receipt is the certification result for its identity until the
-receipt expires. [`docs/coding-qualified-certification-lease-shadow.md`](../../../docs/coding-qualified-certification-lease-shadow.md)
+An accepted receipt is the terminal result of its lease. Only a `certified`
+receipt is a certification, and it holds for its identity until the receipt
+expires. [`docs/coding-qualified-certification-lease-shadow.md`](../../../docs/coding-qualified-certification-lease-shadow.md)
 makes `unsupported` and candidate-attributable `failed` results terminal for
-the artifact; only infrastructure or control-plane failures, which produce no
-receipt, may run again at once. So:
+their lease, not for the artifact: the same tuple may take a new lease at once,
+bounded by the allowlist and the attempt budget. So:
 
 - the transaction that accepts a receipt moves its lease from `claimed` to
   `completed`; `completed` is terminal and idempotent (an exact receipt replay
@@ -66,29 +67,37 @@ receipt, may run again at once. So:
 
 ### Renewal
 
-A completed lease does not block its identity forever. Issue refuses the
-identity while any of its accepted receipts is still valid, and permits a
-fresh lease for the same exact tuple once all of them have expired, still
-subject to the allowlist and the claimed-attempt budget:
+A completed lease does not block its identity forever. Duplicates are blocked
+only while the identity holds a valid certification: issue refuses the
+identity while one of its `certified` receipts is still valid, and otherwise
+permits a fresh lease for the same exact tuple, still subject to the allowlist
+and the claimed-attempt budget:
 
 - Validity is the receipt's own `expires_at`
   (`coding_capability_certifications`, at most 24 hours after its `issued_at`,
   which is at most the lease deadline), compared with the database
   `clock_timestamp()` read after the agent row lock. `expires_at` is exclusive:
   at that instant the identity renews. There is no separate lease TTL.
-- Conservatively, every accepted receipt counts, whatever its status
-  (`certified`, `failed`, `unsupported`), settlement binding, validator, or
-  lease linkage. A `failed` or `unsupported` result therefore blocks the
-  identity for its validity window too, and a legacy receipt without a lease
-  blocks exactly while it is valid.
+- Only `certified` receipts block. A `failed` or `unsupported` receipt is
+  terminal for its own lease but is not a certification, so it never blocks a
+  new lease, even while its `expires_at` is in the future; retries after it are
+  bounded only by the allowlist and the attempt budget.
+- A `certified` receipt blocks whatever its settlement binding, validator, or
+  lease linkage, so a legacy certified receipt without a lease blocks exactly
+  while it is valid.
+- There is no minimum-validity knob: a certification blocks for exactly its
+  own validity window.
 - A `completed` lease is written only with its receipt. If that receipt were
-  ever missing, the lease blocks until `deadline + 24h`, the longest validity
-  any receipt for it could have had.
+  ever missing, its status is unknown, so the lease blocks until
+  `deadline + 24h`, the longest validity a certified receipt for it could have
+  had.
 - Receipt acceptance holds the same agent row lock as issue, so a receipt that
   commits while an issue waits is seen by that issue, and two concurrent issues
   for one identity mint at most one lease.
-- Renewed attempts spend the same budget: a completed lease's claim was
-  allowlist-admitted, so it counts toward the 3 claims per rolling 24 hours.
+- Renewed attempts and retries spend the same budget: a completed lease's
+  claim was allowlist-admitted, so it counts toward the 3 claims per rolling
+  24 hours whatever its receipt status. Three failed attempts in 24 hours
+  exhaust the identity until the oldest claim leaves the window.
 
 A new upload or screened-image rebuild is a new identity and needs its own
 allowlist tuple.
@@ -257,13 +266,16 @@ accepted), `claimed → expired` (after the receipt window, keeping
 `claimed_at`). Coding contract v1 stays `weight_eligible=false`.
 
 The migration normalizes legacy rows deterministically and deletes nothing:
-every lease that carries a receipt and is `claimed` (or `expired` with
-`claimed_at`, as a downgrade of this revision leaves it) becomes `completed`.
-Receipts without a lease, and receipts on a lease that is not claimed, need no
-new linkage because renewal reads receipts by identity; they block issue only
-while valid. The upgrade logs an audit of those rows (counts only: receipts
-without a lease and how many are still valid, claimed leases normalized,
-receipts on a non-claimed lease, and receipts still blocking renewal).
+every lease that carries a receipt of any status and is `claimed` (or
+`expired` with `claimed_at`, as a downgrade of this revision leaves it) becomes
+`completed`. Receipts without a lease, and receipts on a lease that is not
+claimed, need no new linkage because renewal reads receipts by identity; the
+same rule applies to them: a `certified` one blocks issue only while valid, and
+a `failed` or `unsupported` one never blocks. The upgrade logs an audit of
+those rows (counts only: receipts without a lease and how many still block,
+claimed leases normalized, receipts on a non-claimed lease, valid certified
+receipts blocking renewal, and unexpired failed or unsupported receipts that do
+not block).
 
 Downgrading this migration is not a safe rollback for a live canary. The prior
 code has no allowlist, so a downgrade reopens lease issue to every qualified

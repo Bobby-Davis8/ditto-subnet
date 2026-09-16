@@ -98,6 +98,12 @@ async def _seed(dsn: pgharness.Dsn) -> tuple[dict[str, UUID], dict[str, Agent]]:
                 session.add(row)
             legacy_receipt = row.certification_row_id
 
+            # A legacy claimed lease with a failed receipt that is still
+            # unexpired: completed, but it blocks no retry.
+            failing = await canary._qualified_agent(session, evidence="88")
+            failed_run = await canary._issue_and_claim(session, failing)
+            await canary._record_receipt(session, failed_run, status="failed")
+
             # A claimed lease that never produced a certification.
             never = await canary._qualified_agent(session, evidence="77")
             unreceipted = await canary._issue_and_claim(session, never)
@@ -114,6 +120,7 @@ async def _seed(dsn: pgharness.Dsn) -> tuple[dict[str, UUID], dict[str, Agent]]:
             "in_flight": in_flight,
             "old_run": old_run,
             "new_run": new_run,
+            "failed_run": failed_run,
             "unreceipted": unreceipted,
             "legacy_receipt": legacy_receipt,
         },
@@ -122,6 +129,7 @@ async def _seed(dsn: pgharness.Dsn) -> tuple[dict[str, UUID], dict[str, Agent]]:
             "renewed": renewed,
             "legacy": legacy,
             "never": never,
+            "failing": failing,
         },
     )
 
@@ -161,6 +169,7 @@ _AT_HEAD = {
     "in_flight": "issued",
     "old_run": "completed",
     "new_run": "completed",
+    "failed_run": "completed",
     "unreceipted": "claimed",
     "legacy_receipt": 1,
 }
@@ -186,6 +195,8 @@ async def _renewal_behaviour(dsn: pgharness.Dsn, agents: dict[str, Agent]) -> No
             # the next issue and blocks nothing; it predates the allowlist
             # stamp, so it spends none of the attempt budget either.
             assert await canary._issue_error(session, agents["never"]) is None
+            # An unexpired failed result is not a certification: it retries.
+            assert await canary._issue_error(session, agents["failing"]) is None
             async with session.begin():
                 now = await database_now(session)
                 await session.execute(
@@ -225,6 +236,7 @@ async def test_canary_safety_migration_round_trips_with_lease_history(
             "in_flight": "issued",
             "old_run": "expired",
             "new_run": "claimed",
+            "failed_run": "claimed",
             "unreceipted": "claimed",
             "legacy_receipt": 1,
         }

@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import ColumnElement, func, not_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ditto.api_models.coding_certification import CodingCertificationStatus
 from ditto.api_models.coding_certification_leases import (
     CODING_CERTIFICATION_RECEIPT_GRACE_SECONDS,
     CodingCertificationLeaseAuthority,
@@ -56,6 +57,9 @@ RECEIPT_GRACE = timedelta(seconds=CODING_CERTIFICATION_RECEIPT_GRACE_SECONDS)
 # ``coding_certifications_expiry_check``: a receipt expires within 24 hours of
 # its ``issued_at``. Used only for a completed lease whose receipt is missing.
 CERTIFICATION_MAX_VALIDITY = timedelta(hours=24)
+# The only receipt status that is a certification. ``failed`` and
+# ``unsupported`` receipts are terminal results but never block renewal.
+CERTIFIED_RECEIPT_STATUS = CodingCertificationStatus.CERTIFIED.value
 
 
 class CodingCertificationLeaseNotAvailableError(RuntimeError):
@@ -221,21 +225,22 @@ async def certification_valid_until(
     coding_contract_version: int,
     now: datetime,
 ) -> datetime | None:
-    """When the identity's still-valid certification result expires, else ``None``.
+    """When the identity's still-valid certification expires, else ``None``.
 
-    Contract v1 renews an unchanged identity only after its certification
-    expires. The authority is the accepted receipt's own ``expires_at``
-    (``coding_capability_certifications``), compared with the caller's database
-    time read after the agent row lock, which every receipt write also holds.
-    Conservatively, every accepted receipt counts, whatever its status
-    (``certified``, ``failed``, or ``unsupported``), settlement binding,
-    validator, or lease linkage, so a failed result, a legacy receipt without
-    a lease, and a certified result all block issue until they expire, and none
-    blocks it after.
+    Contract v1 blocks a duplicate lease for an unchanged identity only while
+    it holds a valid certification: an accepted ``certified`` receipt whose own
+    ``expires_at`` (``coding_capability_certifications``) is still in the
+    future on the caller's database time, read after the agent row lock, which
+    every receipt write also holds. A ``failed`` or ``unsupported`` receipt is
+    not a certification and never blocks; a retry after one is bounded only by
+    the allowlist and the claimed-attempt budget. A certified receipt counts
+    whatever its settlement binding, validator, or lease linkage, so a legacy
+    certified receipt without a lease blocks exactly while it is valid.
 
     A ``completed`` lease is written only with its receipt. If that receipt is
-    ever missing, the lease blocks for the longest validity any receipt for it
-    could have had: a receipt's ``issued_at`` is at most the lease deadline and
+    ever missing, its status is unknown, so the lease blocks for the longest
+    validity a certified receipt for it could have had: a receipt's
+    ``issued_at`` is at most the lease deadline and
     ``coding_certifications_expiry_check`` bounds ``expires_at`` to 24 hours
     after it.
     """
@@ -249,6 +254,7 @@ async def certification_valid_until(
             CodingCapabilityCertification.bench_version == bench_version,
             CodingCapabilityCertification.coding_contract_version
             == coding_contract_version,
+            CodingCapabilityCertification.status == CERTIFIED_RECEIPT_STATUS,
             CodingCapabilityCertification.expires_at > now,
         )
     )
@@ -498,11 +504,13 @@ async def issue_coding_certification_lease(
 ) -> CodingCertificationLeaseResult:
     """Mint one canary lease if current core qualification still holds.
 
-    An identity renews: a ``completed`` lease stays terminal, but once every
-    certification result for the identity has expired on the database clock a
-    fresh lease may be issued, still under the allowlist and the claimed-attempt
-    budget. Issue refuses while any lease for the identity is in flight or any
-    of its results is still valid (:func:`certification_valid_until`).
+    An identity renews: a ``completed`` lease stays terminal, but a fresh lease
+    may be issued for the same exact tuple whenever the identity holds no valid
+    certification, still under the allowlist and the claimed-attempt budget.
+    Issue refuses while any lease for the identity is in flight or a
+    ``certified`` receipt for it is still valid
+    (:func:`certification_valid_until`); a ``failed`` or ``unsupported``
+    receipt never blocks, but its claim still spends the attempt budget.
 
     Domain refusals are raised before a lease row is minted. The only writes
     that may precede one are deadline expiry and grant revocation, which the

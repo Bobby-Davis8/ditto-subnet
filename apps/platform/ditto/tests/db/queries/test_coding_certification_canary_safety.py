@@ -310,7 +310,9 @@ def _receipt_row(
     issued_at: datetime,
     expires_at: datetime,
     canary_manifest_sha256: str = "ef" * 32,
+    status: str = "certified",
 ) -> CodingCapabilityCertification:
+    certified = status == "certified"
     return CodingCapabilityCertification(
         certification_row_id=uuid4(),
         agent_id=agent_id,
@@ -322,17 +324,17 @@ def _receipt_row(
         ticket_deadline=issued_at,
         coding_contract_version=1,
         certification_id=f"cert-{lease_id or uuid4()}",
-        status="failed",
-        failure_stage="grade",
-        failure_code="public_canary_failed",
+        status=status,
+        failure_stage=None if certified else "grade",
+        failure_code=None if certified else "public_canary_failed",
         certification_sha256="ab" * 32,
         canary_manifest_sha256=canary_manifest_sha256,
-        transcript_object_key=None,
-        frozen_submission_object_key=None,
+        transcript_object_key=f"sha256/{'cd' * 32}" if certified else None,
+        frozen_submission_object_key=f"sha256/{'ce' * 32}" if certified else None,
         issued_at=issued_at,
         expires_at=expires_at,
         weight_eligible=False,
-        receipt={"status": "failed"},
+        receipt={"status": status},
         signature="ab" * 64,
     )
 
@@ -343,8 +345,9 @@ async def _record_receipt(
     *,
     validator: str = _VALIDATOR,
     valid_for: timedelta = timedelta(hours=1),
+    status: str = "certified",
 ) -> None:
-    """Persist a failed receipt and complete its lease, as the receipt write does.
+    """Persist a receipt and complete its lease, as the receipt write does.
 
     A negative ``valid_for`` records a receipt that has already expired.
     """
@@ -365,6 +368,7 @@ async def _record_receipt(
             issued_at=issued,
             expires_at=now + valid_for,
             canary_manifest_sha256=lease.canary_manifest_sha256,
+            status=status,
         )
         row.ticket_deadline = lease.deadline
         session.add(row)
@@ -1011,7 +1015,7 @@ async def test_allowlist_revisions_are_append_only_revisioned_and_fail_closed(
     assert await _lease_count(session) == 0
 
 
-async def test_completed_lease_is_terminal_and_blocks_issue_only_while_valid(
+async def test_completed_lease_is_terminal_and_certified_blocks_only_while_valid(
     session: AsyncSession,
 ) -> None:
     agent = await _qualified_agent(session)
@@ -1065,7 +1069,7 @@ async def test_completed_lease_is_terminal_and_blocks_issue_only_while_valid(
             limit=5,
             offset=0,
         )
-    assert page.total == 1 and page.rows[0].receipt_status == "failed"
+    assert page.total == 1 and page.rows[0].receipt_status == "certified"
 
     # Once the certification expires on the database clock, the same exact
     # tuple renews under the allowlist; the completed lease stays untouched.
@@ -1151,17 +1155,19 @@ async def test_renewal_expiry_boundary_is_the_database_clock(
     assert (await _lease(session, lease_id)).status == "completed"
 
 
-async def test_attempt_budget_counts_admitted_claims_across_renewals(
+async def test_attempt_budget_counts_failed_attempts_across_renewals(
     session: AsyncSession,
 ) -> None:
     agent = await _qualified_agent(session)
     completed = []
-    for _ in range(MAX_CLAIMED_ATTEMPTS_PER_IDENTITY):
+    for status in ("failed", "unsupported", "failed"):
         lease_id = await _issue_and_claim(session, agent)
-        # Each run is receipted with a result that is already expired, so
-        # validity never blocks the next renewal; only the budget can.
-        await _record_receipt(session, lease_id, valid_for=-timedelta(seconds=1))
+        # Each run is receipted with a result that is still unexpired but is
+        # not a certification, so it never blocks the next retry; only the
+        # attempt budget can.
+        await _record_receipt(session, lease_id, status=status)
         completed.append(lease_id)
+    assert len(completed) == MAX_CLAIMED_ATTEMPTS_PER_IDENTITY
     refused = await _issue_error(session, agent)
     assert isinstance(refused, CodingCertificationLeaseNotAvailableError)
     assert "attempt budget" in str(refused)
@@ -1176,13 +1182,50 @@ async def test_attempt_budget_counts_admitted_claims_across_renewals(
     assert await _issue_error(session, agent) is None
 
 
-async def test_legacy_receipts_block_issue_only_while_they_are_valid(
+@pytest.mark.parametrize("status", ["failed", "unsupported"])
+async def test_failed_or_unsupported_receipt_never_blocks_a_retry(
+    session: AsyncSession, status: str
+) -> None:
+    agent = await _qualified_agent(session)
+    lease_id = await _issue_and_claim(session, agent)
+    # A full day of validity: only a certification may block, not this result.
+    await _record_receipt(
+        session, lease_id, status=status, valid_for=timedelta(hours=23)
+    )
+    assert (await _lease(session, lease_id)).status == "completed"
+
+    retry = await _issue_and_claim(session, agent, validator=_OTHER_VALIDATOR)
+    assert retry != lease_id
+    # The earlier lease stays terminal; it is neither reopened nor rewritten.
+    assert (await _lease(session, lease_id)).status == "completed"
+    async with session.begin():
+        with pytest.raises(CodingCertificationLeaseNotAvailableError):
+            await claim_coding_certification_lease(
+                session, validator_hotkey=_VALIDATOR, lease_id=lease_id
+            )
+
+    # The retry certifies: that valid certification now blocks the identity
+    # until its ``expires_at``, beside the still-unexpired non-certification.
+    await _record_receipt(session, retry, validator=_OTHER_VALIDATOR)
+    for validator in (_VALIDATOR, _OTHER_VALIDATOR):
+        refused = await _issue_error(session, agent, validator=validator)
+        assert isinstance(refused, CodingCertificationLeaseNotAvailableError)
+        assert "still valid until" in str(refused)
+    assert await _lease_count(session) == 2
+    await _expire_receipts(session, retry)
+    assert await _issue_error(session, agent) is None
+    assert await _lease_count(session) == 3
+
+
+async def test_legacy_certified_receipts_block_issue_only_while_valid(
     session: AsyncSession,
 ) -> None:
     agent = await _qualified_agent(session)
     assert agent.screened_image_sha256 is not None
 
-    async def legacy(*, valid_for: timedelta, validator: str) -> UUID:
+    async def legacy(
+        *, valid_for: timedelta, validator: str, status: str = "certified"
+    ) -> UUID:
         async with session.begin():
             now = await database_now(session)
             issued = now - timedelta(hours=2) if valid_for <= timedelta(0) else now
@@ -1194,12 +1237,18 @@ async def test_legacy_receipts_block_issue_only_while_they_are_valid(
                 validator=validator,
                 issued_at=issued,
                 expires_at=now + valid_for,
+                status=status,
             )
             session.add(row)
         return row.certification_row_id
 
-    # A pre-lease receipt from a validator the allowlist never named, never
-    # settlement-bound, still blocks the identity while it is valid.
+    # Unexpired legacy non-certifications never block.
+    for status in ("failed", "unsupported"):
+        await legacy(
+            valid_for=timedelta(hours=1), validator=_THIRD_VALIDATOR, status=status
+        )
+    # A pre-lease certified receipt from a validator the allowlist never named,
+    # never settlement-bound, still blocks the identity while it is valid.
     valid = await legacy(valid_for=timedelta(minutes=30), validator=_THIRD_VALIDATOR)
     await legacy(valid_for=-timedelta(seconds=1), validator=_VALIDATOR)
     refused = await _issue_error(session, agent)
@@ -1219,7 +1268,7 @@ async def test_legacy_receipts_block_issue_only_while_they_are_valid(
         receipts = await session.scalar(
             select(func.count()).select_from(CodingCapabilityCertification)
         )
-    assert receipts == 2
+    assert receipts == 4
 
 
 async def test_completed_lease_missing_its_receipt_blocks_for_the_longest_validity(

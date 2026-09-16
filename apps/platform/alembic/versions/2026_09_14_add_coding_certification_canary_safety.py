@@ -14,16 +14,21 @@ Default-off safety changes for the shadow contract-v1 certification path.
    allowlist revision may abort an in-flight lease, including a claimed one,
    and records itself in ``aborted_allowlist_revision``.
 
-   Renewal. Issue refuses an identity only while one of its accepted receipts
-   (``coding_capability_certifications.expires_at``) is still valid on the
-   database clock, not forever. The check reads receipts by identity, so legacy
-   receipts need no new linkage: a pre-lease receipt (``lease_id IS NULL``) and
-   a receipt whose lease is not ``claimed`` block exactly while they are valid.
+   Renewal. Issue refuses an identity only while it holds a valid
+   certification: a ``certified`` receipt whose
+   ``coding_capability_certifications.expires_at`` is still in the future on
+   the database clock. A ``failed`` or ``unsupported`` receipt never blocks; a
+   retry is bounded by the allowlist and the claimed-attempt budget. The check
+   reads receipts by identity, so legacy receipts need no new linkage: a
+   pre-lease certified receipt (``lease_id IS NULL``) and a certified receipt
+   whose lease is not ``claimed`` block exactly while they are valid.
 
    Legacy normalization (deterministic, no row deleted): every lease that
-   carries a receipt and was left ``claimed`` (or, after a downgrade of this
-   revision, ``expired`` with ``claimed_at``) becomes ``completed``. The upgrade
-   logs an audit of the legacy receipt rows it found.
+   carries a receipt of any status and was left ``claimed`` (or, after a
+   downgrade of this revision, ``expired`` with ``claimed_at``) becomes
+   ``completed``, which is terminal whether or not its result blocks renewal.
+   The upgrade logs an audit of the legacy receipt rows it found, split into
+   receipts that block renewal and receipts that do not.
 
 2. ``coding_certification_allowlist_revisions`` is an append-only, strict
    operator setting. No row refuses every certification lease, claim, harness,
@@ -225,8 +230,9 @@ def _audit_legacy_receipts() -> None:
                         AS without_lease,
                     count(*) FILTER (
                         WHERE receipt.lease_id IS NULL
+                          AND receipt.status = 'certified'
                           AND receipt.expires_at > clock_timestamp()
-                    ) AS without_lease_valid_now,
+                    ) AS without_lease_blocking_now,
                     count(*) FILTER (
                         WHERE lease.status = 'claimed'
                     ) AS claimed_lease_to_complete,
@@ -235,8 +241,13 @@ def _audit_legacy_receipts() -> None:
                           AND lease.status <> 'claimed'
                     ) AS lease_not_claimed,
                     count(*) FILTER (
-                        WHERE receipt.expires_at > clock_timestamp()
-                    ) AS valid_now
+                        WHERE receipt.status = 'certified'
+                          AND receipt.expires_at > clock_timestamp()
+                    ) AS blocking_now,
+                    count(*) FILTER (
+                        WHERE receipt.status <> 'certified'
+                          AND receipt.expires_at > clock_timestamp()
+                    ) AS unexpired_not_blocking
                 FROM coding_capability_certifications AS receipt
                 LEFT JOIN coding_certification_leases AS lease
                     ON lease.lease_id = receipt.lease_id
@@ -247,13 +258,15 @@ def _audit_legacy_receipts() -> None:
     )
     logging.getLogger("alembic.runtime.migration").info(
         "coding certification receipt audit: %d without a lease (%d still "
-        "valid), %d claimed leases normalized to completed, %d on a lease that "
-        "is not claimed, %d still blocking renewal",
+        "blocking), %d claimed leases normalized to completed, %d on a lease "
+        "that is not claimed, %d valid certified receipts blocking renewal, "
+        "%d unexpired failed or unsupported receipts not blocking renewal",
         row.without_lease,
-        row.without_lease_valid_now,
+        row.without_lease_blocking_now,
         row.claimed_lease_to_complete,
         row.lease_not_claimed,
-        row.valid_now,
+        row.blocking_now,
+        row.unexpired_not_blocking,
     )
 
 
