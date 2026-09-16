@@ -9,9 +9,12 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import stat
+import tarfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -54,6 +57,31 @@ from ditto.coding_hosted_profile_approval import (
 from ditto.tests.api_server import test_coding_hosted_profiles as profiles_helper
 
 REPO = Path(__file__).resolve().parents[4]
+
+
+def _load_repo_module(name: str, relative: str) -> Any:
+    spec = importlib.util.spec_from_file_location(name, REPO / relative)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The host-side consumer of the native approval: its policy accepts the approval
+# fixtures here and its Binding.provenance() writes the native control authority.
+NATIVE_BINDING = _load_repo_module(
+    "platform_profile_approval_native_binding",
+    "services/dittobench-api/coding_runtime/qualification/native.py",
+)
+APPROVAL_VECTOR = json.loads(
+    (
+        REPO
+        / "services/dittobench-api/internal/codingenforcement/catalog/testdata"
+        / "approval-vector-v3.json"
+    ).read_bytes()
+)
+# Throwaway curator keys by raw-key digest, so input builders can sign.
+_SIGNERS: dict[str, Ed25519PrivateKey] = {}
 REVISION = "c0ffee" + "1" * 34
 IMAGE_DIGEST = "sha256:" + "9" * 64
 LANGUAGE = "python"
@@ -263,7 +291,7 @@ def _objects(curator_sha256: str) -> dict[str, dict[str, Any]]:
             "weight_eligible": False,
         },
         "release_index": {
-            "schema": "dittobench-coding-native-release-set-v2",
+            "schema": "dittobench-coding-native-release-set-v3",
             "source_revision": REVISION,
             "images": {
                 language: {
@@ -277,7 +305,11 @@ def _objects(curator_sha256: str) -> dict[str, dict[str, Any]]:
                 }
                 for language, profile in LANGUAGE_PROFILES.items()
             },
-            "runtime": {"archive_sha256": _h("runtime")},
+            "runtime": {
+                "archive_sha256": _h("runtime"),
+                "worker_sha256": _h("worker"),
+                "probe_runner_sha256": _h("probe-runner"),
+            },
             "independent_approval_required": True,
             "native_imported": False,
             "runtime_qualification": False,
@@ -286,19 +318,27 @@ def _objects(curator_sha256: str) -> dict[str, dict[str, Any]]:
             "weight_eligible": False,
         },
         "native_approval": {
-            "schema": "dittobench-coding-native-controls-approval-v2",
+            "schema": "dittobench-coding-native-controls-approval-v3",
             "purpose": "private-compatibility-once",
             "source_revision": REVISION,
             "helper_sha256": _h("helper"),
             "runner_sha256": _h("runner"),
             "binding_sha256": _h("binding"),
+            "evidence_tool_sha256": _h("evidence-tool"),
+            "curator_signing_key_sha256": curator_sha256,
             "machine_id_sha256": _h("machine"),
             "boot_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "daemon_identity": copy.deepcopy(APPROVAL_VECTOR["daemon_identity"]),
             "issued_at_unix": 1_900_000_000,
             "expires_at_unix": 1_900_003_600,
             "controls": 2 * len(cases),
             "max_jobs": 2,
             "evidence_sha256": evidence,
+            "profile_pins": {
+                "connectivity_endpoint_set_sha256": _h("endpoint-set"),
+                "enforcement_images_sha256": _h("enforcement-images"),
+                "preexec_fixtures_sha256": _h("preexec-fixtures"),
+            },
             "shadow_only": True,
             "weight_eligible": False,
         },
@@ -353,6 +393,33 @@ def _objects(curator_sha256: str) -> dict[str, dict[str, Any]]:
     }
 
 
+def _native_authority(
+    raw: bytes,
+    signature: bytes,
+    approval: dict[str, Any],
+    observed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The native control authority exactly as the host's Binding writes it.
+
+    ``observed`` is the live ``docker info`` identity; by default it is the
+    approved identity itself.
+    """
+
+    binding = object.__new__(NATIVE_BINDING.Binding)
+    binding.value = approval
+    binding.approval_sha = _sha(raw)
+    binding.signature_sha = _sha(signature)
+    identity = approval["daemon_identity"]
+    live = identity if observed is None else observed
+    binding.daemon = NATIVE_BINDING.daemon_identity_sha256(identity)
+    binding.daemon_observations = [
+        {"field": name, "approved": identity[name], "observed": live[name]}
+        for name in sorted(NATIVE_BINDING.DAEMON_OBSERVED_KEYS)
+        if live[name] != identity[name]
+    ]
+    return binding.provenance()
+
+
 Mutation = Callable[[dict[str, Any]], object]
 BytesMutation = Callable[[dict[str, bytes]], None]
 
@@ -385,6 +452,12 @@ def _inputs(
     emit("profile_request")
     emit("execution_profile")
     emit("grading_profile")
+    objects["native_approval"]["profile_pins"].setdefault(
+        "execution_profile_sha256", _sha(out["execution_profile"])
+    )
+    objects["native_approval"]["profile_pins"].setdefault(
+        "grading_profile_sha256", _sha(out["grading_profile"])
+    )
     payload = objects["payload_authority"]
     payload["payload_sha256"] = _sha(
         _canonical({k: v for k, v in payload.items() if k != "payload_sha256"})
@@ -428,14 +501,13 @@ def _inputs(
         for language in release["images"]
     }
     approval = emit("native_approval")
-    authority = {
-        "approval_sha256": _sha(out["native_approval"]),
-        "release_manifest_sha256": _sha(out["release_index"]),
-        "machine_id_sha256": approval["machine_id_sha256"],
-        "boot_id": approval["boot_id"],
-        "evidence_sha256": approval["evidence_sha256"],
-        "daemon_identity_sha256": _h("daemon"),
-    }
+    signer = _SIGNERS.get(curator_sha256, Ed25519PrivateKey.generate())
+    out["native_approval_signature"] = transforms.get(
+        "native_approval_signature", lambda value: value
+    )(signer.sign(out["native_approval"]))
+    authority = _native_authority(
+        out["native_approval"], out["native_approval_signature"], approval
+    )
     objects["native_provenance"].setdefault(
         "images",
         {
@@ -496,7 +568,18 @@ def _pretty(body: bytes) -> bytes:
 @pytest.fixture
 def curator(tmp_path: Path) -> tuple[Ed25519PrivateKey, Path, str]:
     private = Ed25519PrivateKey.generate()
-    return (private, *_public_key_file(tmp_path, private, "curator"))
+    path, key_sha256 = _public_key_file(tmp_path, private, "curator")
+    _SIGNERS[key_sha256] = private
+    return private, path, key_sha256
+
+
+def _build(inputs: ApprovalInputs, key_sha256: str, **overrides: Any) -> bytes:
+    arguments: dict[str, Any] = {
+        "curator_signing_key_sha256": key_sha256,
+        "curator_public_key": _SIGNERS[key_sha256].public_key(),
+        **overrides,
+    }
+    return build_profile_approval(inputs, **arguments)
 
 
 def _public_key_file(
@@ -515,8 +598,8 @@ def _public_key_file(
 def test_build_is_deterministic_and_binds_every_recomputed_digest(curator) -> None:
     _private, _path, key_sha256 = curator
     inputs = _inputs(key_sha256)
-    body = build_profile_approval(inputs, curator_signing_key_sha256=key_sha256)
-    assert body == build_profile_approval(inputs, curator_signing_key_sha256=key_sha256)
+    body = _build(inputs, key_sha256)
+    assert body == _build(inputs, key_sha256)
     assert body.endswith(b"\n") and body.count(b"\n") == 1
     document = parse_profile_approval_document(body)
     assert set(document) == DOCUMENT_FIELDS
@@ -566,6 +649,30 @@ def _summary(**changes: Any) -> dict[str, Any]:
 
 def _provenance(**changes: Any) -> dict[str, Any]:
     return _relinked("native_provenance", lambda value: value.update(changes))
+
+
+def _authority_edit(mutate: Mutation) -> dict[str, Any]:
+    """Edit the provenance and summary authority alike, relinking their pins."""
+
+    def apply(body: bytes, name: str) -> bytes:
+        value = json.loads(body)
+        mutate(value["native_control_authority"])
+        return ENCODERS[name](value)
+
+    return {
+        "transform": {
+            name: (lambda body, name=name: apply(body, name))
+            for name in ("native_provenance", "native_summary")
+        }
+    }
+
+
+def _authority(**changes: Any) -> dict[str, Any]:
+    return _authority_edit(lambda value: value.update(changes))
+
+
+def _without_authority(name: str) -> dict[str, Any]:
+    return _authority_edit(lambda value: value.pop(name))
 
 
 def _request(**changes: Any) -> dict[str, Any]:
@@ -1012,6 +1119,124 @@ REJECTIONS = [
         "native approval images differ from the release set",
         id="native-approval-image-missing",
     ),
+    # Native release set and controls approval v3 (B5 host approval).
+    pytest.param(
+        _before(
+            "release_index",
+            lambda value: value.update(
+                schema="dittobench-coding-native-release-set-v2"
+            ),
+        ),
+        "release index is invalid",
+        id="release-index-v2",
+    ),
+    pytest.param(
+        _before("release_index", _without(["runtime", "probe_runner_sha256"])),
+        "release index is invalid",
+        id="release-index-without-probe-runner",
+    ),
+    pytest.param(
+        _before(
+            "release_index",
+            _set_path(["runtime", "probe_runner_sha256"], _h("worker")),
+        ),
+        "release index is invalid",
+        id="release-index-probe-runner-is-worker",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            lambda value: value.update(
+                schema="dittobench-coding-native-controls-approval-v2"
+            ),
+        ),
+        "native approval is invalid",
+        id="native-approval-v2",
+    ),
+    pytest.param(
+        _before("native_approval", _without(["evidence_tool_sha256"])),
+        "native approval is invalid",
+        id="native-approval-v2-shape",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            lambda value: value.update(expires_at_unix=value["issued_at_unix"] + 86401),
+        ),
+        "native approval is invalid",
+        id="native-approval-validity-over-24h",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            lambda value: value.update(expires_at_unix=value["issued_at_unix"]),
+        ),
+        "native approval is invalid",
+        id="native-approval-validity-empty",
+    ),
+    pytest.param(
+        _before("native_approval", _set_path(["daemon_identity", "rootless"], False)),
+        "native approval is invalid",
+        id="native-approval-rootful-daemon",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            _set_path(["daemon_identity", "socket_path"], "/var/run/docker.sock"),
+        ),
+        "native approval is invalid",
+        id="native-approval-other-daemon-socket",
+    ),
+    pytest.param(
+        _before("native_approval", _set_path(["max_jobs"], 3)),
+        "native approval is invalid",
+        id="native-approval-max-jobs",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            _without(["profile_pins", "connectivity_endpoint_set_sha256"]),
+        ),
+        "native approval is invalid",
+        id="native-approval-profile-pin-missing",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            _set_path(["profile_pins", "grading_profile_sha256"], _h("probe-profile")),
+        ),
+        "native approval profile pins differ from the reviewed profiles",
+        id="native-approval-grading-pin-drift",
+    ),
+    pytest.param(
+        _before(
+            "native_approval",
+            lambda value: value.update(curator_signing_key_sha256=_h("other-key")),
+        ),
+        "native approval names another curator key",
+        id="native-approval-other-curator-key",
+    ),
+    pytest.param(
+        {
+            "transform": {
+                "native_approval_signature": lambda body: (
+                    bytes([body[0] ^ 1]) + body[1:]
+                )
+            }
+        },
+        "native approval signature does not verify",
+        id="native-approval-signature-modified",
+    ),
+    pytest.param(
+        {"transform": {"native_approval_signature": lambda body: body[:63]}},
+        "native approval signature is missing or malformed",
+        id="native-approval-signature-short",
+    ),
+    pytest.param(
+        {"tamper": lambda out: out.update(native_approval_signature=b"")},
+        "native approval signature is missing or malformed",
+        id="native-approval-signature-missing",
+    ),
     # Private compatibility plan.
     pytest.param(
         {"tamper": _patch("native_plan", lambda value: value.update(extra=1))},
@@ -1128,6 +1353,57 @@ REJECTIONS = [
         ),
         "native control authority differs from the approval",
         id="native-authority-drift",
+    ),
+    pytest.param(
+        _authority(approval_signature_sha256=_h("other-signature")),
+        "native control authority differs from the approval",
+        id="native-authority-other-signature",
+    ),
+    pytest.param(
+        _authority(curator_signing_key_sha256=_h("other-key")),
+        "native control authority differs from the approval",
+        id="native-authority-other-curator-key",
+    ),
+    pytest.param(
+        _authority(daemon_identity_sha256=_h("other-daemon")),
+        "native control authority differs from the approval",
+        id="native-authority-other-daemon",
+    ),
+    pytest.param(
+        _authority(
+            daemon_identity_observations=[
+                {"field": "engine_id", "approved": "a", "observed": "b"}
+            ]
+        ),
+        "native control daemon observations are invalid",
+        id="native-authority-hard-field-observed",
+    ),
+    pytest.param(
+        _authority(
+            daemon_identity_observations=[
+                {"field": "server_version", "approved": "1.0", "observed": "29.2.0"}
+            ]
+        ),
+        "native control daemon observations are invalid",
+        id="native-authority-observation-other-approved",
+    ),
+    pytest.param(
+        _authority(
+            daemon_identity_observations=[
+                {
+                    "field": "server_version",
+                    "approved": APPROVAL_VECTOR["daemon_identity"]["server_version"],
+                    "observed": APPROVAL_VECTOR["daemon_identity"]["server_version"],
+                }
+            ]
+        ),
+        "native control daemon observations are invalid",
+        id="native-authority-observation-unchanged",
+    ),
+    pytest.param(
+        _without_authority("daemon_identity_observations"),
+        "native control authority differs from the approval",
+        id="native-authority-v2-shape",
     ),
     pytest.param(
         _provenance(plan_sha256=_h("other-plan")),
@@ -1256,16 +1532,14 @@ def test_builder_rejects_drift(curator, case: dict[str, Any], reason: str) -> No
     _private, _path, key_sha256 = curator
     inputs = _inputs(key_sha256, **case)
     with pytest.raises(ProfileApprovalError) as error:
-        build_profile_approval(inputs, curator_signing_key_sha256=key_sha256)
+        _build(inputs, key_sha256)
     assert str(error.value) == reason
 
 
 def test_builder_rejects_a_curator_key_other_than_the_reviewed_pin(curator) -> None:
     _private, _path, key_sha256 = curator
     with pytest.raises(ProfileApprovalError, match="differs from the reviewed pin"):
-        build_profile_approval(
-            _inputs(key_sha256), curator_signing_key_sha256=_h("other-key")
-        )
+        _build(_inputs(key_sha256), key_sha256, curator_signing_key_sha256=_h("x"))
 
 
 def test_rejections_never_name_private_plan_or_request_content(curator) -> None:
@@ -1278,9 +1552,7 @@ def test_rejections_never_name_private_plan_or_request_content(curator) -> None:
                 case["argv"] = [*case["argv"], secret]
 
     with pytest.raises(ProfileApprovalError) as error:
-        build_profile_approval(
-            _inputs(key_sha256, before=mutate), curator_signing_key_sha256=key_sha256
-        )
+        _build(_inputs(key_sha256, before=mutate), key_sha256)
     assert secret not in str(error.value)
     assert "argv" not in str(error.value)
 
@@ -1346,9 +1618,7 @@ def test_language_profiles_equal_the_native_release_tooling(relative: str) -> No
 
 def _signed(curator) -> tuple[bytes, bytes, Path, str]:
     private, path, key_sha256 = curator
-    document = build_profile_approval(
-        _inputs(key_sha256), curator_signing_key_sha256=key_sha256
-    )
+    document = _build(_inputs(key_sha256), key_sha256)
     return document, private.sign(document), path, key_sha256
 
 
@@ -1427,11 +1697,7 @@ def test_verifier_rejects_validly_signed_documents_outside_the_schema(
     curator,
 ) -> None:
     private, path, key_sha256 = curator
-    document = parse_profile_approval_document(
-        build_profile_approval(
-            _inputs(key_sha256), curator_signing_key_sha256=key_sha256
-        )
-    )
+    document = parse_profile_approval_document(_build(_inputs(key_sha256), key_sha256))
     publication = private_v2_publication_signing_message(
         manifest={
             "schema": "dittobench-coding-private-v2-transport-v1",
@@ -1490,6 +1756,7 @@ def _write_inputs(root: Path, inputs: ApprovalInputs) -> dict[str, Path]:
         "registration",
         "release_index",
         "native_approval",
+        "native_approval_signature",
         "native_plan",
         "native_summary",
         "native_provenance",
@@ -1702,7 +1969,7 @@ def test_real_profile_helper_output_builds_and_verifies(curator, tmp_path) -> No
         before=before,
         transform={name: _replace(body) for name, body in real.items()},
     )
-    document = build_profile_approval(inputs, curator_signing_key_sha256=key_sha256)
+    document = _build(inputs, key_sha256)
     value = parse_profile_approval_document(document)
     assert value["task_version_id"] == receipt["task_version_id"]
     assert value["execution_profile_sha256"] == receipt["execution_profile_sha256"]
@@ -1719,7 +1986,7 @@ def test_real_profile_helper_output_builds_and_verifies(curator, tmp_path) -> No
     unapproved = copy.deepcopy(receipt)
     unapproved["approved"] = True
     with pytest.raises(ProfileApprovalError, match="claims approval"):
-        build_profile_approval(
+        _build(
             _inputs(
                 key_sha256,
                 before=before,
@@ -1728,5 +1995,349 @@ def test_real_profile_helper_output_builds_and_verifies(curator, tmp_path) -> No
                     "profile_receipt": _replace(_canonical(unapproved)),
                 },
             ),
-            curator_signing_key_sha256=key_sha256,
+            key_sha256,
         )
+
+
+# ---------------------------------------------------------------------------
+# Native release set v3 and controls approval v3 contract (B5 host approval).
+#
+# The producers live outside Platform: build-coding-native-release.py writes the
+# release set, the curator signs the exact approval bytes, native.py accepts the
+# approval on the host and writes the control authority, and the evidence tool
+# verifies the same detached signature offline. These tests run those real
+# modules on public synthetic inputs and feed their exact bytes to the builder.
+
+RELEASE_TOOL = _load_repo_module(
+    "platform_profile_approval_native_release",
+    "infra/scripts/build-coding-native-release.py",
+)
+EVIDENCE_TOOL = _load_repo_module(
+    "platform_profile_approval_native_evidence",
+    "infra/scripts/coding-native-evidence.py",
+)
+OPENSSL = Path("/usr/bin/openssl")
+
+
+def _host_accepts(inputs: ApprovalInputs) -> dict[str, Any]:
+    """native.policy() and release_policy() as the host runs them at issuance."""
+
+    raw = inputs.native_approval
+    value = EVIDENCE_TOOL.parse_strict(raw, "approval")
+    plan = json.loads(inputs.native_plan)
+    accepted = NATIVE_BINDING.policy(
+        value,
+        source=value["source_revision"],
+        plan_sha=_sha(inputs.native_plan),
+        helper_sha=value["helper_sha256"],
+        controls=2 * len(plan["cases"]),
+        jobs=1,
+        now=value["issued_at_unix"],
+    )
+    NATIVE_BINDING.release_policy(json.loads(inputs.release_index), accepted)
+    return accepted
+
+
+def test_native_fixtures_are_what_the_host_accepts(curator) -> None:
+    _private, _path, key_sha256 = curator
+    inputs = _inputs(key_sha256)
+    approval = _host_accepts(inputs)
+    assert approval["schema"] == NATIVE_BINDING.APPROVAL_SCHEMA
+    assert set(approval) == approval_module.NATIVE_APPROVAL_FIELDS
+    assert set(approval["profile_pins"]) == NATIVE_BINDING.PROFILE_PINS
+    assert set(approval["evidence_sha256"]) == NATIVE_BINDING.EVIDENCE
+    assert (
+        approval_module.NATIVE_APPROVAL_MAX_VALIDITY_SECONDS
+        == NATIVE_BINDING.APPROVAL_MAX_VALIDITY_SECONDS
+    )
+    authority = json.loads(inputs.native_provenance)["native_control_authority"]
+    assert set(authority) == approval_module._NATIVE_AUTHORITY_FIELDS
+    assert json.loads(inputs.release_index)["schema"] == (
+        approval_module.NATIVE_RELEASE_SCHEMA
+    )
+    assert EVIDENCE_TOOL.RELEASE_INDEX_SCHEMA == approval_module.NATIVE_RELEASE_SCHEMA
+    assert EVIDENCE_TOOL.APPROVAL_SCHEMA == approval_module.NATIVE_APPROVAL_SCHEMA
+
+
+def test_platform_daemon_policy_matches_the_host_policy() -> None:
+    assert (
+        approval_module._DAEMON_IDENTITY_FIELDS == NATIVE_BINDING.DAEMON_IDENTITY_KEYS
+    )
+    assert (
+        approval_module._DAEMON_OBSERVED_FIELDS == NATIVE_BINDING.DAEMON_OBSERVED_KEYS
+    )
+    assert str(NATIVE_BINDING.SOCKET) == approval_module._DAEMON_SOCKET
+    assert str(NATIVE_BINDING.HOME_DIR / "docker") == approval_module._DAEMON_ROOT_DIR
+    assert approval_module._DAEMON_IMAGE_STORE == NATIVE_BINDING.DAEMON_IMAGE_STORE
+    identity = copy.deepcopy(APPROVAL_VECTOR["daemon_identity"])
+    assert approval_module._daemon_identity(identity)
+    NATIVE_BINDING.daemon_identity_policy(identity)
+    assert approval_module._daemon_identity_sha256(
+        identity
+    ) == NATIVE_BINDING.daemon_identity_sha256(identity)
+    for name, value in (
+        ("rootless", False),
+        ("cgroup_version", "1"),
+        ("security_options", ["name=seccomp"]),
+        ("image_store", "overlay2"),
+    ):
+        drifted = {**identity, name: value}
+        assert not approval_module._daemon_identity(drifted)
+        with pytest.raises(ValueError):
+            NATIVE_BINDING.daemon_identity_policy(drifted)
+
+
+def test_a_daemon_server_version_change_is_observed_not_refused(curator) -> None:
+    _private, _path, key_sha256 = curator
+
+    approved = APPROVAL_VECTOR["daemon_identity"]["server_version"]
+    inputs = _inputs(
+        key_sha256,
+        **_authority(
+            daemon_identity_observations=[
+                {"field": "server_version", "approved": approved, "observed": "29.9.9"}
+            ]
+        ),
+    )
+    authority = json.loads(inputs.native_provenance)["native_control_authority"]
+    live = {**APPROVAL_VECTOR["daemon_identity"], "server_version": "29.9.9"}
+    expected = _native_authority(
+        inputs.native_approval,
+        inputs.native_approval_signature,
+        json.loads(inputs.native_approval),
+        observed=live,
+    )
+    assert authority == expected
+    document = parse_profile_approval_document(_build(inputs, key_sha256))
+    assert document["native_controls_provenance_sha256"] == _sha(
+        inputs.native_provenance
+    )
+
+
+def test_a_native_approval_signed_by_another_key_is_refused(curator) -> None:
+    _private, _path, key_sha256 = curator
+    other = Ed25519PrivateKey.generate()
+    inputs = _inputs(key_sha256)
+    forged = ApprovalInputs(
+        **{
+            **inputs.__dict__,
+            "native_approval_signature": other.sign(inputs.native_approval),
+        }
+    )
+    with pytest.raises(ProfileApprovalError) as error:
+        _build(forged, key_sha256)
+    assert str(error.value) == "native approval signature does not verify"
+    with pytest.raises(ProfileApprovalError) as error:
+        _build(inputs, key_sha256, curator_public_key=other.public_key())
+    assert str(error.value) == "curator public key differs from the pinned identity"
+
+
+def _oci_image(language: str, directory: Path) -> None:
+    """A public synthetic OCI image prepared by the release image tooling."""
+
+    image = RELEASE_TOOL.IMAGE
+    profile = RELEASE_TOOL.PROFILES[language]
+    files: dict[str, bytes] = {}
+
+    def tar_bytes(entries: list[tuple[str, bytes]]) -> bytes:
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+            for name, raw in entries:
+                item = tarfile.TarInfo(name)
+                item.size = len(raw)
+                tar.addfile(item, io.BytesIO(raw))
+        return output.getvalue()
+
+    def blob(raw: bytes, media: str) -> dict[str, Any]:
+        files["blobs/sha256/" + _sha(raw)] = raw
+        return {"mediaType": media, "digest": "sha256:" + _sha(raw), "size": len(raw)}
+
+    layer = blob(tar_bytes([]), "application/vnd.oci.image.layer.v1.tar")
+    config = blob(
+        image.json_bytes(
+            {
+                "architecture": "amd64",
+                "os": "linux",
+                "config": {
+                    "Entrypoint": image.ENTRYPOINT,
+                    "Env": image.profile_environment(profile),
+                    "WorkingDir": image.profile_workdirs(profile)[0],
+                    "Labels": {
+                        image.PREFIX + "coding-supervisor-contract": "1",
+                        image.PREFIX + "coding-test-driver-profile": profile,
+                        "org.opencontainers.image.revision": REVISION,
+                    },
+                },
+                "rootfs": {"type": "layers", "diff_ids": [layer["digest"]]},
+            }
+        ),
+        image.CONFIG_TYPE,
+    )
+    manifest = blob(
+        image.json_bytes(
+            {
+                "schemaVersion": 2,
+                "mediaType": image.MANIFEST_TYPE,
+                "config": config,
+                "layers": [layer],
+            }
+        ),
+        image.MANIFEST_TYPE,
+    )
+    files["index.json"] = image.json_bytes(
+        {"schemaVersion": 2, "manifests": [manifest]}
+    )
+    files["oci-layout"] = image.json_bytes({"imageLayoutVersion": "1.0.0"})
+    (directory / "source.oci.tar").write_bytes(tar_bytes(sorted(files.items())))
+    image.prepare(
+        directory / "source.oci.tar",
+        directory / "runtime.oci.tar",
+        directory / "approval.json",
+        f"coding-runtime.invalid/{language}/runtime",
+        REVISION,
+    )
+
+
+def _native_runtime(directory: Path) -> None:
+    runtime = RELEASE_TOOL.RUNTIME
+    elf = b"\x7fELF\x02\x01" + bytes(12) + b"\x3e\x00"
+    bodies = {
+        "bin/dittobench-coding-hosted-worker": elf,
+        "bin/dittobench-coding-router-listener": elf + b"helper",
+        "bin/dittobench-coding-enforcement-probe": elf + b"probe",
+        "apps/platform/ditto/coding_hosted_worker.py": b"# public synthetic fixture\n",
+        "apps/platform/uv.lock": b"synthetic lock",
+        "apps/platform/.venv/bin/python": b"not an interpreter",
+    }
+    manifest = {
+        "schema": runtime.SCHEMA,
+        "source_revision": REVISION,
+        "python_sha256": "a" * 64,
+        "debian_packages": dict.fromkeys(runtime.PACKAGES, "1.0"),
+        "files": {
+            name: {
+                "sha256": _sha(body),
+                "size": len(body),
+                "executable": name.startswith("bin/"),
+            }
+            for name, body in bodies.items()
+        },
+        "shadow_only": True,
+        "weight_eligible": False,
+    }
+    with tarfile.open(
+        directory / "runtime.tar", "w", format=tarfile.USTAR_FORMAT
+    ) as archive:
+        for name, body in {
+            "manifest.json": runtime.canonical(manifest),
+            **bodies,
+        }.items():
+            item = tarfile.TarInfo(name)
+            item.size = len(body)
+            item.mode = 0o555 if name.startswith("bin/") else 0o444
+            archive.addfile(item, io.BytesIO(body))
+
+
+@pytest.fixture
+def native_release(tmp_path: Path) -> bytes:
+    """release.json exactly as build-coding-native-release.py writes it."""
+
+    previous = os.umask(0o077)
+    try:
+        directory = tmp_path / "release"
+        directory.mkdir()
+        (directory / "native").mkdir()
+        _native_runtime(directory / "native")
+        for language in RELEASE_TOOL.PROFILES:
+            (directory / language).mkdir()
+            _oci_image(language, directory / language)
+        raw = RELEASE_TOOL.IMAGE.json_bytes(RELEASE_TOOL.describe(directory, REVISION))
+        (directory / "release.json").write_bytes(raw)
+        RELEASE_TOOL.verify(directory, REVISION, _sha(raw))
+    finally:
+        os.umask(previous)
+    return raw
+
+
+@pytest.mark.skipif(not OPENSSL.is_file(), reason="needs the system OpenSSL 3")
+def test_real_release_and_signed_approval_build_and_verify_through_platform(
+    curator, native_release
+) -> None:
+    private, key_path, key_sha256 = curator
+    release = json.loads(native_release)
+    image_digest = release["images"][LANGUAGE]["image_ref"].split("@", 1)[1]
+    assert release["schema"] == "dittobench-coding-native-release-set-v3"
+    EVIDENCE_TOOL.parse_release_index(native_release)
+
+    def before(objects: dict[str, Any]) -> None:
+        objects["release_index"] = copy.deepcopy(release)
+        for name in (
+            "profile_request",
+            "execution_profile",
+            "grading_profile",
+            "profile_receipt",
+        ):
+            objects[name]["image_digest"] = image_digest
+        # The approval binds the reviewed host tools by their checkout digests.
+        objects["native_approval"].update(
+            binding_sha256=_sha(
+                (
+                    REPO
+                    / "services/dittobench-api/coding_runtime/qualification/native.py"
+                ).read_bytes()
+            ),
+            runner_sha256=_sha(
+                (
+                    REPO / "services/dittobench-api/coding_runtime/qualification/run.py"
+                ).read_bytes()
+            ),
+            evidence_tool_sha256=_sha(
+                (REPO / "infra/scripts/coding-native-evidence.py").read_bytes()
+            ),
+        )
+        objects["native_provenance"]["runner_sha256"] = objects["native_approval"][
+            "runner_sha256"
+        ]
+
+    inputs = _inputs(
+        key_sha256,
+        before=before,
+        transform={"release_index": _replace(native_release)},
+    )
+    assert inputs.release_index == native_release
+    # The host and the offline evidence tool accept these exact approval bytes.
+    approval = _host_accepts(inputs)
+    raw_key = EVIDENCE_TOOL.curator_public_key(key_path.read_bytes())
+    assert _sha(raw_key) == key_sha256
+    EVIDENCE_TOOL.verify_ed25519(
+        OPENSSL, raw_key, inputs.native_approval, inputs.native_approval_signature
+    )
+    assert (
+        approval["images"]
+        == EVIDENCE_TOOL.parse_release_index(native_release)["approval_images"]
+    )
+    # Platform binds the same bytes and a curator-signed document verifies.
+    document = _build(inputs, key_sha256)
+    value = parse_profile_approval_document(document)
+    assert value["release_manifest_sha256"] == _sha(native_release)
+    assert value["image_digest"] == image_digest
+    assert value["native_controls_approval_sha256"] == _sha(inputs.native_approval)
+    verified = verify_profile_approval(
+        document=document,
+        signature=private.sign(document),
+        curator_public_key_path=key_path,
+        curator_signing_key_sha256=key_sha256,
+    )
+    assert verified.document_sha256 == _sha(document)
+    # The approval need not be canonical: the curator signs the stored bytes.
+    pretty = json.dumps(json.loads(inputs.native_approval), indent=1).encode()
+    relinked = _inputs(
+        key_sha256,
+        before=before,
+        transform={
+            "release_index": _replace(native_release),
+            "native_approval": _replace(pretty),
+        },
+    )
+    _host_accepts(relinked)
+    parse_profile_approval_document(_build(relinked, key_sha256))
