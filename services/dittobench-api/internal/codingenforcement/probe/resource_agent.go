@@ -86,6 +86,7 @@ type ResourceRequest struct {
 	Workload   []string `json:"workload,omitempty"`
 	TimeoutMS  int      `json:"timeout_ms,omitempty"`
 	TestGroup  string   `json:"test_group,omitempty"`
+	FailStart  bool     `json:"fail_start,omitempty"`
 }
 
 // ResourceResponse is one agent response.
@@ -140,6 +141,10 @@ type WorkloadSpec struct {
 	SeccompProfile  string
 	AppArmorProfile string
 	Now             func() time.Time
+	// FailStart launches the harness from a pinned digest that is never a
+	// released image, so the production start fails after it created the job
+	// network: the cleanup_recovery partial-start scenario.
+	FailStart bool
 }
 
 // ResourceBackend launches workloads. Production uses the executor and sandbox
@@ -293,7 +298,10 @@ func (a *ResourceAgent) spec(request ResourceRequest) (WorkloadSpec, int, error)
 	spec := WorkloadSpec{
 		Class: request.Class, Language: request.Language, Repository: request.Repository, Runner: a.config.Runner,
 		Execution: a.execution, Grading: a.grading, SeccompProfile: a.config.SeccompProfile,
-		AppArmorProfile: a.config.AppArmorProfile, Now: a.config.Now,
+		AppArmorProfile: a.config.AppArmorProfile, Now: a.config.Now, FailStart: request.FailStart,
+	}
+	if request.FailStart && request.Class != ClassHarness {
+		return spec, 0, errors.New("probe: only a harness start can be made to fail")
 	}
 	if !slices.Contains([]string{ClassHarness, ClassExecutorAuthoring, ClassExecutorGrading}, request.Class) {
 		return spec, 0, errors.New("probe: container class is unknown")
@@ -519,6 +527,9 @@ func ServeResourceAgent(ctx context.Context, agent *ResourceAgent, input io.Read
 	}
 }
 
+// absentImageDigest is never a released image digest.
+const absentImageDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
 // ProductionResourceBackend launches workloads through the production executor
 // and sandbox packages.
 type ProductionResourceBackend struct {
@@ -536,7 +547,9 @@ func (b ProductionResourceBackend) Start(ctx context.Context, spec WorkloadSpec)
 			CPUQuotaMillis: policy.CPUQuotaMillis, PidsLimit: policy.PidsLimit, EgressNetwork: harnessEgressNetwork,
 			SeccompProfile: spec.SeccompProfile, AppArmorProfile: spec.AppArmorProfile,
 		})
-		if _, err := ResolveApprovedImage(ctx, b.Docker, reference); err != nil {
+		if spec.FailStart {
+			reference = spec.Repository + "@" + absentImageDigest
+		} else if _, err := ResolveApprovedImage(ctx, b.Docker, reference); err != nil {
 			return StartedWorkload{}, err
 		}
 		handle, err := docker.RunEnforcementWorkload(ctx, reference, spec.Runner, spec.Command.Argv)

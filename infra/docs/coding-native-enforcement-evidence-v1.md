@@ -12,7 +12,9 @@ The verifier runs no probe, reaches no host or daemon, reads no custody path
 and creates no approval. The PR2 probe runner (below) writes no evidence
 record either. Two collectors write records: the PR4 network collector
 (`network_enforcement`) and the PR5 resource collector (`resource_enforcement`).
-Pre-exec and cleanup collection are not implemented yet; both exit 2.
+Pre-exec collection is not implemented yet. Cleanup collection refuses before
+any host effect and lists the catalog probes it does not collect, with the
+reason; see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable).
 Collectors never run from `coding-hosted-operate`, and a test checks that only
 the offline regression job and the disposable rootless probe-runner CI job name
 these tools. The collector may appear there only as a path filter and a lint
@@ -416,7 +418,8 @@ collects now (nothing has been collected on a host yet):
 | `network_enforcement` (all) | Collected by the [PR4 network collector](#network-collector-b5-pr4) |
 | `resource_enforcement` (all 35 probes × 4 language images) | Collected by the [PR5 resource collector](#resource-collector-b5-pr5) from started containers, measured from outside |
 | `preexec_confinement` (all) | Not implemented yet |
-| `cleanup_recovery` (all) | Not implemented yet |
+| `cleanup_recovery.{normal_stop,partial_start,timeout,oom,escaped_setsid,runner_sigterm}` | Scenarios implemented and tested against a simulated host; the kind refuses to run until the rest exist |
+| `cleanup.runner_sigkill.*`, `cleanup.rerun.consumed_marker` | Not collected: the hosted runtime has no intent journal, and the consumed marker needs a full private runtime configuration |
 
 The PR4 network collector measures preconditions and residue for network
 records (worker and custody state, custody socket, all daemon containers,
@@ -756,7 +759,7 @@ probe, sequentially.
 - `ditto/tests/test_coding_native_resource_collector.py`: a simulated host
   whose correct collection verifies offline, 22 enforcement failures that are
   recorded and refused by the verifier, 26 binding refusals that retain nothing,
-  residue, config and verifier tamper paths.
+  residue, config and verifier tamper paths, and the cleanup scenarios.
 - `ditto/tests/test_coding_native_resource_kernel.py`: the collector's own
   samplers and `SystemHost` readers against a real kernel, with the built
   runner's workloads in throwaway containers under small limits (64 MiB memory,
@@ -808,6 +811,45 @@ probe, sequentially.
 - **Harness log retention** after rotation may be anything below 8 MiB (still the
   least certain floor).
 - Reboot and daemon-restart recovery, as for every record.
+
+## Pre-exec and cleanup (B5 PR5): not collectable
+
+`cleanup` exits 2 before reading a config or touching the host, and prints
+every catalog probe it does not collect with its reason (`NOT_COLLECTED` in the
+collector). A record missing a catalog probe never
+verifies, and no collector claims a probe it did not measure. A test checks that
+this list, the catalog and the tables below agree.
+
+### Pre-exec confinement
+
+Not implemented yet: `preexec` exits 2.
+
+### Cleanup recovery (six scenarios implemented, kind refused)
+
+Implemented, and tested against the simulated host. Each scenario then counts,
+from outside: all daemon containers, `ditto-job-` networks, volumes, and
+processes owned by subordinate ids plus processes in the daemon user's
+`docker-*.scope` cgroups.
+
+| Probe | Scenario |
+|---|---|
+| `cleanup.normal_stop.absent` | An authoring `hold` workload completes through `Execute` |
+| `cleanup.partial_start.absent` | A harness start from a never-released digest fails after the production run created its job network; the retained handle is stopped |
+| `cleanup.timeout.absent` | An authoring `hang` workload exceeds a 3 s command timeout |
+| `cleanup.oom.absent` | An authoring `memory` workload is OOM-killed |
+| `cleanup.escaped_setsid.absent` | An authoring `hang` workload whose child calls `setsid` times out |
+| `cleanup.runner_sigterm.absent` | The resource agent gets SIGTERM while a workload runs; it cancels the run, waits for production cleanup and exits |
+
+Not collected:
+
+| Probe | Reason |
+|---|---|
+| `cleanup.runner_sigkill.reconciled_absent` | The hosted runtime keeps no intent journal of the container and network ids it launched, so nothing reconciles after SIGKILL |
+| `cleanup.runner_sigkill.journal_ids_only` | No intent journal exists |
+| `cleanup.runner_sigkill.sentinel_network` | Without journal reconciliation, sparing a sentinel network cannot be shown |
+| `cleanup.rerun.consumed_marker` | The marker is written by `codinghostedruntime.Run`, which needs a full private runtime configuration (Platform control, custody inputs) to reach |
+
+The SIGKILL probes need a runtime change: an intent journal and a reconciler.
 
 ## Semantic nft ruleset digest (preflight v4)
 
@@ -896,6 +938,9 @@ approval's `private_input_custody` digest is the digest of that object.
   page after a real OOM kill. Should `memory_peak_max_permille_of_limit` allow
   that page (a tolerances-v2 change), or should a record that shows it stay
   refused?
+- **Cleanup SIGKILL (PR5).** Should the hosted runtime get an intent journal and
+  a reconciler, so the SIGKILL probes can be collected, or should they move to
+  the not-covered list with reboot and daemon restart?
 - **Harness and authoring log floors.** These keep the 500 per-mille floor.
   Docker's local log driver with `max-file=1` may keep any amount under 8 MiB
   after rotation, so this floor is still the least certain.
@@ -964,6 +1009,7 @@ identity is bound into the signed approval and the evidence.
 - It cannot confirm that `--checkout` is at `source_revision`.
 - The router and proxy roles are the record's own split of the two candidate
   endpoints; only the pair itself is derived from the profile.
-- Pre-exec confinement and cleanup recovery collection (not implemented yet).
+- Pre-exec confinement and the cleanup SIGKILL and rerun scenarios; see
+  [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable).
 - Endpoint hashes hide raw addresses from the record, but IPv4 addresses are
   few enough to guess a hash by brute force. They are labels, not secrets.

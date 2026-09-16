@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Default-off root collector for native enforcement evidence (B5 PR4, PR5).
 
-``network`` (PR4) and ``resource`` (PR5) are collected. ``preexec`` and
-``cleanup`` are not implemented. A kind with any catalog probe it does not
-collect lists it in ``NOT_COLLECTED`` and refuses before any host effect. Nothing here
+``network`` (PR4) and ``resource`` (PR5) are collected. ``cleanup`` refuses
+before any host effect, listing every catalog probe it does not collect and why
+(``NOT_COLLECTED``); the cleanup scenarios that are implemented are exercised
+only by tests until the rest exist. ``preexec`` is not implemented. Nothing here
 mints approval: the collector retains one record in the evidence store, and
 Peyton reviews it with ``coding-native-evidence.py verify`` against a
 post-collection preflight.
@@ -1076,6 +1077,27 @@ class SystemHost:
         require(process.wait(timeout=30) == 0, f"docker {args[0]} failed")
         return total
 
+    def subordinate_processes(self, start: int, count: int) -> int:
+        total = 0
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdecimal():
+                continue
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                for line in Path(entry.path, "status").read_text().splitlines():
+                    if line.startswith("Uid:"):
+                        if start <= int(line.split()[1]) < start + count:
+                            total += 1
+                        break
+        return total
+
+    def docker_scope_processes(self, uid: int) -> int:
+        base = CGROUP_ROOT / f"user.slice/user-{uid}.slice/user@{uid}.service"
+        total = 0
+        for procs in base.glob("**/docker-*.scope/cgroup.procs"):
+            with contextlib.suppress(OSError):
+                total += len(procs.read_text().split())
+        return total
+
     def prepare_work_dir(self, uid: int, gid: int, files: dict[str, bytes]) -> None:
         self.remove_work_dir()
         os.mkdir(WORK_DIR, 0o700)
@@ -1114,6 +1136,9 @@ class SystemHost:
             env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
             cwd="/",
         )
+
+    def terminate(self, pid: int) -> None:
+        os.kill(pid, signal.SIGTERM)
 
 
 # ---------------------------------------------------------------------------
@@ -2193,6 +2218,18 @@ HANG_GRACE_SECONDS = 120
 NOT_COLLECTED: dict[str, dict[str, str]] = {
     "network_enforcement": {},
     "resource_enforcement": {},
+    "cleanup_recovery": {
+        "cleanup.runner_sigkill.reconciled_absent": "the hosted runtime keeps no "
+        "intent journal of launched container and network ids to reconcile after "
+        "SIGKILL",
+        "cleanup.runner_sigkill.journal_ids_only": "no intent journal exists in "
+        "the hosted runtime (see reconciled_absent)",
+        "cleanup.runner_sigkill.sentinel_network": "reconciliation from a journal "
+        "does not exist, so sparing a sentinel network cannot be shown",
+        "cleanup.rerun.consumed_marker": "the consumed marker is written by "
+        "codinghostedruntime.Run, which needs a full private runtime "
+        "configuration (Platform control, custody inputs) to reach",
+    },
 }
 
 
@@ -2542,9 +2579,12 @@ class ResourceHost(Host, Protocol):
     def root_statvfs(self, pid: int, path: str) -> tuple[int, int, int, int]: ...
     def root_lexists(self, pid: int, path: str) -> bool: ...
     def docker_output_bytes(self, *args: str) -> int: ...
+    def subordinate_processes(self, start: int, count: int) -> int: ...
+    def docker_scope_processes(self, uid: int) -> int: ...
     def prepare_work_dir(self, uid: int, gid: int, files: dict[str, bytes]) -> None: ...
     def remove_work_dir(self) -> None: ...
     def resource_session(self, unit: str, arguments: list[str]) -> Session: ...
+    def terminate(self, pid: int) -> None: ...
 
 
 class ResourceCollector(Collector):
@@ -2699,6 +2739,7 @@ class ResourceCollector(Collector):
         *,
         timeout_ms: int = RUN_TIMEOUT_MS,
         test_group: str | None = None,
+        fail_start: bool = False,
     ) -> dict[str, Any]:
         assert self.agent is not None
         request: dict[str, Any] = {
@@ -2712,6 +2753,8 @@ class ResourceCollector(Collector):
             request["timeout_ms"] = timeout_ms
         else:
             request["test_group"] = test_group
+        if fail_start:
+            request["fail_start"] = True
         # A harness start runs `docker run` and may create its job network.
         answer = self.ask(self.agent, request, extra=150)
         require(
@@ -3256,6 +3299,137 @@ class ResourceCollector(Collector):
         require(self.host.boot_id() == self.config["boot_id"], "the host rebooted")
         completed = self.host.now()
         return self.assemble_record(started, completed, preconditions, residue, tools)
+
+
+class CleanupCollector(ResourceCollector):
+    """``cleanup_recovery``: resources are gone after each production cleanup.
+
+    Six scenarios are implemented. The SIGKILL journal reconciliation and the
+    consumed-marker rerun are not (``NOT_COLLECTED``), so ``collect`` refuses
+    before touching the host.
+    """
+
+    kind = "cleanup_recovery"
+
+    def counts(self) -> dict[str, int]:
+        """What remains on the daemon and host, measured from outside."""
+
+        def count(*args: str) -> int:
+            return len(self.host.docker(*args).split())
+
+        return {
+            "containers": count("ps", "--all", "--quiet"),
+            "networks": count(
+                "network", "ls", "--quiet", "--filter", "name=ditto-job-"
+            ),
+            "processes": self.host.subordinate_processes(
+                self.subordinate["uid_start"], self.subordinate["uid_count"]
+            )
+            + self.host.docker_scope_processes(self.uid),
+            "volumes": count("volume", "ls", "--quiet"),
+        }
+
+    def settled_counts(self) -> dict[str, int]:
+        state: dict[str, dict[str, int]] = {}
+
+        def empty() -> bool:
+            state["counts"] = self.counts()
+            return not any(state["counts"].values())
+
+        poll(self.host, empty, 10)
+        return state["counts"]
+
+    def scenario(self, name: str, probe: str, action: Any) -> None:
+        self.phase(name)
+        action()
+        self.record(probe, None, self.settled_counts())
+        self.end_phase(name)
+
+    def scenario_normal_stop(self) -> None:
+        language = self.own_language
+        argv = workload_args("hold", secrets.token_hex(8), hold_ms=1000)
+        started = self.launch("executor_authoring", language, argv)
+        answer = self.finish(started, "executor_authoring", receipt=True)
+        require(answer.get("return_code") == 0, "normal stop workload failed")
+
+    def scenario_partial_start(self) -> None:
+        argv = workload_args("hold", secrets.token_hex(8), hold_ms=1000)
+        started = self.launch("harness", self.own_language, argv, fail_start=True)
+        answer = self.finish(started, "harness")
+        require(answer.get("run_failed") is True, "the partial start did not fail")
+
+    def scenario_timeout(self) -> None:
+        argv = workload_args("hang", secrets.token_hex(8), seconds=600)
+        started = self.launch(
+            "executor_authoring", self.own_language, argv, timeout_ms=3000
+        )
+        answer = self.finish(started, "executor_authoring")
+        require(
+            answer.get("timed_out") is True, "the timeout workload did not time out"
+        )
+
+    def scenario_oom(self) -> None:
+        argv = workload_args("memory", secrets.token_hex(8), hold_ms=1000)
+        started = self.launch("executor_authoring", self.own_language, argv)
+        self.finish(started, "executor_authoring")
+
+    def scenario_escaped_setsid(self) -> None:
+        argv = workload_args(
+            "hang", secrets.token_hex(8), seconds=600, setsid_child=True
+        )
+        started = self.launch(
+            "executor_authoring", self.own_language, argv, timeout_ms=3000
+        )
+        found = self.container(started, "executor_authoring", self.own_language)
+        pid = self.workload_process(found, "executor_authoring", argv)
+        require(
+            poll(self.host, lambda: len(self.host.children(pid)) == 1, 10),
+            "the escaping child was not started",
+        )
+        self.finish(started, "executor_authoring")
+
+    def scenario_runner_sigterm(self) -> None:
+        argv = workload_args("hang", secrets.token_hex(8), seconds=600)
+        started = self.launch(
+            "executor_authoring", self.own_language, argv, timeout_ms=600_000
+        )
+        found = self.container(started, "executor_authoring", self.own_language)
+        self.workload_process(found, "executor_authoring", argv)
+        self.host.terminate(self.agent_pid)
+        stopped = poll(
+            self.host, lambda: not self.host.cgroup_procs(self.agent_cgroup()), 150
+        )
+        require(stopped, "the resource agent did not stop after SIGTERM")
+        with contextlib.suppress(Exception):
+            assert self.agent is not None
+            self.agent.close()
+        self.agent = None
+
+    def agent_cgroup(self) -> str:
+        return (
+            f"user.slice/user-{self.uid}.slice/user@{self.uid}.service/app.slice/"
+            f"{self.daemon_unit}"
+        )
+
+    def phases(self) -> None:
+        self.scenario(
+            "normal_stop", "cleanup.normal_stop.absent", self.scenario_normal_stop
+        )
+        self.scenario(
+            "partial_start", "cleanup.partial_start.absent", self.scenario_partial_start
+        )
+        self.scenario("timeout", "cleanup.timeout.absent", self.scenario_timeout)
+        self.scenario("oom", "cleanup.oom.absent", self.scenario_oom)
+        self.scenario(
+            "escaped_setsid",
+            "cleanup.escaped_setsid.absent",
+            self.scenario_escaped_setsid,
+        )
+        self.scenario(
+            "runner_sigterm",
+            "cleanup.runner_sigterm.absent",
+            self.scenario_runner_sigterm,
+        )
 
 
 def retain(evidence: Any, store_path: Path, record: dict[str, Any]) -> str:

@@ -1184,12 +1184,71 @@ def test_verifier_refuses_a_tampered_resource_record(rw, change, reason):
 
 
 # ---------------------------------------------------------------------------
-# Refused kinds
+# Cleanup scenarios (implemented) and the refused kinds
 
 
-def test_unimplemented_kinds_refuse_before_any_host_effect():
-    for kind in ("preexec", "cleanup"):
+def cleanup_collector(rw, scenario: Scenario | None = None):
+    host = rw.host(scenario)
+    collector = rw.collector(host, "cleanup")
+    collector.bind_host()
+    collector.bind_release()
+    collector.bind_preflight()
+    collector.bind_daemon()
+    collector.bind_inputs()
+    collector.start_agent()
+    return collector, host
+
+
+def test_cleanup_scenarios_observe_absence_from_outside(rw):
+    collector, host = cleanup_collector(rw)
+    collector.phases()
+    implemented = {
+        probe["id"] for probe in base.catalog()["kinds"]["cleanup_recovery"]["probes"]
+    } - set(COLLECTOR.NOT_COLLECTED["cleanup_recovery"])
+    assert {key[0] for key in collector.observed} == implemented
+    for (probe_id, language), value in collector.observed.items():
+        assert language is None
+        assert EVIDENCE.evaluate(
+            base.catalog_probe("cleanup_recovery", probe_id)["expect"]
+            if hasattr(base, "catalog_probe")
+            else next(
+                item["expect"]
+                for item in base.catalog()["kinds"]["cleanup_recovery"]["probes"]
+                if item["id"] == probe_id
+            ),
+            value,
+            base.SUBORDINATE,
+            set(base.catalog()["outcomes"]),
+        )
+    starts = [item for item in host.requests if item["op"] == "start"]
+    assert [item.get("fail_start", False) for item in starts].count(True) == 1
+    # The SIGTERM scenario ended the agent; nothing it launched remains.
+    assert host.agent_terminated and host.containers == {}
+
+
+def test_cleanup_records_leftovers_and_refuses_an_agent_that_ignores_sigterm(rw):
+    scenario = Scenario()
+    scenario.leftover_after = {"hang": {"processes": 1}}
+    collector, _ = cleanup_collector(rw, scenario)
+    collector.scenario("timeout", "cleanup.timeout.absent", collector.scenario_timeout)
+    assert collector.observed[("cleanup.timeout.absent", None)]["processes"] == 1
+
+    scenario = Scenario()
+    scenario.agent_survives_sigterm = True
+    collector, _ = cleanup_collector(rw, scenario)
+    with pytest.raises(COLLECTOR.Refusal, match="did not stop after SIGTERM"):
+        collector.scenario_runner_sigterm()
+
+
+def test_uncollectable_kinds_refuse_before_any_host_effect(rw, capsys):
+    assert COLLECTOR.main(["preexec"], host_factory=pytest.fail) == 2
+    for kind in ("cleanup",):
         assert COLLECTOR.main([kind], host_factory=pytest.fail) == 2
+        err = capsys.readouterr().err
+        for probe in COLLECTOR.NOT_COLLECTED[COLLECTOR.KIND_OF[kind]]:
+            assert probe in err
+    with pytest.raises(COLLECTOR.Refusal, match="cannot collect"):
+        rw.collector(rw.host(), "cleanup").collect()
 
 
 def test_not_collected_probes_are_catalog_probes_and_documented():

@@ -196,6 +196,7 @@ func TestResourceAgentRefusesMalformedRequestsAndInputs(t *testing.T) {
 		func(r *ResourceRequest) { r.Workload = []string{"hold", "--nonce", "zz"} },
 		func(r *ResourceRequest) { r.Workload = []string{"hold", "--nonce", "0123456789abcdef", "--bytes", "5"} },
 		func(r *ResourceRequest) { r.TimeoutMS = 0 },
+		func(r *ResourceRequest) { r.FailStart = true; r.Class = ClassExecutorAuthoring },
 	} {
 		request := startRequest(ClassHarness, "hold")
 		change(&request)
@@ -264,5 +265,22 @@ func TestServeResourceAgentCancelsRunsOnTermination(t *testing.T) {
 	}
 	if !errors.Is(run.err, context.Canceled) {
 		t.Fatalf("run err=%v", run.err)
+	}
+}
+
+func TestResourceAgentPassesOnlyAHarnessFailedStart(t *testing.T) {
+	backend := &fakeBackend{release: make(chan struct{})}
+	close(backend.release)
+	agent, err := NewResourceAgent(t.Context(), agentConfig(t, backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := startRequest(ClassHarness, "hold", "--hold-ms", "10")
+	request.FailStart = true
+	if response := agent.Handle(request); response.Error != "" || len(backend.specs) != 1 || !backend.specs[0].FailStart {
+		t.Fatalf("response=%#v specs=%#v", response, backend.specs)
+	}
+	if response := agent.Handle(startRequest(ClassHarness, "hold", "--hold-ms", "10")); response.Error != "" || backend.specs[1].FailStart {
+		t.Fatalf("an ordinary start was marked to fail: %#v", response)
 	}
 }
