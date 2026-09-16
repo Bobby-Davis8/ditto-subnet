@@ -69,6 +69,28 @@
         fail_msg: Provision the native daemon first; its root-owned policy directory or host policy is missing or unsafe.
         quiet: true
 
+    # Read-only: the daemon role creates the worker account; this role never does.
+    - name: Read the native worker account from daemon provisioning
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ coding_hosted_prerequisites_worker_user }}"
+
+    - name: Bind the worker's numeric identity
+      ansible.builtin.set_fact:
+        coding_hosted_prerequisites_worker_uid: "{{ ansible_facts.getent_passwd[coding_hosted_prerequisites_worker_user][1] | int }}"
+        coding_hosted_prerequisites_worker_gid: "{{ ansible_facts.getent_passwd[coding_hosted_prerequisites_worker_user][2] | int }}"
+
+    - name: Require an unprivileged worker whose home holds the launch journal directory
+      ansible.builtin.assert:
+        that:
+          - coding_hosted_prerequisites_worker_uid | int > 0
+          - coding_hosted_prerequisites_worker_gid | int > 0
+          - >-
+            ansible_facts.getent_passwd[coding_hosted_prerequisites_worker_user][4] ==
+            coding_hosted_prerequisites_launch_journal_dir | dirname
+        fail_msg: Provision the native daemon first; the worker account is missing, privileged or has another home.
+        quiet: true
+
     - name: Render every fixed prerequisite file in memory
       ansible.builtin.set_fact:
         coding_hosted_prerequisites_files:
@@ -91,6 +113,11 @@
 
     - name: Refuse to rewrite unexpected existing prerequisite state
       ansible.builtin.import_tasks: files.yml
+      vars:
+        coding_hosted_prerequisites_require_installed: false
+
+    - name: Refuse an unsafe worker home or unexpected launch journal directory
+      ansible.builtin.import_tasks: journal.yml
       vars:
         coding_hosted_prerequisites_require_installed: false
 
@@ -212,6 +239,16 @@
       loop: [helper, proxy, record, unit]
       register: coding_hosted_prerequisites_install
 
+    # Only created when absent: the pre-write check refused any other existing
+    # state, so this never changes an existing journal or its entries.
+    - name: Create the private launch journal directory for the worker
+      ansible.builtin.file:
+        path: "{{ coding_hosted_prerequisites_launch_journal_dir }}"
+        state: directory
+        owner: "{{ coding_hosted_prerequisites_worker_user }}"
+        group: "{{ coding_hosted_prerequisites_worker_gid }}"
+        mode: "0700"
+
     # A run stopped between install and reload is refused below as
     # NeedDaemonReload or not loaded; reload manually and rerun.
     - name: Reload unit definitions after installing a file, without enabling or starting the proxy
@@ -248,6 +285,11 @@
       vars:
         coding_hosted_prerequisites_require_installed: true
 
+    - name: Require the exact worker-owned launch journal directory
+      ansible.builtin.import_tasks: journal.yml
+      vars:
+        coding_hosted_prerequisites_require_installed: true
+
     # Written only when this run installed a file or no receipt exists, so a rerun
     # at a newer revision with identical bytes keeps the installing revision.
     - name: Record the source revision that installed these bytes
@@ -273,6 +315,7 @@
           router_listen={{ coding_hosted_prerequisites_host_address }}:{{ coding_hosted_prerequisites_router_port }} (one attempt at a time);
           egress_proxy=http://{{ coding_hosted_prerequisites_host_address }}:{{ coding_hosted_prerequisites_proxy_port }} (unit installed, not enabled or started);
           egress_network=ditto-coding-restricted (no Docker network created);
+          launch_journal_dir={{ coding_hosted_prerequisites_launch_journal_dir }} (worker-owned, 0700);
           candidate_uid=candidate_gid=10001 (host IDs
           {{ (coding_hosted_prerequisites_check.stdout | from_json).candidate_host_uid }}/{{
           (coding_hosted_prerequisites_check.stdout | from_json).candidate_host_gid }});

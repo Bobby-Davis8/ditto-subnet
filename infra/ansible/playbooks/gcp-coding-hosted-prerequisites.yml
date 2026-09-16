@@ -1,8 +1,10 @@
 ---
 # Converge the fixed native Coding host prerequisites on ditto-coding-hosted-v2:
-# a read-only host check, the fixed host record, and a manual egress proxy unit
-# whose allowlist is empty. It creates no account or Docker network and never
-# enables or starts a service. Operator-run only, after the daemon role.
+# a read-only host check, the fixed host record, a manual egress proxy unit
+# whose allowlist is empty, and the worker's private launch journal directory
+# (/var/lib/ditto-coding-hosted/launch-journal, 0700, worker-owned). It creates
+# no account or Docker network and never enables or starts a service.
+# Operator-run only, after the daemon role.
 #
 #   ansible-playbook -i infra/ansible/inventory/gcp.yml \
 #     infra/ansible/playbooks/gcp-coding-hosted-prerequisites.yml \

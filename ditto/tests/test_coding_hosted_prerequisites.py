@@ -20,6 +20,7 @@ PLACEHOLDER = "{{ coding_hosted_prerequisites_host_address }}"
 ROUTER_PORT = "{{ coding_hosted_prerequisites_router_port }}"
 PROXY_PORT = "{{ coding_hosted_prerequisites_proxy_port }}"
 WORKER = "30000000-0000-4000-8000-000000000003"
+JOURNAL_DIR = "/var/lib/ditto-coding-hosted/launch-journal"
 
 
 def load(name, path):
@@ -44,6 +45,7 @@ CONNECTIVITY = load(
 TASKS_SOURCE = (ROLE / "tasks/main.yml").read_text()
 GUARD_SOURCE = (ROLE / "tasks/guard.yml").read_text()
 FILES_SOURCE = (ROLE / "tasks/files.yml").read_text()
+JOURNAL_SOURCE = (ROLE / "tasks/journal.yml").read_text()
 UNIT = (ROLE / "templates/egress-proxy.service.j2").read_text()
 CONSTANTS = yaml.safe_load((ROLE / "vars/main.yml").read_text())
 
@@ -108,6 +110,8 @@ def test_ports_are_role_constants_written_once():
     assert CONSTANTS == {
         "coding_hosted_prerequisites_router_port": 18080,
         "coding_hosted_prerequisites_proxy_port": 18090,
+        "coding_hosted_prerequisites_worker_user": "ditto-coding-hosted",
+        "coding_hosted_prerequisites_launch_journal_dir": JOURNAL_DIR,
     }
     for path in ROLE.rglob("*"):
         if path.is_file() and "__pycache__" not in path.parts:
@@ -835,7 +839,7 @@ def test_all_checks_precede_writes_and_nothing_is_started_enabled_or_created():
         "OnSuccessOf=",
     ):
         assert f"'{value}'" in expected
-    source = TASKS_SOURCE + GUARD_SOURCE + FILES_SOURCE
+    source = TASKS_SOURCE + GUARD_SOURCE + FILES_SOURCE + JOURNAL_SOURCE
     for forbidden in (
         "state: started",
         "state: restarted",
@@ -881,6 +885,75 @@ def test_pre_write_and_post_install_file_checks_share_one_task_file():
         "or (item.stat.isreg | default(false) and item.stat.uid == 0 and "
         "item.stat.nlink == 1 and item.stat.mode == item.item.value.mode and "
         "item.stat.checksum == item.item.value.content | hash('sha256'))"
+    )
+
+
+JOURNAL_CREATE = "Create the private launch journal directory for the worker"
+
+
+def test_launch_journal_directory_is_worker_owned_private_and_never_replaced():
+    names = [item["name"] for item in block()]
+    account = task("Read the native worker account from daemon provisioning")
+    assert account["ansible.builtin.getent"] == {
+        "database": "passwd",
+        "key": "{{ coding_hosted_prerequisites_worker_user }}",
+    }
+    identity = task(
+        "Require an unprivileged worker whose home holds the launch journal directory"
+    )["ansible.builtin.assert"]["that"]
+    assert "coding_hosted_prerequisites_worker_uid | int > 0" in identity
+    assert "coding_hosted_prerequisites_launch_journal_dir | dirname" in identity[-1]
+    imports = {
+        item["name"]: item
+        for item in block()
+        if item.get("ansible.builtin.import_tasks") == "journal.yml"
+    }
+    before = imports[
+        "Refuse an unsafe worker home or unexpected launch journal directory"
+    ]
+    after = imports["Require the exact worker-owned launch journal directory"]
+    assert before["vars"] == {"coding_hosted_prerequisites_require_installed": False}
+    assert after["vars"] == {"coding_hosted_prerequisites_require_installed": True}
+    assert (
+        names.index(account["name"])
+        < names.index(before["name"])
+        < names.index(INSTALL)
+        < names.index(JOURNAL_CREATE)
+        < names.index(after["name"])
+        < names.index(RECEIPT)
+    )
+    # Every check that precedes the first write also precedes the directory.
+    assert names.index("Require the exact redacted check result") < names.index(
+        JOURNAL_CREATE
+    )
+    assert task(JOURNAL_CREATE)["ansible.builtin.file"] == {
+        "path": "{{ coding_hosted_prerequisites_launch_journal_dir }}",
+        "state": "directory",
+        "owner": "{{ coding_hosted_prerequisites_worker_user }}",
+        "group": "{{ coding_hosted_prerequisites_worker_gid }}",
+        "mode": "0700",
+    }
+    assert "recurse" not in TASKS_SOURCE
+    stat, assertion = yaml.safe_load(JOURNAL_SOURCE)
+    assert stat["ansible.builtin.stat"]["follow"] is False
+    assert stat["loop"] == [
+        "{{ coding_hosted_prerequisites_launch_journal_dir | dirname }}",
+        "{{ coding_hosted_prerequisites_launch_journal_dir }}",
+    ]
+    home = assertion["ansible.builtin.assert"]["that"][:4]
+    assert "not coding_hosted_prerequisites_journal_state.results[0].stat.islnk" in home
+    assert (
+        "coding_hosted_prerequisites_journal_state.results[0].stat.mode == '0700'"
+        in home
+    )
+    condition = " ".join(assertion["ansible.builtin.assert"]["that"][4].split())
+    journal = "coding_hosted_prerequisites_journal_state.results[1].stat"
+    assert condition == (
+        f"(not {journal}.exists and not coding_hosted_prerequisites_require_installed) "
+        f"or ({journal}.isdir | default(false) and not {journal}.islnk and "
+        f"{journal}.uid == coding_hosted_prerequisites_worker_uid and "
+        f"{journal}.gid == coding_hosted_prerequisites_worker_gid and "
+        f"{journal}.mode == '0700')"
     )
 
 
@@ -1012,6 +1085,8 @@ def test_doc_states_the_boundaries():
         "host-prerequisites-receipt.json",
         "--recursive-errors=no",
         "SO_REUSEADDR",
+        JOURNAL_DIR,
+        "launch_journal_dir",
     ):
         assert boundary in doc
     connectivity = " ".join(

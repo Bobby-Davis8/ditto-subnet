@@ -5,3 +5,9 @@
 # ports are a separately reviewed change.
 coding_hosted_prerequisites_router_port: 18080
 coding_hosted_prerequisites_proxy_port: 18090
+# The native worker account the daemon role creates, and the private launch
+# journal directory the hosted runtime's launch_journal_dir names. The runtime
+# requires a real 0700 directory owned by the worker's effective UID, persisting
+# across invocations; this role only pre-creates it.
+coding_hosted_prerequisites_worker_user: ditto-coding-hosted
+coding_hosted_prerequisites_launch_journal_dir: /var/lib/ditto-coding-hosted/launch-journal

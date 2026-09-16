@@ -2,8 +2,8 @@
 
 The `coding_hosted_prerequisites` role fixes the host values the hosted runtime
 reads for candidate networking and identity, checks them against the live host,
-and installs a manual egress proxy unit with an empty allowlist. It defaults
-off. It creates no account, no Docker network, no nft rule and no credential,
+installs a manual egress proxy unit with an empty allowlist and pre-creates the
+worker's private launch journal directory. It defaults off. It creates no account, no Docker network, no nft rule and no credential,
 and it never enables or starts a service. It is not a worker installation, a
 connectivity profile, packet-enforcement evidence or canary approval.
 
@@ -47,6 +47,21 @@ This role owns only static host state. Per-attempt authority stays elsewhere:
   Platform companion creates `state_root` for each attempt.
 - An operator starts the proxy before the worker and stops it afterwards.
 
+### Launch journal directory
+
+The runtime's `launch_journal_dir` (`codinghostedruntime/config.go`, B5 launch
+intent journal in `services/dittobench-api/docs/coding-hosted-runtime-v2.md`)
+must be pre-provisioned, persist across worker invocations and never be the
+`state_root` or inside or above it. `internal/codinglaunchjournal` refuses it
+unless it is a real directory (no symlink in its path) of mode `0700` owned by
+the worker's effective UID. The role fixes it at
+`/var/lib/ditto-coding-hosted/launch-journal`, inside the worker home, owned by
+the native worker account `ditto-coding-hosted` (the daemon role's account and
+the worker unit's `User=`) and its primary group, mode `0700`. The account name
+and path are role constants in `vars/main.yml`. The role never creates the
+account, never writes inside the directory and never changes an existing one;
+the worker creates the journal files itself.
+
 ### One attempt at a time
 
 The record has a single `router_listen`, and each running worker binds it, so
@@ -89,6 +104,11 @@ enabled. Before any write it also refuses:
 - a live `ditto-coding-hosted-worker.service`, `ditto-coding-custody@*.service`
   or egress proxy (any state other than inactive or failed);
 - a missing or unsafe daemon policy directory or `host-policy.py`;
+- a missing `ditto-coding-hosted` account, a UID or GID of 0, or a home other
+  than `/var/lib/ditto-coding-hosted`; a worker home that is a link, not a
+  directory, not owned by the worker or not mode `0700`; and an existing launch
+  journal path that is a link, not a directory, or not owned by the worker's UID
+  and GID with mode `0700`;
 - any installed file whose bytes, owner, mode or link count differ from this
   revision, or a receipt path that is not a root-owned `0444` file;
 - a non-root check, a host policy rejection, an unmapped candidate identity, a
@@ -127,6 +147,7 @@ so a failed check leaves no installed file.
 | `/usr/local/lib/ditto-coding-hosted/host-prerequisites.json` | root, `0444` | Fixed host record (see below) |
 | `/etc/systemd/system/ditto-coding-hosted-egress-proxy.service` | root, `0644` | Proxy unit without an `[Install]` section |
 | `/usr/local/lib/ditto-coding-hosted/host-prerequisites-receipt.json` | root, `0444` | Convergence receipt: `source_revision`, `record_sha256`, `applied_at` (UTC) |
+| `/var/lib/ditto-coding-hosted/launch-journal` | `ditto-coding-hosted`:`ditto-coding-hosted`, `0700` directory | The worker's `launch_journal_dir`; created only when absent, never recursively |
 
 Nothing reads the host record yet, so today it is advisory. The hosted
 attempt-config materializer
@@ -166,7 +187,8 @@ After convergence the role requires the unit to be loaded from the installed
 file with no drop-ins, `UnitFileState=static`, `ActiveState=inactive`, no
 reverse start dependency (`WantedBy`, `RequiredBy`, `UpheldBy`, `BoundBy`,
 `TriggeredBy`, `OnFailureOf`, `OnSuccessOf`; a vendor-path `.wants` link leaves
-`UnitFileState=static`), and each file to match its rendered bytes. It prints the values with
+`UnitFileState=static`), each file to match its rendered bytes and the launch
+journal directory to be a worker-owned `0700` directory. It prints the values with
 `services_started=false`, `shadow_only=true` and `weight_eligible=false`. To
 recheck later, with the worker and proxy stopped:
 
@@ -176,6 +198,7 @@ systemctl show ditto-coding-hosted-egress-proxy.service \
 sudo /usr/bin/python3 -I /usr/local/lib/ditto-coding-hosted/host-prerequisites.py check \
   < /usr/local/lib/ditto-coding-hosted/host-prerequisites.json
 cat /usr/local/lib/ditto-coding-hosted/host-prerequisites-receipt.json
+sudo stat -c '%F %U:%G %a' /var/lib/ditto-coding-hosted/launch-journal
 ```
 
 These are configuration checks. They do not prove candidate packet denial,
@@ -190,7 +213,7 @@ ends with FIN rather than a reset that could drop the `403` or `405`.
 
 ## Rollback and removal
 
-There is no account, Docker network, firewall rule or data to remove. With the
+There is no account, Docker network or firewall rule to remove. With the
 worker, every custody instance and the proxy stopped:
 
 ```text
@@ -202,6 +225,12 @@ sudo rm /usr/local/lib/ditto-coding-hosted/egress-proxy.py \
   /usr/local/lib/ditto-coding-hosted/host-prerequisites.json \
   /usr/local/lib/ditto-coding-hosted/host-prerequisites-receipt.json
 ```
+
+The launch journal directory may name Docker objects from an interrupted
+attempt. Keep it unless removing the host's native worker entirely; first run
+`dittobench-coding-hosted-worker --reconcile-launch-journal` as the worker
+account (see the runtime document), then remove only that directory with
+`sudo rm -r /var/lib/ditto-coding-hosted/launch-journal`.
 
 Reissue any connectivity profile that names the proxy. A new host address or a
 changed role revision needs this removal and a fresh reviewed convergence; the
