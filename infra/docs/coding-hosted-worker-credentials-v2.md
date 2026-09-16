@@ -82,9 +82,12 @@ repository, its CI or its roles creates, grants or reads them.
   account `coding-hosted-image-reader` with a custom role holding only
   `storage.objects.get`, conditioned to screened-image objects in
   `ditto-platform-agents-prod`, and its own HMAC key. The secret key lives in
-  its own `coding-hosted-image-reader-hmac-secret` (the access id in
-  `coding-hosted-image-reader-hmac-access`, or taken from the identity's
-  non-secret HMAC metadata). **Never reuse the Platform's
+  its own `coding-hosted-image-reader-hmac-secret`. The access id is not a
+  secret and gets no Secret Manager entry: it is read from the identity's HMAC
+  key metadata, which must list exactly one `ACTIVE` key, the same way the
+  Platform's `storage_hmac_access_id` is a non-secret value. Two active keys
+  print two lines, which the input check rejects (no whitespace), so the step
+  fails closed instead of picking one. **Never reuse the Platform's
   `platform-storage-hmac-secret`**, which grants read and write on the whole
   agents bucket.
 - **Provider: a dedicated, hard-capped OpenRouter key.** A new key with a hard
@@ -131,7 +134,7 @@ export DITTO_CODING_WORKER_HIPPIUS_PRIVATE_INPUT_READER_SECRET_KEY="$(gcloud sec
 export DITTO_CODING_WORKER_HIPPIUS_PRIVATE_INPUT_CURATOR_ACCESS_KEY="$(gcloud secrets versions access latest --secret=platform-coding-catalog-curator-access-key --project=ditto-app-dev)"
 export DITTO_CODING_WORKER_HIPPIUS_EVIDENCE_MEDIATOR_ACCESS_KEY="$(gcloud secrets versions access latest --secret=platform-coding-hippius-evidence-access-key --project=ditto-app-dev)"
 export DITTO_CODING_WORKER_HIPPIUS_EVIDENCE_MEDIATOR_SECRET_KEY="$(gcloud secrets versions access latest --secret=platform-coding-hippius-evidence-secret-key --project=ditto-app-dev)"
-export DITTO_CODING_WORKER_IMAGE_STORAGE_ACCESS_KEY="$(gcloud secrets versions access latest --secret=coding-hosted-image-reader-hmac-access --project=ditto-app-dev)"
+export DITTO_CODING_WORKER_IMAGE_STORAGE_ACCESS_KEY="$(gcloud storage hmac list --project=ditto-app-dev --service-account=coding-hosted-image-reader@ditto-app-dev.iam.gserviceaccount.com --filter=state=ACTIVE --format='value(accessId)')"
 export DITTO_CODING_WORKER_IMAGE_STORAGE_SECRET_KEY="$(gcloud secrets versions access latest --secret=coding-hosted-image-reader-hmac-secret --project=ditto-app-dev)"
 export DITTO_CODING_WORKER_PROVIDER_KEY="$(gcloud secrets versions access latest --secret=coding-hosted-openrouter-key --project=ditto-app-dev)"
 
