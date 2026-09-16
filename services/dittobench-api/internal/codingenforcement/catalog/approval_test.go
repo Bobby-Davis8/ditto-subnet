@@ -35,8 +35,16 @@ func TestApprovalVectorMatchesPythonBytes(t *testing.T) {
 		t.Fatalf("approval daemon identity digest = %s", got)
 	}
 
+	// The signature covers exact stored bytes, so non-canonical whitespace is
+	// accepted and names the same daemon.
+	spaced := append(bytes.ReplaceAll(raw, []byte(`,"`), []byte(`, "`)), '\n')
+	if got, err := ApprovalDaemonIdentitySHA256(spaced); err != nil || got != vector["identity_sha256"] {
+		t.Fatalf("non-canonical approval refused: %s %v", got, err)
+	}
+
 	for name, mutated := range map[string][]byte{
-		"not canonical": append(append([]byte{}, raw...), '\n'),
+		"trailing data": append(append([]byte{}, raw...), []byte(`{}`)...),
+		"duplicate key": append(append([]byte{}, raw[:len(raw)-1]...), []byte(`,"max_jobs":2}`)...),
 		"wrong schema":  bytes.Replace(raw, []byte(ApprovalSchema), []byte("dittobench-coding-native-controls-approval-v2"), 1),
 		"extra key":     append(append([]byte{}, raw[:len(raw)-1]...), []byte(`,"zz":1}`)...),
 		"missing key":   bytes.Replace(raw, []byte(`"max_jobs":2,`), nil, 1),

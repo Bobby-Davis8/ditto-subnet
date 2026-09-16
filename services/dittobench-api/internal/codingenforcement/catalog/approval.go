@@ -7,8 +7,9 @@ import (
 )
 
 // ApprovalSchema is the curator-signed native controls approval. Peyton signs
-// its canonical bytes with the offline curator key (a detached Ed25519
-// signature); nothing in this package or any collector can create one.
+// its exact stored bytes, which need not be canonical JSON, with the offline
+// curator key (a detached Ed25519 signature); nothing in this package or any
+// collector can create one.
 const ApprovalSchema = "dittobench-coding-native-controls-approval-v3"
 
 // ApprovalKeys is the approval's closed key set, identical to native.policy.
@@ -20,15 +21,16 @@ var ApprovalKeys = []string{
 	"source_revision", "weight_eligible",
 }
 
-// ErrApproval marks bytes that are not a canonical approval document.
-var ErrApproval = errors.New("approval is not a canonical native controls approval")
+// ErrApproval marks bytes that are not a strictly parsed approval document.
+var ErrApproval = errors.New("approval is not a native controls approval")
 
-// ApprovalDaemonIdentitySHA256 returns the digest of the daemon identity a
-// canonical approval names, the value evidence records carry as
+// ApprovalDaemonIdentitySHA256 returns the digest of the daemon identity an
+// approval names (parsed strictly by Decode: no duplicate keys or trailing
+// data, canonical form not required), the value evidence records carry as
 // host.daemon_identity_sha256. It checks shape only and verifies no signature:
 // a collector may use it to refuse a different daemon, never to authorize.
 func ApprovalDaemonIdentitySHA256(raw []byte) (string, error) {
-	decoded, err := ParseCanonical(raw)
+	decoded, err := Decode(raw)
 	if err != nil {
 		return "", ErrApproval
 	}
