@@ -97,7 +97,7 @@ async def test_http_admission_returns_only_signed_status(hosted_client, session_
 
 
 async def test_cancelled_assignment_is_a_generic_conflict_with_a_logged_reason(
-    hosted_client, session_maker, caplog
+    hosted_client, session_maker, caplog, monkeypatch
 ):
     authority = await _seed(session_maker)
     async with session_maker() as session, session.begin():
@@ -108,9 +108,13 @@ async def test_cancelled_assignment_is_a_generic_conflict_with_a_logged_reason(
             actor="peyton@omniaura.ai",
             reason="operator cancelled the unstarted canary",
         )
-    caplog.set_level(
-        logging.WARNING, logger="ditto.api_server.endpoints.validator_coding_hosted"
+    # An in-process Alembic run earlier in the worker (fileConfig) disables
+    # loggers that already exist; re-enable this one for the test.
+    refusal_logger = logging.getLogger(
+        "ditto.api_server.endpoints.validator_coding_hosted"
     )
+    monkeypatch.setattr(refusal_logger, "disabled", False)
+    caplog.set_level(logging.WARNING, logger=refusal_logger.name)
     for operation in ("evaluate", "status"):
         response = await hosted_client.post(
             PATH,
