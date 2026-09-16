@@ -23,6 +23,8 @@ type HostedHarnessConfig struct {
 	EgressProxy       string
 	SeccompProfile    string
 	AppArmorProfile   string
+	// LaunchIntent is the hosted runtime's launch journal hook.
+	LaunchIntent func(ctx context.Context, run string, containers, networks []string) error
 }
 
 // NewHostedHarnessDocker is the one construction of the hosted-v2 harness
@@ -39,7 +41,7 @@ func NewHostedHarnessDocker(config HostedHarnessConfig) *LocalDocker {
 		Harden: true, RequireRootless: true, RequireIsolatedDaemon: true,
 		HostGatewayIP: config.HostGatewayIP, EgressNetwork: config.EgressNetwork, EgressProxy: config.EgressProxy,
 		SeccompProfile: config.SeccompProfile, AppArmorProfile: config.AppArmorProfile,
-		MemorySwapEqualsMemory: true, PullNever: true,
+		MemorySwapEqualsMemory: true, PullNever: true, LaunchIntent: config.LaunchIntent,
 	}
 }
 

@@ -259,6 +259,10 @@ type LocalDocker struct {
 	// PullNever passes --pull never, so a locally missing image fails the start
 	// instead of falling back to a registry pull. The hosted-v2 harness sets it.
 	PullNever bool
+	// LaunchIntent, when set, durably records the run identity, container name
+	// and job network name before either is created (the hosted runtime's
+	// launch journal). A failure prevents the launch.
+	LaunchIntent func(ctx context.Context, run string, containers, networks []string) error
 	// dockerCommand is injectable only for deterministic command/parse tests.
 	dockerCommand func(context.Context, ...string) ([]byte, error)
 }
@@ -1054,6 +1058,15 @@ func (d *LocalDocker) run(ctx context.Context, image string, env map[string]stri
 		return nil, err
 	}
 	containerName := "dittobench-" + identity
+	if d.LaunchIntent != nil {
+		networks := []string{}
+		if d.EgressNetwork != "" {
+			networks = append(networks, "ditto-job-"+identity)
+		}
+		if err := d.LaunchIntent(runCtx, identity, []string{containerName}, networks); err != nil {
+			return nil, fmt.Errorf("record sandbox launch intent: %w", err)
+		}
+	}
 	network := ""
 	if d.EgressNetwork != "" {
 		network, err = d.createIsolatedNetwork(runCtx, identity)
