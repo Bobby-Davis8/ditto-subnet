@@ -98,9 +98,14 @@ PYLON_JOURNAL = (
 )
 
 
-def _team_rules() -> tuple[dict[str, Any], list[str], list[str]]:
+DEPLOY_USER = "{{ deploy_user | default('deploy') }}"
+
+
+def _team_rules(
+    deploy_user: str = "deploy",
+) -> tuple[dict[str, Any], list[str], list[str]]:
     task = _task(BASE / "tasks/users.yml", "Ensure team sudoers grant")
-    content = task["ansible.builtin.copy"]["content"]
+    content = task["ansible.builtin.copy"]["content"].replace(DEPLOY_USER, deploy_user)
     logical = re.sub(r"\\\n\s*", "", content)
     lines = [
         line.strip()
@@ -141,13 +146,43 @@ def test_team_sudoers_is_exact_root_only_and_excludes_deploy(tmp_path: Path) -> 
     assert set(seen) == expected
     assert all(verbs == {"start", "stop", "restart"} for verbs in seen.values())
     assert len(commands) == len(set(commands)) == 3 * len(expected)
-    text = copy["content"]
+    text = copy["content"].replace(DEPLOY_USER, "deploy")
+    assert "{{" not in text
     assert "*" not in text.replace("# ", "")
     assert "(ALL)" not in text and "journalctl" not in "".join(rules + commands)
     assert "status" not in "".join(rules + commands)
     for guard in GUARD_UNITS:
         assert guard not in "".join(commands), guard
     _visudo(tmp_path, text)
+
+
+def test_team_sudoers_excludes_the_configured_deploy_user(tmp_path: Path) -> None:
+    task, _, rules = _team_rules("release")
+    assert rules == [
+        "%ditto,!release ALL=(root) NOPASSWD: DITTO_TEAM_UNITS",
+        "%ditto,!release ALL=(root) NOPASSWD: /bin/systemctl daemon-reload, "
+        "/bin/systemctl reload caddy",
+        "%ditto ALL=(release) NOPASSWD: ALL",
+    ]
+    content = task["ansible.builtin.copy"]["content"]
+    _visudo(tmp_path, content.replace(DEPLOY_USER, "release"))
+
+    tasks = _load(BASE / "tasks/users.yml")
+    names = [task.get("name") for task in tasks]
+    guard = tasks[names.index("Require a safe deploy service account name")]
+    assert names.index(guard["name"]) < names.index(
+        "Ensure 'deploy' service account exists"
+    )
+    (is_string, matches) = guard["ansible.builtin.assert"]["that"]
+    assert is_string == "deploy_user | default('deploy') is string"
+    prefix = "deploy_user | default('deploy') is match('"
+    assert matches.startswith(prefix) and matches.endswith("')")
+    # Jinja unescapes the string literal before Ansible's re.match sees it.
+    pattern = matches.removeprefix(prefix).removesuffix("')").replace("\\\\", "\\")
+    for good in ("deploy", "release", "_svc-1"):
+        assert re.match(pattern, good), good
+    for bad in ("", "Root", "bad user", "rel\n", "x,ALL", "a" * 33, "!deploy"):
+        assert not re.match(pattern, bad), bad
 
 
 def test_team_members_read_the_journal_without_sudo_and_deploy_does_not() -> None:

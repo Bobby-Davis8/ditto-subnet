@@ -88,7 +88,8 @@ The rules are now one alias of exact argument vectors,
 `/bin/systemctl start|stop|restart <unit>`, for a reviewed list of 15 service
 units (each with and without `.service`) and 6 timers, plus `daemon-reload` and
 `reload caddy`. They run as `(root)` only and are granted to `%ditto,!deploy`,
-so `deploy` gets none of them. Isolation guards are not in the list: the coding
+rendered from `deploy_user` (asserted to be a plain POSIX username), so the
+service account gets none of them. Isolation guards are not in the list: the coding
 executor and hosted egress units, the sandbox firewall, the IMDS guard, the
 egress proxy and rootless Docker daemons. `%ditto ALL=(deploy) NOPASSWD: ALL`
 stays. `visudo` parses the file in tests.
