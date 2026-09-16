@@ -650,6 +650,26 @@ def test_no_other_role_or_playbook_touches_either_unit() -> None:
         # Read-only live-unit refusal before credential materialization.
         "roles/coding_hosted_postgres_environment": {
             "List live worker and custody units",
+            # #1920 re-lists after verifying and after writing.
+            "Re-list live worker and custody units after verifying",
+            "Re-list live worker and custody units after writing",
+        },
+        # Read-only `systemctl list-units` liveness guards added by the sibling
+        # native-host roles (#1897, #1899, #1925).
+        "roles/coding_hosted_postgres_environment_cleanup": {
+            "List live worker and custody units",
+            "Re-list live worker and custody units after removal",
+        },
+        "roles/coding_hosted_prerequisites": {
+            "List worker, custody and egress proxy units",
+        },
+        "roles/coding_hosted_worker_credentials": {
+            "List live worker and custody units",
+            "Re-list live worker and custody units after writing",
+        },
+        "roles/coding_hosted_worker_credentials_cleanup": {
+            "List live worker and custody units",
+            "Re-list live worker and custody units after removing",
         },
     }
     # The only paths a literal scan cannot resolve are screener_partition's

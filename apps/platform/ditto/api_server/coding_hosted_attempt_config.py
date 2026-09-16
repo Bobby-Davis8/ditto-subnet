@@ -236,6 +236,12 @@ class HostLayout:
         return self.home / "private"
 
     @property
+    def launch_journal(self) -> Path:
+        # Pre-provisioned, persistent across attempts, never inside an attempt's
+        # runtime_root (#1941 launch intent journal).
+        return self.home / "launch-journal"
+
+    @property
     def evidence_public_key(self) -> Path:
         return self.home / "authority" / "evidence-public.pem"
 
@@ -552,6 +558,7 @@ def host_settings(document: object) -> dict[str, Any]:
 def verify_host(layout: HostLayout) -> dict[str, Any]:
     with refusal("hosted attempt host refused"):
         private_directory(layout.home)
+        private_directory(layout.launch_journal)
         # Created by the worker itself, just before the exclusive reservation.
         if os.path.lexists(layout.attempts):
             private_directory(layout.attempts)
@@ -1010,6 +1017,7 @@ async def materialize(
             "host": {
                 "docker_executable": str(layout.docker_executable),
                 "docker_socket": str(layout.docker_socket),
+                "launch_journal_dir": str(layout.launch_journal),
                 "executor_repository": executor_repository,
                 "seccomp_profile": "",
                 "apparmor_profile": "",

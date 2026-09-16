@@ -11,7 +11,9 @@ from ditto.api_models.coding_certification_leases import (
 )
 from ditto.tests.validator.test_coding_canary import (
     _AGENT,
+    _HOTKEY,
     _NOW,
+    _TARGETS,
     _lease,
     _Platform,
     _Runtime,
@@ -59,6 +61,8 @@ async def test_canary_worker_does_not_submit_after_the_receipt_window() -> None:
         platform=platform,
         runtime=runtime,
         sign_receipt=lambda _lease, _receipt: "ab" * 64,
+        validator_hotkey=_HOTKEY,
+        targets=_TARGETS,
         clock=lambda: next(times),
     )
     worker.offer(_AGENT, 12)
