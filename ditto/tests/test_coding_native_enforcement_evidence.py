@@ -550,7 +550,9 @@ NETWORK_BINDING = {
 }
 
 
-def preflight_value(tool_hashes: dict, checked_at: int) -> dict:
+def preflight_value(
+    tool_hashes: dict, checked_at: int, nft_ruleset_semantic_sha256: str | None = None
+) -> dict:
     return {
         "schema": EVIDENCE.PREFLIGHT_SCHEMA,
         "source_revision": REVISION,
@@ -566,7 +568,7 @@ def preflight_value(tool_hashes: dict, checked_at: int) -> dict:
         "daemon_identity": copy.deepcopy(DAEMON_IDENTITY),
         "daemon_identity_sha256": DAEMON,
         "tool_sha256": dict(tool_hashes),
-        "nft_snapshot_sha256": digest("nft"),
+        "nft_ruleset_semantic_sha256": nft_ruleset_semantic_sha256 or digest("nft"),
         "checked_at_unix": checked_at,
         "host_preflight_passed": True,
         "pending_host_qualification": list(EVIDENCE.PREFLIGHT_PENDING),
@@ -2227,7 +2229,7 @@ def test_preflight_binding_and_order_refusals(world):
     assert "pre-collection preflight machine differs" in world.verify_record(
         {**record, "pre_collection_preflight_sha256": world.put(stdout_bytes(other))}
     )
-    for name in ("nft_snapshot_sha256", "config_sha256"):
+    for name in ("nft_ruleset_semantic_sha256", "config_sha256"):
         drifted = preflight_value(world.preflight_tools, T0)
         drifted[name] = digest(f"drifted-{name}")
         failure = world.verify_record(
@@ -2305,6 +2307,16 @@ def test_verify_bounds_the_post_collection_preflight_age(world):
         (
             lambda v: v.update(schema="dittobench-coding-native-host-preflight-v2"),
             "schema is unknown",
+        ),
+        (
+            lambda v: v.update(schema="dittobench-coding-native-host-preflight-v3"),
+            "schema is unknown",
+        ),
+        (
+            lambda v: v.update(
+                nft_snapshot_sha256=v.pop("nft_ruleset_semantic_sha256")
+            ),
+            "keys are not the closed set",
         ),
     ],
 )

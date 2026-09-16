@@ -40,7 +40,7 @@ REVIEW_SCHEMA = "dittobench-coding-native-evidence-review-v1"
 VERIFICATION_SCHEMA = "dittobench-coding-native-evidence-verification-v1"
 CUSTODY_SCHEMA = "dittobench-coding-native-custody-binding-v1"
 CHECK_SCHEMA = "dittobench-coding-native-evidence-approval-check-v1"
-PREFLIGHT_SCHEMA = "dittobench-coding-native-host-preflight-v3"
+PREFLIGHT_SCHEMA = "dittobench-coding-native-host-preflight-v4"
 APPROVAL_SCHEMA = "dittobench-coding-native-controls-approval-v3"
 DAEMON_IDENTITY_SCHEMA = "dittobench-coding-native-daemon-identity-v1"
 EXECUTION_PROFILE_SCHEMA = "dittobench-coding-hosted-authoring-profile-v2"
@@ -363,7 +363,7 @@ PREFLIGHT_KEYS = {
     "daemon_identity",
     "daemon_identity_sha256",
     "tool_sha256",
-    "nft_snapshot_sha256",
+    "nft_ruleset_semantic_sha256",
     "checked_at_unix",
     "host_preflight_passed",
     "pending_host_qualification",
@@ -1834,7 +1834,7 @@ def parse_preflight(raw: bytes, checkout: Checkout | None) -> dict[str, Any]:
         "runtime_archive_sha256",
         "config_sha256",
         "daemon_identity_sha256",
-        "nft_snapshot_sha256",
+        "nft_ruleset_semantic_sha256",
     ):
         require(is_digest(value[key]), f"host preflight {key} is malformed")
     images = value["image_approval_sha256"]
@@ -2451,7 +2451,12 @@ def verify_record(
                 same(preflight[name], release[name]),
                 f"{label} preflight {name} differs",
             )
-    for name in ("nft_snapshot_sha256", "config_sha256"):
+    # The preflight's semantic nft digest (preflight v4) survives a clean worker
+    # start and stop: handles, counters, element timeouts, unreferenced empty
+    # regular chains and sets, and rule-less accept filter base chains are not
+    # in it. Any other ruleset difference still refuses. v3's raw listing
+    # digest never survived a worker cycle and is refused as unknown.
+    for name in ("nft_ruleset_semantic_sha256", "config_sha256"):
         require(
             same(pre[name], host_preflight[name]),
             f"pre-collection preflight {name} differs from the host preflight",

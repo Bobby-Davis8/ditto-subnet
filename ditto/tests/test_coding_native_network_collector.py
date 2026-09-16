@@ -47,6 +47,14 @@ ISSUED, EXPIRES = PROFILE["issued_at_unix"], PROFILE["expires_at_unix"]
 NFT_SCOPED = (FIXTURES / "nft-scoped.json").read_bytes()
 NFT_DENY = (FIXTURES / "nft-deny-after-scoped.json").read_bytes()
 NFT_DENY_INITIAL = (FIXTURES / "nft-deny-initial.json").read_bytes()
+NFT_DENY_AFTER_EXPIRY = (FIXTURES / "nft-deny-after-expiry.json").read_bytes()
+NFT_FIXTURE_NAMES = (
+    "nft-deny-initial.json",
+    "nft-scoped.json",
+    "nft-deny-after-scoped.json",
+    "nft-deny-after-expiry.json",
+)
+PREFLIGHT_PATH = ROOT / "infra/scripts/inspect-coding-native-host.py"
 RUNNER_SHA256 = base.PROBE_RUNNER_BINARY
 RUNNER = (
     f"/opt/ditto-coding-hosted/{base.REVISION}/bin/dittobench-coding-enforcement-probe"
@@ -583,6 +591,20 @@ class CollectorWorld:
         for path in (destination.parent, destination):
             path.chmod(0o755 if path.is_dir() else 0o644)
         self.world.profile_paths["connectivity_profile_sha256"].write_bytes(PROFILE_RAW)
+        # Preflights carry the semantic digests of recorded kernel listings: the
+        # deny guard before any worker start, and after the collector's worker
+        # cycles and the profile's expiry.
+        self.world.pre_raw = base.stdout_bytes(
+            base.preflight_value(
+                self.world.preflight_tools, T0, nft_semantic_sha256(NFT_DENY_INITIAL)
+            )
+        )
+        self.world.pre_sha = self.world.put(self.world.pre_raw)
+        self.world.post_value = base.preflight_value(
+            self.world.preflight_tools,
+            T0 + 4000,
+            nft_semantic_sha256(NFT_DENY_AFTER_EXPIRY),
+        )
         self.collector_config = {
             "schema": COLLECTOR.CONFIG_SCHEMA,
             "source_revision": base.REVISION,
@@ -616,6 +638,10 @@ class CollectorWorld:
 
     def verify(self, record: dict) -> str | None:
         return self.world.verify_record(record)
+
+
+def nft_semantic_sha256(raw: bytes) -> str:
+    return COLLECTOR.PREFLIGHT.nft_ruleset_semantic_sha256(raw, COLLECTOR.TABLE)
 
 
 @pytest.fixture
@@ -663,6 +689,12 @@ def test_collected_record_verifies_offline_and_binds_the_measured_host(cw):
     )
     assert binding["deny_ruleset_sha256"] == COLLECTOR.deny_ruleset(NFT_DENY, UID)
     assert (binding["scoped_output_rules"], binding["scoped_input_rules"]) == (11, 3)
+    pre = json.loads(cw.world.pre_raw)
+    assert pre["nft_ruleset_semantic_sha256"] == nft_semantic_sha256(NFT_DENY_INITIAL)
+    assert (
+        cw.world.post_value["nft_ruleset_semantic_sha256"]
+        == pre["nft_ruleset_semantic_sha256"]
+    )
     assert record["preconditions"] == EVIDENCE.PRECONDITIONS
     assert record["residue"] == EVIDENCE.RESIDUE
     phases = {phase["name"]: phase for phase in record["phases"]}
@@ -1051,10 +1083,14 @@ def test_compiled_policy_equals_the_recorded_kernel_listing():
 
 def test_deny_digest_is_stable_across_a_worker_cycle_but_raw_listings_are_not():
     # Handles change and the scoped chains and sets survive a flush, so a raw
-    # listing digest (the preflight's nft_snapshot_sha256) differs after any
-    # worker start; the normalized deny digest does not.
+    # listing digest (preflight v3's nft_snapshot_sha256) differs after any
+    # worker start; the normalized deny digest and, once the elements expire,
+    # the preflight's semantic digest do not.
     assert (
         hashlib.sha256(NFT_DENY_INITIAL).digest() != hashlib.sha256(NFT_DENY).digest()
+    )
+    assert nft_semantic_sha256(NFT_DENY_INITIAL) == nft_semantic_sha256(
+        NFT_DENY_AFTER_EXPIRY
     )
     assert COLLECTOR.deny_ruleset(NFT_DENY_INITIAL, UID) == COLLECTOR.deny_ruleset(
         NFT_DENY, UID
@@ -1065,6 +1101,75 @@ def test_deny_digest_is_stable_across_a_worker_cycle_but_raw_listings_are_not():
         COLLECTOR.Refusal, match="exactly the ditto_coding_hosted table"
     ):
         COLLECTOR.normalize_ruleset(json.dumps({"nftables": []}).encode())
+
+
+def test_collector_and_preflight_share_one_nft_normalization():
+    assert str(PREFLIGHT_PATH.relative_to(ROOT)) == COLLECTOR.PREFLIGHT_TOOL
+    assert Path(COLLECTOR.PREFLIGHT.__file__).resolve() == PREFLIGHT_PATH
+    assert "def _strip" not in COLLECTOR_PATH.read_text()
+    for name in NFT_FIXTURE_NAMES:
+        raw = (FIXTURES / name).read_bytes()
+        assert COLLECTOR.normalize_ruleset(raw) == COLLECTOR.PREFLIGHT.nft_entries(
+            json.loads(raw)
+        ), name
+        # The semantic digest is a pruned, sorted view of those same entries.
+        assert (
+            nft_semantic_sha256(raw)
+            == hashlib.sha256(
+                json.dumps(
+                    COLLECTOR.PREFLIGHT.nft_semantic_entries(
+                        COLLECTOR.normalize_ruleset(raw)
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+        ), name
+
+
+def test_verifier_accepts_the_recorded_cycle_and_refuses_a_ruleset_difference(cw):
+    record, _host = cw.collect()
+    assert cw.verify(record) is None
+
+    def post_with(raw: bytes) -> str | None:
+        value = base.preflight_value(
+            cw.world.preflight_tools, T0 + 4000, nft_semantic_sha256(raw)
+        )
+        sha = cw.world.put(base.stdout_bytes(value))
+        result, _ok = cw.world.verify([cw.world.put(base.canonical(record))], sha)
+        return result["records"][0]["failure"]
+
+    assert post_with(NFT_DENY_INITIAL) is None
+    listing = json.loads(NFT_DENY_AFTER_EXPIRY)
+    listing["nftables"].append(
+        {
+            "rule": {
+                "family": "inet",
+                "table": COLLECTOR.TABLE,
+                "chain": "scoped_output",
+                "handle": 40,
+                "expr": [
+                    {
+                        "match": {
+                            "op": "==",
+                            "left": {"meta": {"key": "skuid"}},
+                            "right": UID,
+                        }
+                    },
+                    {"accept": None},
+                ],
+            }
+        }
+    )
+    drifted = {
+        "added accept rule": json.dumps(listing).encode(),
+        "unexpired scoped sets": NFT_DENY,
+        "scoped policy still loaded": NFT_SCOPED,
+    }
+    for label, raw in drifted.items():
+        failure = post_with(raw)
+        assert failure is not None, label
+        assert "nft_ruleset_semantic_sha256 differs from the host preflight" in failure
 
 
 def test_verifier_rule_counts_mirror_the_compiled_policy():
@@ -1178,17 +1283,31 @@ def test_live_kernel_listing_matches_the_compiled_policy(tmp_path):
     scoped = scoped.replace(f"user.slice/user-{uid}.slice/user@{uid}.service", daemon)
     (tmp_path / "deny.nft").write_text(host_policy.nft_policy(uid))
     (tmp_path / "scoped.nft").write_text(scoped)
+    # A second scoped load whose elements expire after one second, so the
+    # final listing is the post-expiry deny guard the post-collection
+    # preflight sees.
+    expiring = policy.policy(profile, uid, EXPIRES - 1).replace(policy.WORKER, worker)
+    expiring = expiring.replace(
+        f"user.slice/user-{uid}.slice/user@{uid}.service", daemon
+    )
+    (tmp_path / "expiring.nft").write_text(expiring)
     script = (
         "set -e; list='nft -j list table inet ditto_coding_hosted'; "
         "nft -f deny.nft; $list > d0.json; nft -f scoped.nft; $list > s.json; "
         "nft -f deny.nft; $list > d1.json"
     )
-    subprocess.run(
-        ["unshare", "-rn", "sh", "-c", script],
-        cwd=tmp_path,
-        check=True,
-        env={"PATH": "/usr/sbin:/usr/bin:/bin", "TZ": "UTC"},
+    # A fresh namespace: re-adding an existing element keeps its first timeout.
+    cycle = (
+        "set -e; nft -f deny.nft; nft -f expiring.nft; nft -f deny.nft; sleep 2; "
+        "nft -j list table inet ditto_coding_hosted > d2.json"
     )
+    for commands in (script, cycle):
+        subprocess.run(
+            ["unshare", "-rn", "sh", "-c", commands],
+            cwd=tmp_path,
+            check=True,
+            env={"PATH": "/usr/sbin:/usr/bin:/bin", "TZ": "UTC"},
+        )
     listing = (tmp_path / "s.json").read_bytes()
     digest, output, inputs = COLLECTOR.scoped_ruleset(
         listing, profile, uid, worker_cgroup=worker, daemon_cgroup=daemon
@@ -1198,6 +1317,14 @@ def test_live_kernel_listing_matches_the_compiled_policy(tmp_path):
         (tmp_path / "d0.json").read_bytes(), uid
     ) == COLLECTOR.deny_ruleset((tmp_path / "d1.json").read_bytes(), uid)
     assert (tmp_path / "d0.json").read_bytes() != (tmp_path / "d1.json").read_bytes()
+    d0, d2 = (tmp_path / "d0.json").read_bytes(), (tmp_path / "d2.json").read_bytes()
+    assert d0 != d2
+    assert nft_semantic_sha256(d0) == nft_semantic_sha256(d2)
+    assert nft_semantic_sha256(d0) == nft_semantic_sha256(NFT_DENY_INITIAL)
+    assert nft_semantic_sha256(d2) == nft_semantic_sha256(NFT_DENY_AFTER_EXPIRY)
+    assert nft_semantic_sha256((tmp_path / "d1.json").read_bytes()) != (
+        nft_semantic_sha256(d0)
+    )
 
 
 def base_load(name: str, path: Path):

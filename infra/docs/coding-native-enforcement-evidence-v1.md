@@ -292,7 +292,8 @@ A record is refused unless all of these hold:
    suite per language.
 8. The pre-collection preflight and the post-collection `host_preflight` are
    separate objects. Both match the record's machine, boot, kernel, daemon and
-   release, and they have the same nft snapshot and config digests.
+   release, and they have the same semantic nft ruleset
+   (`nft_ruleset_semantic_sha256`) and config digests.
 9. Timestamps are in order: the pre-collection preflight (at most 15 minutes
    old), then the record start, the phases and the record end, then the
    post-collection preflight.
@@ -579,9 +580,11 @@ Nothing in this PR has run on a host.
   collection. Containers run the approved release image with `--pull never`,
   the hosted harness hardening, one read-only bind mount (the measured runner)
   and no other mount.
-- **nft.** `nft -j list table inet ditto_coding_hosted` (TZ=UTC) is normalized:
-  metainfo, handles and counter values dropped, set elements reduced to their
-  values. While the worker runs, the listing must equal, entry for entry, what
+- **nft.** `nft -j list table inet ditto_coding_hosted` (TZ=UTC) is normalized
+  by the preflight's own `nft_entries` (the collector loads
+  `inspect-coding-native-host.py` from the same reviewed checkout, so there is
+  one implementation): metainfo, handles and counter values dropped, and named
+  set elements lose their kernel `timeout` and `expires`. While the worker runs, the listing must equal, entry for entry, what
   `connectivity-policy.py policy` compiles for the installed profile and the
   daemon UID (the collector's `compiled_rules`; a test loads the real policy
   into a kernel namespace and compares). Its digest is
@@ -652,13 +655,50 @@ name, stops the worker and removes the agent directory before exiting.
 - **The verifier cannot recompute the ruleset digests.** It checks their form,
   that scoped and deny differ, and that the scoped rule counts equal what the
   profile compiles to.
-- **Pre-/post-collection preflight nft digests.** The preflight's
-  `nft_snapshot_sha256` hashes the raw listing. A worker start and stop changes
-  rule handles and leaves empty scoped chains and sets, so the raw digest after
-  network collection differs from the one before (the recorded fixtures show
-  it), and verification rule 8 then refuses every real network record. The
-  preflight needs to hash a normalized listing; that change is not in this PR.
+- **Pre-/post-collection preflight nft digests.** Preflight v3's
+  `nft_snapshot_sha256` hashed the raw listing, which a worker start and stop
+  always changes (new handles, leftover scoped chains and sets), so rule 8
+  refused every real network record. Preflight v4 instead records
+  `nft_ruleset_semantic_sha256`, and the verifier refuses v3. See
+  [the semantic ruleset digest](#semantic-nft-ruleset-digest-preflight-v4).
 - Reboot and daemon-restart recovery, as for every record.
+
+## Semantic nft ruleset digest (preflight v4)
+
+`inspect-coding-native-host.py` records `nft_ruleset_semantic_sha256`: the
+SHA-256 of the compact sorted-key JSON of `nft_semantic_entries` over the
+stripped `inet ditto_coding_hosted` listing. It must be stable across a clean
+worker start, stop and profile expiry, and change on any difference that can
+affect a packet verdict.
+
+- **Stripped** (`nft_entries`): `metainfo`; every `handle`; counter `packets`
+  and `bytes` (set to 0, the counter statement stays); `timeout` and `expires`
+  of named set and map elements. The listing must hold exactly one table,
+  `inet ditto_coding_hosted`, and no duplicate keys.
+- **Pruned**, only where no verdict can depend on the object:
+  - a regular chain with no rules that no `jump` or `goto` (in a rule or a map
+    element) names;
+  - a named set or map with no elements that nothing references as `@name`;
+  - a base chain with exactly `family`, `table`, `name`, `type`, `hook`, `prio`
+    and `policy`, `type` `filter`, policy `accept`, and no rules. An accept
+    verdict from one base chain does not end evaluation of the hook's other
+    base chains, so such a chain is a no-op. A rule-less base chain with policy
+    `drop`, another type or any other attribute is kept.
+- **Kept:** every rule, every referenced or rule-bearing chain, every set or map
+  that has elements or is referenced (even when empty), and every other object.
+- **Order:** tables, chains, sets, maps, then other objects, each sorted by
+  canonical JSON; rules last, grouped by chain with their kernel order preserved,
+  since the first match decides. Element lists of named and anonymous sets are
+  sorted.
+
+The recorded listings `nft-deny-initial.json` (before any worker start) and
+`nft-deny-after-expiry.json` (deny guard, scoped policy, deny guard, element
+expiry) have different raw bytes and the same semantic digest. Before expiry
+(`nft-deny-after-scoped.json`) the unreferenced sets still hold elements and
+are kept, so the digest differs; the post-collection preflight is taken after
+the expiry phase, so an early one refuses rather than passes. The verifier
+cannot recompute either digest; it requires both preflights to carry the same
+one.
 
 ## Custody binding
 
@@ -735,9 +775,10 @@ identity is bound into the signed approval and the evidence.
 - **Daemon identity.** `dittobench-coding-native-daemon-identity-v1` is a
   closed object; see the qualification README for its fields and why each is
   included.
-  - The host preflight (schema `dittobench-coding-native-host-preflight-v3`)
+  - The host preflight (schema `dittobench-coding-native-host-preflight-v4`)
     records it and its canonical digest. The verifier refuses a digest that
-    does not match the object, a non-rootless identity, or a preflight v2.
+    does not match the object, a non-rootless identity, or a preflight v2 or
+    v3.
   - Records carry that digest as `host.daemon_identity_sha256`, and every record
     and both preflights must agree.
   - `check-approval` requires `sha256(canonical(approval.daemon_identity))` to

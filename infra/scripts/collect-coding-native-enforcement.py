@@ -138,6 +138,11 @@ def load_module(name: str, relative: str) -> Any:
     return module
 
 
+# The reviewed preflight from this same checkout: daemon identity and nft
+# listing normalization are shared with it, not reimplemented.
+PREFLIGHT = load_module("native_preflight_for_collector", PREFLIGHT_TOOL)
+
+
 def sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -322,48 +327,23 @@ def parse_prerequisites(raw: bytes) -> tuple[tuple[str, int], tuple[str, int]]:
 # nft ruleset: normalization, exact compiled-policy comparison and digests
 
 
-def _strip(value: Any) -> Any:
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            if key == "handle":
-                continue
-            if key == "counter" and isinstance(item, dict):
-                result[key] = {"packets": 0, "bytes": 0}
-                continue
-            if key == "elem" and isinstance(item, dict):
-                result[key] = {"val": item.get("val")}
-                continue
-            result[key] = _strip(item)
-        return result
-    if isinstance(value, list):
-        return [_strip(item) for item in value]
-    return value
-
-
 def normalize_ruleset(raw: bytes) -> list[dict[str, Any]]:
-    """``nft -j list table`` without metainfo, handles, counters or timeouts."""
+    """``nft -j list table`` without metainfo, handles, counters or timeouts.
 
-    value = parse_unique(raw, "nft listing")
-    require(
-        type(value) is dict and set(value) == {"nftables"}, "nft listing is malformed"
-    )
-    entries = value["nftables"]
-    require(type(entries) is list, "nft listing is malformed")
-    result = []
-    for entry in entries:
-        require(
-            type(entry) is dict and len(entry) == 1, "nft listing entry is malformed"
-        )
-        if "metainfo" in entry:
-            continue
-        result.append(_strip(entry))
-    tables = [entry["table"] for entry in result if "table" in entry]
+    Stripping is the preflight's own (``inspect-coding-native-host.py``
+    ``nft_entries``), kept in kernel order for the exact compiled-policy
+    comparison; the preflight additionally prunes and sorts for its semantic
+    digest.
+    """
+
+    entries = PREFLIGHT.nft_entries(parse_unique(raw, "nft listing"))
+    require(entries is not None, "nft listing is malformed")
+    tables = [entry["table"] for entry in entries if "table" in entry]
     require(
         len(tables) == 1 and tables[0] == {"family": "inet", "name": TABLE},
         "nft listing is not exactly the ditto_coding_hosted table",
     )
-    return result
+    return entries
 
 
 def _match(left: dict[str, Any], right: Any, op: str = "==") -> dict[str, Any]:
@@ -1044,9 +1024,7 @@ class Collector:
         self.host = host
         self.config = config
         self.evidence = load_module("native_evidence_for_collector", EVIDENCE_TOOL)
-        self.preflight_tool = load_module(
-            "native_preflight_for_collector", PREFLIGHT_TOOL
-        )
+        self.preflight_tool = PREFLIGHT
         self.host_policy = load_module("host_policy_for_collector", HOST_POLICY_TOOL)
         self.checkout = self.evidence.Checkout(checkout)
         self.catalog = self.evidence.load_catalog(
