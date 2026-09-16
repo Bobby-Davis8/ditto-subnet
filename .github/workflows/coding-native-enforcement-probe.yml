@@ -31,7 +31,9 @@ on:
       - services/dittobench-api/internal/codingharness/**
       - services/dittobench-api/internal/codinghostedinput/**
       - services/dittobench-api/internal/codinghostedrelay/**
+      - services/dittobench-api/internal/codinghostedruntime/**
       - services/dittobench-api/internal/codinghostedworker/**
+      - services/dittobench-api/internal/codinglaunchjournal/**
       - services/dittobench-api/internal/codingoutbox/**
       - services/dittobench-api/internal/codingphase/**
       - services/dittobench-api/internal/codingplatform/**
@@ -98,7 +100,7 @@ jobs:
           set -euo pipefail
           go vet ./internal/codingenforcement/... ./cmd/dittobench-coding-enforcement-probe/
           go vet -tags native_probe_integration ./internal/codingenforcement/probe/
-          go test -p 2 ./internal/codingenforcement/... ./internal/codingexecutor/ ./internal/codinghostedworker/ ./internal/sandbox/ ./cmd/dittobench-coding-enforcement-probe/
+          go test -p 2 ./internal/codingenforcement/... ./internal/codingexecutor/ ./internal/codinghostedworker/ ./internal/codinghostedruntime/ ./internal/codinglaunchjournal/ ./internal/sandbox/ ./cmd/dittobench-coding-enforcement-probe/
           out="$RUNNER_TEMP/native-probe"
           mkdir -p "$out"
           go test -c -tags native_probe_integration -o "$out/integration.test" ./internal/codingenforcement/probe/
@@ -194,6 +196,17 @@ jobs:
             DITTOBENCH_NATIVE_PROBE_IMAGE_DIGEST="$digest" \
             timeout 300 "$out/integration.test" \
             -test.run '^TestHostedGradingRequestedConfigMatchesTheApprovedProfile$' -test.count=1 -test.v
+          # The hosted runtime's launch journal: a child journals a sentinel
+          # network and a created (never started) container, is SIGKILLed, and
+          # reconciliation removes exactly those while an unjournaled labelled
+          # container survives.
+          env -i PATH="$dir:/usr/sbin:/usr/bin:/sbin:/bin" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+            DOCKER_HOST="$DOCKER_HOST" \
+            DITTOBENCH_NATIVE_PROBE_REPOSITORY="$repository" \
+            DITTOBENCH_NATIVE_PROBE_IMAGE_DIGEST="$digest" \
+            timeout 300 "$out/integration.test" \
+            -test.run '^TestLaunchJournalReconcilesAKilledOwnerOnRealDocker$' -test.count=1 -test.v
+          test -z "$("$dir/docker" network ls -q --filter name=ditto-job-sentinel-)"
           env -i PATH="$dir:/usr/sbin:/usr/bin:/sbin:/bin" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
             DOCKER_HOST="$DOCKER_HOST" \
             timeout 300 "$out/dittobench-coding-enforcement-probe" observe-requested-config \

@@ -43,6 +43,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/codinggrader"
 	"github.com/ditto-assistant/dittobench-api/internal/codinghostedinput"
 	"github.com/ditto-assistant/dittobench-api/internal/codinghostedworker"
+	"github.com/ditto-assistant/dittobench-api/internal/codinglaunchjournal"
 	"github.com/ditto-assistant/dittobench-api/internal/codingrunner"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 )
@@ -145,6 +146,9 @@ type WorkloadSpec struct {
 	// released image, so the production start fails after it created the job
 	// network: the cleanup_recovery partial-start scenario.
 	FailStart bool
+	// LaunchIntent is the hosted runtime's launch journal hook, when the agent
+	// runs with a journal (cleanup_recovery).
+	LaunchIntent func(ctx context.Context, run string, containers, networks []string) error
 }
 
 // ResourceBackend launches workloads. Production uses the executor and sandbox
@@ -169,6 +173,13 @@ type ResourceAgentConfig struct {
 	RunnerSHA256 func() (string, error)
 	FileSHA256   func(string) (string, error)
 	Now          func() time.Time
+	// LaunchJournal, when set, makes every run one journaled attempt as the
+	// hosted runtime does it: the journal is reconciled before the agent
+	// accepts requests; each start journals and creates a sentinel network and
+	// launches only through the journal hook, one run at a time; each finished
+	// run is reconciled, which removes the sentinel.
+	LaunchJournal *codinglaunchjournal.Journal
+	JournalDocker codinglaunchjournal.Docker
 }
 
 // ResourceAgent holds the runs of one collector session.
@@ -240,6 +251,14 @@ func NewResourceAgent(ctx context.Context, config ResourceAgentConfig) (*Resourc
 	}
 	if images.GradingProfileSHA256 != digestHex(config.GradingProfile) {
 		return nil, errors.New("probe: enforcement images name another grading profile")
+	}
+	if config.LaunchJournal != nil {
+		if config.JournalDocker == nil {
+			return nil, errors.New("probe: a launch journal needs a Docker client")
+		}
+		if _, err := config.LaunchJournal.Reconcile(ctx, config.JournalDocker); err != nil {
+			return nil, errors.New("probe: the launch journal could not be reconciled")
+		}
 	}
 	child, cancel := context.WithCancel(ctx)
 	return &ResourceAgent{
@@ -362,7 +381,11 @@ func (a *ResourceAgent) start(response ResourceResponse, request ResourceRequest
 			active++
 		}
 	}
-	if a.next >= maxResourceRuns || active >= maxConcurrentRuns || a.ctx.Err() != nil {
+	limit := maxConcurrentRuns
+	if a.config.LaunchJournal != nil {
+		limit = 1
+	}
+	if a.next >= maxResourceRuns || active >= limit || a.ctx.Err() != nil {
 		a.mu.Unlock()
 		response.Error = "probe: resource agent run bound reached"
 		return response
@@ -378,9 +401,20 @@ func (a *ResourceAgent) start(response ResourceResponse, request ResourceRequest
 		}
 		spec.Workspace = workspace
 	}
+	journal := a.config.LaunchJournal
+	if journal != nil {
+		if _, err := journal.Sentinel(a.ctx, a.config.JournalDocker); err != nil {
+			a.removeWorkspace(spec.Workspace)
+			a.reconcile()
+			response.Error = "probe: the attempt sentinel network was not created"
+			return response
+		}
+		spec.LaunchIntent = journal.Intent
+	}
 	started, err := a.config.Backend.Start(a.ctx, spec)
 	if err != nil {
 		a.removeWorkspace(spec.Workspace)
+		a.reconcile()
 		response.Error = err.Error()
 		return response
 	}
@@ -394,10 +428,23 @@ func (a *ResourceAgent) start(response ResourceResponse, request ResourceRequest
 		defer close(run.done)
 		run.receipt, run.err = started.Wait()
 		a.removeWorkspace(spec.Workspace)
+		a.reconcile()
 	}()
 	response.Run, response.ExecutorInstance, response.ContainerName = id, started.ExecutorInstance, started.ContainerName
 	response.CommandTimeoutMS = timeoutMS
 	return response
+}
+
+// reconcile ends one journaled attempt after its production cleanup. A failure
+// leaves the journal pending and its objects in place, where the collector's
+// outside counts see them.
+func (a *ResourceAgent) reconcile() {
+	if a.config.LaunchJournal == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	_, _ = a.config.LaunchJournal.Reconcile(ctx, a.config.JournalDocker)
 }
 
 // workspace is a fresh probe workspace holding only a copy of the running
@@ -545,7 +592,7 @@ func (b ProductionResourceBackend) Start(ctx context.Context, spec WorkloadSpec)
 		docker := sandbox.NewHostedHarnessDocker(sandbox.HostedHarnessConfig{
 			MemoryLimitBytes: policy.MemoryLimitBytes, ScratchLimitBytes: policy.ScratchLimitBytes,
 			CPUQuotaMillis: policy.CPUQuotaMillis, PidsLimit: policy.PidsLimit, EgressNetwork: harnessEgressNetwork,
-			SeccompProfile: spec.SeccompProfile, AppArmorProfile: spec.AppArmorProfile,
+			SeccompProfile: spec.SeccompProfile, AppArmorProfile: spec.AppArmorProfile, LaunchIntent: spec.LaunchIntent,
 		})
 		if spec.FailStart {
 			reference = spec.Repository + "@" + absentImageDigest
@@ -568,6 +615,7 @@ func (b ProductionResourceBackend) Start(ctx context.Context, spec WorkloadSpec)
 			ImageRepository: spec.Repository, CandidateUID: 10001, CandidateGID: 10001,
 			RequireRootless: true, RequireIsolatedDaemon: true,
 			SeccompProfile: spec.SeccompProfile, AppArmorProfile: spec.AppArmorProfile, Now: spec.Now,
+			LaunchIntent: spec.LaunchIntent,
 		})
 		if err != nil {
 			return StartedWorkload{}, err
