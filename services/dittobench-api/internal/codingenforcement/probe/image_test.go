@@ -84,9 +84,37 @@ func TestDaemonPostureRefusesRootfulOrUnlabelledDaemons(t *testing.T) {
 			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
 			"info --format {{json .Labels}}":          []byte(`[]`),
 		}},
+		"label-as-substring-of-another-label": {responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
+			"info --format {{json .Labels}}":          []byte(`["description=io.heyditto.dittobench.isolated=true"]`),
+		}},
+		"label-with-suffixed-value": {responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
+			"info --format {{json .Labels}}":          []byte(`["io.heyditto.dittobench.isolated=true-old"]`),
+		}},
+		"label-map-with-wrong-value": {responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
+			"info --format {{json .Labels}}":          []byte(`{"io.heyditto.dittobench.isolated":"true-old"}`),
+		}},
+		"label-not-json": {responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
+			"info --format {{json .Labels}}":          []byte(`io.heyditto.dittobench.isolated=true`),
+		}},
 	} {
 		if err := requireRootlessIsolatedDaemon(context.Background(), docker); err == nil {
 			t.Fatalf("%s daemon was accepted", name)
+		}
+	}
+	for name, labels := range map[string]string{
+		"list": `["other=1","io.heyditto.dittobench.isolated=true"]`,
+		"map":  `{"io.heyditto.dittobench.isolated":"true"}`,
+	} {
+		docker := &fakeDocker{responses: map[string][]byte{
+			"info --format {{json .SecurityOptions}}": []byte(`["name=rootless"]`),
+			"info --format {{json .Labels}}":          []byte(labels),
+		}}
+		if err := requireRootlessIsolatedDaemon(context.Background(), docker); err != nil {
+			t.Fatalf("%s labelled daemon was refused: %v", name, err)
 		}
 	}
 }
