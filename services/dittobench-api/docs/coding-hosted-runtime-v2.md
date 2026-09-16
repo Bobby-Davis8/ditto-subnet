@@ -154,7 +154,7 @@ diagnostic) while that fails or another live invocation holds the directory.
   value), `containers` and `networks`. Every value must match a closed
   identifier pattern, so no environment, path, image, command, output or
   credential can be written. The file is mode 0600, single-link, opened with
-  `O_NOFOLLOW` and bounded to 256 KiB and 1024 entries; an append past either
+  `O_NOFOLLOW` and bounded to 1 MiB and 4096 entries; an append past either
   bound is refused and the launch does not happen. Until the journal is open,
   and after the attempt ends, the launch hook refuses every launch.
 - **Sentinel.** Each attempt journals and creates one internal bridge network,

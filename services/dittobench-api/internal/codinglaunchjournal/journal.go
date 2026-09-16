@@ -50,9 +50,11 @@ const (
 	LockName = "launch-journal.lock"
 	// MaxBytes bounds the journal file; an append past it is refused, so the
 	// launch it would have announced never happens.
-	MaxBytes = 256 << 10
-	// MaxEntries bounds the number of entries.
-	MaxEntries = 1024
+	MaxBytes = 1 << 20
+	// MaxEntries bounds the number of entries. An attempt journals one entry
+	// per container (at most 1000 authoring tool calls, plus probes, grading
+	// and the harness), so this leaves room without letting it grow unbounded.
+	MaxEntries = 4096
 	// OwnerLabel is the runtime ownership label. Every container and network
 	// the hosted launch paths create carries it with the journaled run value.
 	OwnerLabel = "io.heyditto.dittobench.run"
@@ -150,6 +152,11 @@ type Journal struct {
 	worker    string
 	// sync is replaced only by tests, to observe durability ordering.
 	sync func(kind string, file *os.File) error
+	// The lock owner is the only writer, so after one full read the entry
+	// count and size are tracked instead of re-reading on every append.
+	counted bool
+	entries int
+	size    int64
 }
 
 // Open validates the private journal directory and takes its exclusive lock.
@@ -259,26 +266,42 @@ func (j *Journal) Record(run string, containers, networks []string) error {
 		return ErrJournal
 	}
 	info, err := file.Stat()
-	if err != nil || info.Size()+int64(len(line))+1 > MaxBytes {
+	if err != nil {
 		return ErrJournal
 	}
-	if info.Size() > 0 {
-		existing, err := readAll(file, info.Size())
-		// A torn tail from an earlier crash is completed by a newline first so
-		// this entry stays a line of its own; the torn part is ignored.
-		if err != nil || bytes.Count(existing, []byte{'\n'}) >= MaxEntries {
-			return ErrJournal
-		}
-		if existing[len(existing)-1] != '\n' {
-			line = append([]byte{'\n'}, line...)
+	if !j.counted || j.size != info.Size() {
+		j.counted, j.entries = false, 0
+		if info.Size() > 0 {
+			existing, err := readAll(file, info.Size())
+			if err != nil {
+				return ErrJournal
+			}
+			j.entries = bytes.Count(existing, []byte{'\n'})
+			// A torn tail from an earlier crash is completed by a newline
+			// first so this entry stays a line of its own; the torn part is
+			// ignored.
+			if existing[len(existing)-1] != '\n' {
+				line = append([]byte{'\n'}, line...)
+			}
 		}
 	}
-	if _, err := file.Write(append(line, '\n')); err != nil {
+	if j.entries >= MaxEntries {
+		return ErrJournal
+	}
+	line = append(line, '\n')
+	if info.Size()+int64(len(line)) > MaxBytes {
+		return ErrJournal
+	}
+	written, err := file.Write(line)
+	// Whatever happened, the next append recounts from the file.
+	j.counted = false
+	if err != nil || written != len(line) {
 		return ErrJournal
 	}
 	if j.sync("file", file) != nil || j.sync("directory", j.directory) != nil {
 		return ErrJournal
 	}
+	j.counted, j.entries, j.size = true, j.entries+bytes.Count(line, []byte{'\n'}), info.Size()+int64(len(line))
 	return nil
 }
 
@@ -490,6 +513,7 @@ func (j *Journal) Reconcile(ctx context.Context, docker Docker) (Report, error) 
 // next reconcile repeats harmlessly) or none.
 func (j *Journal) rotate() error {
 	dirfd := int(j.directory.Fd())
+	j.counted = false
 	if unix.Renameat(dirfd, FileName, dirfd, ReconciledName) != nil {
 		return ErrJournal
 	}

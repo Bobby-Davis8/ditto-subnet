@@ -2273,8 +2273,8 @@ CLEANUP_CONFIRMATION = "COLLECT NATIVE CLEANUP RECOVERY EVIDENCE"
 # marker (codinghostedruntime.ConsumeAttempt), as the collector reads them.
 JOURNAL_DIR = WORK_DIR / "launch-journal"
 JOURNAL_FILE = "launch-journal"
-JOURNAL_MAX_BYTES = 256 << 10
-JOURNAL_MAX_ENTRIES = 1024
+JOURNAL_MAX_BYTES = 1 << 20
+JOURNAL_MAX_ENTRIES = 4096
 JOURNAL_ENTRY_SCHEMA = "dittobench-coding-launch-journal-entry-v1"
 JOURNAL_KEYS = ["schema", "attempt", "worker", "run", "containers", "networks"]
 JOURNAL_ATTEMPT = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
