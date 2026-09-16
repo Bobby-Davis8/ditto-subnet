@@ -74,6 +74,9 @@ from ditto.tests.api_server.endpoints.test_admin_coding_private_v2_releases impo
     _publication_receipt,
     _registration,
 )
+from ditto.tests.db.queries.test_coding_certification_leases import (
+    admit_certification_tuples,
+)
 
 _URL = "/api/v1/admin/coding-hosted-assignments"
 _BENCH = 12
@@ -451,6 +454,12 @@ async def _certify_through_supported_path(
     )
     validator = _ALICE.ss58_address
 
+    # The #1923 strict allowlist refuses every certification lease unless the
+    # latest revision lists this exact tuple.
+    async with maker() as session:
+        await admit_certification_tuples(
+            session, (agent_id, _ARTIFACT, _IMAGE, validator)
+        )
     async with maker() as session, session.begin():
         issued = await issue_coding_certification_lease(
             session, validator_hotkey=validator, agent_id=agent_id, bench_version=_BENCH

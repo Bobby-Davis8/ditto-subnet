@@ -216,6 +216,7 @@ async def build(
         home,
         inputs,
         home / "private",
+        home / "launch-journal",
         home / "authority",
         home / "release",
         release,
@@ -477,12 +478,16 @@ async def test_materializes_a_config_the_runtime_loader_and_launch_check_accept(
     assert wire.worker_id == UUID(receipt["worker_id"])
     assert wire.host.model_dump() == {
         "router_listen": "10.33.0.2:18080",
+        # #1919 host fields; the attempt config keeps the host-mode defaults.
+        "router_namespace": "host",
+        "router_expires_at_unix": None,
         "egress_network": "ditto-coding-restricted",
         "egress_proxy": "http://10.33.0.2:18090",
         "candidate_uid": 10001,
         "candidate_gid": 10001,
         "docker_executable": str(f.layout.docker_executable),
         "docker_socket": str(f.layout.docker_socket),
+        "launch_journal_dir": str(f.layout.launch_journal),
         "executor_repository": REPOSITORY,
         "seccomp_profile": "",
         "apparmor_profile": "",
