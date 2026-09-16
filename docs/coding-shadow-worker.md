@@ -184,15 +184,20 @@ false, and every target list ships empty.
   carries no GitHub token and never relaxes the private-harness guard. Docker
   CLI calls to the dedicated daemon drop every inherited `DOCKER_*` selector
   and proxy variable.
-- **Targets.** The worker takes a lease only for an exact target:
-  `VALIDATOR_CODING_CANARY_AGENT_IDS` (1 to 16 canonical agent UUIDs) together
-  with `VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY`, which must equal this
-  validator's own hotkey. Both default to empty, which refuses every lease, and
-  a copied configuration cannot make another validator run the canary.
-  Non-target offers are dropped. Targets are rechecked before issue, and an
-  issued lease naming another agent or hotkey is aborted before claim. Platform's
-  separate certification allowlist binds the same agent and hotkey plus the
-  artifact.
+- **Targets.** The worker takes a lease only for an exact target, the same
+  four fields as one Platform certification allowlist tuple:
+  `VALIDATOR_CODING_CANARY_TARGETS` (1 to 16 unique
+  `<agent_id>:<artifact_sha256>:<screened_image_sha256>` entries, a canonical
+  UUID and two lowercase 64-hex digests) together with
+  `VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY`, which must equal this validator's
+  own hotkey. Both default to empty, which refuses every lease, and a copied
+  configuration cannot make another validator run the canary. Offers for
+  agents without a target are dropped, and targets are rechecked before issue.
+  An issued lease whose agent, hotkey, artifact digest or screened-image digest
+  is not exactly one listed tuple is aborted before claim. A claimed lease is
+  checked the same way before the harness launch, grant, or certify call, so a
+  rebuilt screened image or a different artifact never runs under a target
+  written for the previous one.
 - **Readiness before issue and claim.** Before issuing a lease, the worker
   calls `GET /v1/coding/certifier/canary/readiness` with the canary bearer.
   The probe creates no harness, container, grant, or lease. It reports ready
@@ -237,7 +242,8 @@ false, and every target list ships empty.
     scorer coding host, not just a route. A failure leaves the coding routes at
     404 and ordinary scoring running.
   - `validator_stack_coding_canary_enabled` renders the validator worker, its
-    poll interval, `validator_stack_coding_canary_agent_ids`, and
+    poll interval, `validator_stack_coding_canary_targets` (mappings with
+    exactly `agent_id`, `artifact_sha256` and `screened_image_sha256`), and
     `validator_stack_coding_canary_validator_hotkey`. It requires the scorer
     switch, the dedicated daemon endpoint, and 1 to 16 exact targets bound to
     `validator_stack_hotkey`.

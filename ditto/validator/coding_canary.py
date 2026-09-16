@@ -28,6 +28,7 @@ from ditto.api_models.coding_inference_grants import (
     CodingCertificationInferenceGrantOffer,
     CodingCertificationInferenceRevokeResponse,
 )
+from ditto.validator.config import CodingCanaryTarget
 from ditto.validator.errors import (
     PlatformError,
     PlatformInfrastructureError,
@@ -70,21 +71,30 @@ class CodingCanaryReadiness:
 class CodingCanaryTargets:
     """Exact certification canary targets. The empty default refuses everything.
 
-    A lease may be issued or claimed only for a listed agent, and only when the
-    listed validator hotkey is exactly this validator's own hotkey, so a copied
-    configuration cannot make another validator run the canary.
+    A lease may be issued only for a listed agent and only when the listed
+    validator hotkey is exactly this validator's own hotkey, so a copied
+    configuration cannot make another validator run the canary. An issued or
+    claimed lease must also carry exactly a listed agent's artifact digest and
+    screened-image digest, or it is refused before any harness, grant, or
+    certify call.
     """
 
-    agent_ids: frozenset[UUID] = field(default_factory=frozenset)
+    entries: frozenset[CodingCanaryTarget] = field(default_factory=frozenset)
     validator_hotkey: str = ""
 
     @classmethod
     def of(
-        cls, agent_ids: Collection[UUID], validator_hotkey: str
+        cls, entries: Collection[CodingCanaryTarget], validator_hotkey: str
     ) -> CodingCanaryTargets:
-        return cls(frozenset(agent_ids), validator_hotkey)
+        return cls(frozenset(entries), validator_hotkey)
+
+    @property
+    def agent_ids(self) -> frozenset[UUID]:
+        return frozenset(entry.agent_id for entry in self.entries)
 
     def permits(self, agent_id: UUID, local_validator_hotkey: str) -> bool:
+        """Whether an offer for this agent may proceed to a lease issue."""
+
         return (
             bool(self.validator_hotkey)
             and self.validator_hotkey == local_validator_hotkey
@@ -92,9 +102,27 @@ class CodingCanaryTargets:
             and agent_id in self.agent_ids
         )
 
+    def binds(
+        self,
+        authority: CodingCertificationLeaseAuthority,
+        local_validator_hotkey: str,
+    ) -> bool:
+        """Whether a lease authority is exactly one allowlisted four-field tuple."""
+
+        return (
+            self.permits(authority.agent_id, local_validator_hotkey)
+            and authority.validator_hotkey == self.validator_hotkey
+            and CodingCanaryTarget(
+                agent_id=authority.agent_id,
+                artifact_sha256=authority.agent_artifact_sha256,
+                screened_image_sha256=authority.screened_image_sha256,
+            )
+            in self.entries
+        )
+
     def refuses_all(self, local_validator_hotkey: str) -> bool:
         return (
-            not self.agent_ids
+            not self.entries
             or not self.validator_hotkey
             or self.validator_hotkey != local_validator_hotkey
         )
@@ -270,9 +298,7 @@ class CodingCanaryWorker:
         if (
             issued.authority.agent_id != agent_id
             or issued.authority.validator_hotkey != self._validator_hotkey
-            or not self._targets.permits(
-                issued.authority.agent_id, issued.authority.validator_hotkey
-            )
+            or not self._targets.binds(issued.authority, self._validator_hotkey)
         ):
             await self._abort_issued(issued.authority.lease_id)
             raise PlatformInfrastructureError(
@@ -296,6 +322,20 @@ class CodingCanaryWorker:
             if claimed.status is not CodingCertificationLeaseStatus.CLAIMED:
                 raise PlatformInfrastructureError(
                     "coding certification lease claim did not become exclusive"
+                )
+            # The claimed authority must still be the exact allowlisted
+            # identity the issued lease named, before any harness launch.
+            if (
+                claimed.authority.lease_id != issued.authority.lease_id
+                or claimed.authority.agent_id != issued.authority.agent_id
+                or claimed.authority.agent_artifact_sha256
+                != issued.authority.agent_artifact_sha256
+                or claimed.authority.screened_image_sha256
+                != issued.authority.screened_image_sha256
+                or not self._targets.binds(claimed.authority, self._validator_hotkey)
+            ):
+                raise PlatformInfrastructureError(
+                    "coding certification lease is not an allowlisted target"
                 )
             harness = await self._platform.request_coding_certification_harness_launch(
                 claimed.authority.lease_id

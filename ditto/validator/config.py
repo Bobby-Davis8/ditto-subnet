@@ -204,6 +204,22 @@ def _is_private_coding_executor_url(value: str) -> bool:
 
 
 @dataclass(frozen=True)
+class CodingCanaryTarget:
+    """One exact certifiable identity, matching one Platform allowlist tuple.
+
+    Platform's certification allowlist admits exact
+    ``(agent_id, artifact_sha256, screened_image_sha256, validator_hotkey)``
+    tuples. The validator hotkey is bound once for the whole target set, so a
+    target carries the other three fields. Digests are lowercase 64-hex, the
+    form every lease authority carries.
+    """
+
+    agent_id: UUID
+    artifact_sha256: str
+    screened_image_sha256: str
+
+
+@dataclass(frozen=True)
 class ValidatorConfig:
     """Configuration for one validator worker instance."""
 
@@ -469,8 +485,11 @@ class ValidatorConfig:
     coding_canary_poll_seconds: float = 10.0
     """Idle polling interval for the public certification canary worker."""
 
-    coding_canary_agent_ids: tuple[UUID, ...] = ()
-    """Exact agents the certification canary may target. Empty refuses all."""
+    coding_canary_targets: tuple[CodingCanaryTarget, ...] = ()
+    """Exact identities the certification canary may target: each an agent,
+    its artifact digest, and its screened-image digest, matching Platform's
+    four-field certification allowlist with ``coding_canary_validator_hotkey``.
+    Empty refuses all."""
 
     coding_canary_validator_hotkey: str = ""
     """Validator hotkey the canary targets are bound to. It must equal
@@ -741,9 +760,9 @@ def parse_validator_config_from_env() -> ValidatorConfig:
         if coding_canary_enabled
         else 10.0
     )
-    coding_canary_agent_ids = (
-        _parse_coding_canary_agent_ids(
-            os.environ.get("VALIDATOR_CODING_CANARY_AGENT_IDS", "")
+    coding_canary_targets = (
+        _parse_coding_canary_targets(
+            os.environ.get("VALIDATOR_CODING_CANARY_TARGETS", "")
         )
         if coding_canary_enabled
         else ()
@@ -826,7 +845,7 @@ def parse_validator_config_from_env() -> ValidatorConfig:
         coding_executor_timeout_seconds=coding_executor_timeout_seconds,
         coding_canary_enabled=coding_canary_enabled,
         coding_canary_poll_seconds=coding_canary_poll_seconds,
-        coding_canary_agent_ids=coding_canary_agent_ids,
+        coding_canary_targets=coding_canary_targets,
         coding_canary_validator_hotkey=coding_canary_validator_hotkey,
         router_ledger_read_enabled=(
             os.environ.get("VALIDATOR_ROUTER_LEDGER_READ_ENABLED", "false").lower()
@@ -932,36 +951,65 @@ def parse_validator_config_from_env() -> ValidatorConfig:
 
 
 _MAX_CODING_CANARY_TARGETS = 16
+_HEX = frozenset("0123456789abcdef")
 _SS58_ALPHABET = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
 
-def _parse_coding_canary_agent_ids(raw: str) -> tuple[UUID, ...]:
-    """Parse the exact canary targets: canonical, non-nil, unique UUIDs.
+def _parse_coding_canary_targets(raw: str) -> tuple[CodingCanaryTarget, ...]:
+    """Parse the exact canary targets.
 
-    Empty is valid and refuses every lease. The bound matches Platform's
-    certification allowlist.
+    The value is a comma-separated list of
+    ``<agent_id>:<artifact_sha256>:<screened_image_sha256>`` entries: a
+    canonical non-nil UUID and two lowercase 64-hex digests, the same fields as
+    one Platform allowlist tuple minus the separately bound validator hotkey.
+    Entries must be unique. Empty is valid and refuses every lease. The bound
+    matches Platform's certification allowlist.
     """
 
+    name = "VALIDATOR_CODING_CANARY_TARGETS"
     values = [value.strip() for value in raw.split(",")] if raw.strip() else []
-    agent_ids: list[UUID] = []
+    targets: list[CodingCanaryTarget] = []
     for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValidatorConfigError(
+                f"{name} entries must be "
+                "<agent_id>:<artifact_sha256>:<screened_image_sha256>"
+            )
+        agent_raw, artifact_sha256, screened_image_sha256 = parts
         try:
-            agent_id = UUID(value)
+            agent_id = UUID(agent_raw)
         except ValueError as error:
             raise ValidatorConfigError(
-                "VALIDATOR_CODING_CANARY_AGENT_IDS must be canonical UUIDs"
+                f"{name} agent ids must be canonical UUIDs"
             ) from error
-        if str(agent_id) != value or agent_id.int == 0 or agent_id in agent_ids:
+        if str(agent_id) != agent_raw or agent_id.int == 0:
             raise ValidatorConfigError(
-                "VALIDATOR_CODING_CANARY_AGENT_IDS must be unique, canonical, "
-                "non-nil UUIDs"
+                f"{name} agent ids must be canonical, non-nil UUIDs"
             )
-        agent_ids.append(agent_id)
-    if len(agent_ids) > _MAX_CODING_CANARY_TARGETS:
-        raise ValidatorConfigError(
-            "VALIDATOR_CODING_CANARY_AGENT_IDS allows at most 16 agents"
+        if not (
+            _is_lower_sha256(artifact_sha256)
+            and _is_lower_sha256(screened_image_sha256)
+        ):
+            raise ValidatorConfigError(
+                f"{name} artifact and screened-image digests must be lowercase "
+                "64-hex SHA-256 values"
+            )
+        target = CodingCanaryTarget(
+            agent_id=agent_id,
+            artifact_sha256=artifact_sha256,
+            screened_image_sha256=screened_image_sha256,
         )
-    return tuple(agent_ids)
+        if target in targets:
+            raise ValidatorConfigError(f"{name} entries must be unique")
+        targets.append(target)
+    if len(targets) > _MAX_CODING_CANARY_TARGETS:
+        raise ValidatorConfigError(f"{name} allows at most 16 targets")
+    return tuple(targets)
+
+
+def _is_lower_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in _HEX for character in value)
 
 
 def _is_ss58_hotkey(value: str) -> bool:

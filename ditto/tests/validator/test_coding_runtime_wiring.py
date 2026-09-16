@@ -11,6 +11,7 @@ import pytest
 import ditto.validator.__main__ as validator_main
 from ditto.validator.coding_canary_runtime import CodingCanaryRuntime
 from ditto.validator.coding_supervisor import CodingSupervisorRuntime
+from ditto.validator.config import CodingCanaryTarget
 
 
 def _config(*, remote: bool) -> Any:
@@ -250,7 +251,13 @@ def _canary_config(*, enabled: bool) -> Any:
         dittobench_api_url="http://sandbox-docker:8000",
         dittobench_control_token="coding-control-token-00000000000000000001",
         validator_hotkey="5" + "V" * 47,
-        coding_canary_agent_ids=(UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),),
+        coding_canary_targets=(
+            CodingCanaryTarget(
+                agent_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                artifact_sha256="aa" * 32,
+                screened_image_sha256="1a" * 32,
+            ),
+        ),
         coding_canary_validator_hotkey="5" + "V" * 47,
         http_timeout_seconds=30.0,
     )
@@ -346,7 +353,7 @@ async def test_canary_and_local_shadow_share_one_scorer_client() -> None:
     config.dittobench_api_url = "http://sandbox-docker:8000"
     config.coding_canary_enabled = True
     config.coding_canary_poll_seconds = 10.0
-    config.coding_canary_agent_ids = ()
+    config.coding_canary_targets = ()
     config.coding_canary_validator_hotkey = ""
     observed: list[httpx.AsyncClient] = []
     original = validator_main.httpx.AsyncClient

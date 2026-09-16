@@ -220,7 +220,7 @@ def test_shadow_coding_worker_is_present_but_default_off_on_both_sides() -> None
     ]
     assert scorer["DOCKER_HOST"] == "tcp://127.0.0.1:2375"
     assert _compose_default(validator["VALIDATOR_CODING_CANARY_ENABLED"]) == "false"
-    assert _compose_default(validator["VALIDATOR_CODING_CANARY_AGENT_IDS"]) == ""
+    assert _compose_default(validator["VALIDATOR_CODING_CANARY_TARGETS"]) == ""
     assert _compose_default(validator["VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY"]) == ""
     assert _compose_default(validator["VALIDATOR_CODING_SHADOW_ENABLED"]) == "false"
     assert _compose_default(validator["VALIDATOR_CODING_SHADOW_RUN_ID"]) == ""

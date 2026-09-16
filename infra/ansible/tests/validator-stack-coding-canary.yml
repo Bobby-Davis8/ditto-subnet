@@ -19,8 +19,12 @@
     valid_egress_network: ditto-coding-egress
     valid_egress_proxy: http://10.203.0.1:3128
     valid_host_gateway_ip: 10.203.0.1
-    valid_agent_ids:
-      - aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+    valid_artifact: "{{ 'a1' * 32 }}"
+    valid_screened_image: "{{ 'b1' * 32 }}"
+    valid_targets:
+      - agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        artifact_sha256: "{{ valid_artifact }}"
+        screened_image_sha256: "{{ valid_screened_image }}"
     # Synthetic SS58 test hotkey; production takes it from validated config.
     valid_hotkey: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
   tasks:
@@ -37,11 +41,11 @@
           - validator_stack_coding_runtime_image_repository == ''
           - validator_stack_coding_runtime_image_digest == ''
           - validator_stack_coding_docker_host == ''
-          - validator_stack_coding_canary_agent_ids == []
+          - validator_stack_coding_canary_targets == []
           - validator_stack_coding_canary_validator_hotkey == ''
           - "'VALIDATOR_CODING_CANARY_ENABLED=false' in rendered"
           - "'VALIDATOR_CODING_CANARY_POLL_SECONDS=10' in rendered"
-          - "'VALIDATOR_CODING_CANARY_AGENT_IDS=' in rendered"
+          - "'VALIDATOR_CODING_CANARY_TARGETS=' in rendered"
           - "'VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY=' in rendered"
           - "'DITTOBENCH_CODING_CANARY_ENABLED=false' in rendered"
           - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' in rendered"
@@ -64,7 +68,7 @@
         validator_stack_coding_egress_network: "{{ valid_egress_network }}"
         validator_stack_coding_egress_proxy: "{{ valid_egress_proxy }}"
         validator_stack_coding_host_gateway_ip: "{{ valid_host_gateway_ip }}"
-        validator_stack_coding_canary_agent_ids: "{{ valid_agent_ids }}"
+        validator_stack_coding_canary_targets: "{{ valid_targets }}"
         validator_stack_coding_canary_validator_hotkey: "{{ valid_hotkey }}"
         rendered: "{{ lookup('template', canary_template).splitlines() }}"
       ansible.builtin.assert:
@@ -75,7 +79,7 @@
           - "'DITTOBENCH_CODING_EGRESS_NETWORK=' in rendered"
           - "'DITTOBENCH_CODING_EGRESS_PROXY=' in rendered"
           - "'DITTOBENCH_CODING_HOST_GATEWAY_IP=' in rendered"
-          - "'VALIDATOR_CODING_CANARY_AGENT_IDS=' in rendered"
+          - "'VALIDATOR_CODING_CANARY_TARGETS=' in rendered"
           - "'VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY=' in rendered"
 
     - name: Accept and render a staged scorer-only profile
@@ -97,7 +101,7 @@
           ansible.builtin.assert:
             that:
               - "'VALIDATOR_CODING_CANARY_ENABLED=false' in rendered"
-              - "'VALIDATOR_CODING_CANARY_AGENT_IDS=' in rendered"
+              - "'VALIDATOR_CODING_CANARY_TARGETS=' in rendered"
               - "'DITTOBENCH_CODING_CANARY_ENABLED=true' in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' + valid_repository in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_DIGEST=' + valid_digest in rendered"
@@ -117,9 +121,13 @@
         validator_stack_coding_egress_network: "{{ valid_egress_network }}"
         validator_stack_coding_egress_proxy: "{{ valid_egress_proxy }}"
         validator_stack_coding_host_gateway_ip: "{{ valid_host_gateway_ip }}"
-        validator_stack_coding_canary_agent_ids:
-          - aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
-          - bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+        validator_stack_coding_canary_targets:
+          - agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+            artifact_sha256: "{{ valid_artifact }}"
+            screened_image_sha256: "{{ valid_screened_image }}"
+          - agent_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+            artifact_sha256: "{{ 'a2' * 32 }}"
+            screened_image_sha256: "{{ 'b2' * 32 }}"
         validator_stack_coding_canary_validator_hotkey: "{{ valid_hotkey }}"
         validator_stack_hotkey: "{{ valid_hotkey }}"
       block:
@@ -133,7 +141,7 @@
             that:
               - "'VALIDATOR_CODING_CANARY_ENABLED=true' in rendered"
               - "'VALIDATOR_CODING_CANARY_POLL_SECONDS=30' in rendered"
-              - "'VALIDATOR_CODING_CANARY_AGENT_IDS=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' in rendered"
+              - "'VALIDATOR_CODING_CANARY_TARGETS=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:' + valid_artifact + ':' + valid_screened_image + ',bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb:' + 'a2' * 32 + ':' + 'b2' * 32 in rendered"
               - "'VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY=' + valid_hotkey in rendered"
               - "'DITTOBENCH_CODING_CANARY_ENABLED=true' in rendered"
               - "'DITTOBENCH_CODING_RUNTIME_IMAGE_REPOSITORY=' + valid_repository in rendered"
@@ -223,15 +231,51 @@
         - {name: coding host gateway on a public address, host_gateway_ip: 8.8.8.8}
         - {name: coding host gateway as the rootful magic name, host_gateway_ip: host-gateway}
         - {name: coding host gateway with a leading zero, host_gateway_ip: 10.203.0.01}
-        - {name: validator worker without targets, validator: true, agent_ids: []}
-        - {name: validator worker with a target string, validator: true, agent_ids: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
-        - {name: validator worker with an uppercase target, validator: true, agent_ids: [AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA]}
-        - {name: validator worker with a malformed target, validator: true, agent_ids: [not-a-uuid]}
-        - {name: validator worker with a nil target, validator: true, agent_ids: ["00000000-0000-0000-0000-000000000000"]}
-        - {name: validator worker with duplicate targets, validator: true, agent_ids: [aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]}
+        - {name: validator worker without targets, validator: true, targets: []}
+        - {name: validator worker with a target string, validator: true, targets: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+        - name: validator worker with a target mapping instead of a list
+          validator: true
+          targets: {agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: "{{ valid_screened_image }}"}
+        - {name: validator worker with an agent-only target, validator: true, targets: [aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]}
+        - name: validator worker with a target missing its artifact digest
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, screened_image_sha256: "{{ valid_screened_image }}"}]
+        - name: validator worker with a target missing its screened-image digest
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "{{ valid_artifact }}"}]
+        - name: validator worker with an extra target field
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: "{{ valid_screened_image }}", validator_hotkey: "{{ valid_hotkey }}"}]
+        - name: validator worker with an uppercase target
+          validator: true
+          targets: [{agent_id: AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA, artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: "{{ valid_screened_image }}"}]
+        - name: validator worker with a malformed target
+          validator: true
+          targets: [{agent_id: not-a-uuid, artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: "{{ valid_screened_image }}"}]
+        - name: validator worker with a nil target
+          validator: true
+          targets: [{agent_id: "00000000-0000-0000-0000-000000000000", artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: "{{ valid_screened_image }}"}]
+        - name: validator worker with an uppercase artifact digest
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "{{ 'A1' * 32 }}", screened_image_sha256: "{{ valid_screened_image }}"}]
+        - name: validator worker with a prefixed artifact digest
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "sha256:{{ valid_artifact }}", screened_image_sha256: "{{ valid_screened_image }}"}]
+        - name: validator worker with a short screened-image digest
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: "{{ 'b' * 63 }}"}]
+        - name: validator worker with an empty screened-image digest
+          validator: true
+          targets: [{agent_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa, artifact_sha256: "{{ valid_artifact }}", screened_image_sha256: ""}]
+        - name: validator worker with duplicate targets
+          validator: true
+          targets: "{{ valid_targets + valid_targets }}"
         - name: validator worker with seventeen targets
           validator: true
-          agent_ids: "{{ query('ansible.builtin.sequence', 'start=1 end=17 format=aaaaaaaa-aaaa-4aaa-8aaa-%012x') }}"
+          targets: >-
+            {{ query('ansible.builtin.sequence', 'start=1 end=17 format=aaaaaaaa-aaaa-4aaa-8aaa-%012x')
+            | map('regex_replace', '^(.*)$', '{"agent_id": "\1", "artifact_sha256": "' ~ valid_artifact ~ '", "screened_image_sha256": "' ~ valid_screened_image ~ '"}')
+            | map('from_json') | list }}
         - {name: validator worker without a target hotkey, validator: true, canary_hotkey: ""}
         - {name: validator worker bound to another validator hotkey, validator: true, canary_hotkey: 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty}
         - {name: validator worker with a malformed target hotkey, validator: true, canary_hotkey: not-a-hotkey, hotkey: not-a-hotkey}
