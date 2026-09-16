@@ -1241,8 +1241,7 @@ def test_cleanup_records_leftovers_and_refuses_an_agent_that_ignores_sigterm(rw)
 
 
 def test_uncollectable_kinds_refuse_before_any_host_effect(rw, capsys):
-    assert COLLECTOR.main(["preexec"], host_factory=pytest.fail) == 2
-    for kind in ("cleanup",):
+    for kind in ("preexec", "cleanup"):
         assert COLLECTOR.main([kind], host_factory=pytest.fail) == 2
         err = capsys.readouterr().err
         for probe in COLLECTOR.NOT_COLLECTED[COLLECTOR.KIND_OF[kind]]:
@@ -1260,6 +1259,9 @@ def test_not_collected_probes_are_catalog_probes_and_documented():
         for probe_id in missing:
             assert f"`{probe_id}`" in text, probe_id
     assert COLLECTOR.NOT_COLLECTED["resource_enforcement"] == {}
+    assert set(COLLECTOR.NOT_COLLECTED["preexec_confinement"]) == {
+        probe["id"] for probe in catalog["kinds"]["preexec_confinement"]["probes"]
+    }
 
 
 def test_samplers_parse_cgroup_and_proc_formats():

@@ -12,9 +12,9 @@ The verifier runs no probe, reaches no host or daemon, reads no custody path
 and creates no approval. The PR2 probe runner (below) writes no evidence
 record either. Two collectors write records: the PR4 network collector
 (`network_enforcement`) and the PR5 resource collector (`resource_enforcement`).
-Pre-exec collection is not implemented yet. Cleanup collection refuses before
-any host effect and lists the catalog probes it does not collect, with the
-reason; see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable).
+Pre-exec and cleanup collection refuse before any host effect and list the
+catalog probes they do not collect, with the reason; see
+[pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable).
 Collectors never run from `coding-hosted-operate`, and a test checks that only
 the offline regression job and the disposable rootless probe-runner CI job name
 these tools. The collector may appear there only as a path filter and a lint
@@ -417,7 +417,7 @@ collects now (nothing has been collected on a host yet):
 |---|---|
 | `network_enforcement` (all) | Collected by the [PR4 network collector](#network-collector-b5-pr4) |
 | `resource_enforcement` (all 35 probes × 4 language images) | Collected by the [PR5 resource collector](#resource-collector-b5-pr5) from started containers, measured from outside |
-| `preexec_confinement` (all) | Not implemented yet |
+| `preexec_confinement` (all) | Not collected: per-language fixtures are missing; see [pre-exec and cleanup](#pre-exec-and-cleanup-b5-pr5-not-collectable) |
 | `cleanup_recovery.{normal_stop,partial_start,timeout,oom,escaped_setsid,runner_sigterm}` | Scenarios implemented and tested against a simulated host; the kind refuses to run until the rest exist |
 | `cleanup.runner_sigkill.*`, `cleanup.rerun.consumed_marker` | Not collected: the hosted runtime has no intent journal, and the consumed marker needs a full private runtime configuration |
 
@@ -814,15 +814,31 @@ probe, sequentially.
 
 ## Pre-exec and cleanup (B5 PR5): not collectable
 
-`cleanup` exits 2 before reading a config or touching the host, and prints
-every catalog probe it does not collect with its reason (`NOT_COLLECTED` in the
-collector). A record missing a catalog probe never
+`preexec` and `cleanup` exit 2 before reading a config or touching the host, and
+print every catalog probe they do not collect with its reason
+(`NOT_COLLECTED` in the collector). A record missing a catalog probe never
 verifies, and no collector claims a probe it did not measure. A test checks that
 this list, the catalog and the tables below agree.
 
-### Pre-exec confinement
+### Pre-exec confinement (nothing collected)
 
-Not implemented yet: `preexec` exits 2.
+| Probes | Reason |
+|---|---|
+| `control.pass`, `control.wrong`, `control.hang` | Need per-language pass, wrong and hang fixture suites run through each language's recorded test command, with the grading profile's expected totals |
+| `identity.candidate`, `identity.host_ids`, `identity.capabilities`, `identity.no_new_privs`, `identity.seccomp` | Need a live candidate process under the trusted test driver to read `/proc/<pid>/status` from outside; only the hang fixture provides one |
+| `hostile.fork_exec`, `hostile.process_group_escape`, `hostile.setuid`, `hostile.signal_supervisor`, `hostile.capability_use`, `hostile.grader_mount_read`, `hostile.control_file_forge`, `hostile.network`, `hostile.scratch_exec`, `hostile.unshare`, `hostile.mount`, `hostile.ptrace`, `hostile.load_time_escape`, `hostile.credential_env` | Need a per-language hostile test fixture whose denial the driver's receipt reports |
+
+The fixtures are the open work. Two constraints shape them:
+
+- **They must fit the recorded commands.** Each language's hidden and visible
+  argv and the profile's expected totals are fixed by the approval.
+- **Rust.** Its test commands pin an authority file by sha256. A public fixture
+  can satisfy that only when Rust is not the grading profile's own language and
+  the set records a public fixture authority. When Rust is the profile's
+  language, the pinned authority is private task material.
+
+The image test stages (`coding_runtime/*/supervisor-probe*`) already carry
+synthetic hostile scenarios for each driver, and are a starting point.
 
 ### Cleanup recovery (six scenarios implemented, kind refused)
 
@@ -938,6 +954,9 @@ approval's `private_input_custody` digest is the digest of that object.
   page after a real OOM kill. Should `memory_peak_max_permille_of_limit` allow
   that page (a tolerances-v2 change), or should a record that shows it stay
   refused?
+- **Pre-exec fixtures (PR5).** Should the enforcement image set record public
+  fixture test commands for the languages other than the grading profile's own?
+  That includes a public Rust authority when Rust is not the profile's language.
 - **Cleanup SIGKILL (PR5).** Should the hosted runtime get an intent journal and
   a reconciler, so the SIGKILL probes can be collected, or should they move to
   the not-covered list with reboot and daemon restart?

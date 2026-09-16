@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Default-off root collector for native enforcement evidence (B5 PR4, PR5).
 
-``network`` (PR4) and ``resource`` (PR5) are collected. ``cleanup`` refuses
-before any host effect, listing every catalog probe it does not collect and why
-(``NOT_COLLECTED``); the cleanup scenarios that are implemented are exercised
-only by tests until the rest exist. ``preexec`` is not implemented. Nothing here
+``network`` (PR4) and ``resource`` (PR5) are collected. ``preexec`` and
+``cleanup`` refuse before any host effect, listing every catalog probe they do
+not collect and why (``NOT_COLLECTED``); the cleanup scenarios that are
+implemented are exercised only by tests until the rest exist. Nothing here
 mints approval: the collector retains one record in the evidence store, and
 Peyton reviews it with ``coding-native-evidence.py verify`` against a
 post-collection preflight.
@@ -2218,6 +2218,38 @@ HANG_GRACE_SECONDS = 120
 NOT_COLLECTED: dict[str, dict[str, str]] = {
     "network_enforcement": {},
     "resource_enforcement": {},
+    "preexec_confinement": {
+        "control.pass": "needs per-language pass/wrong/hang fixture suites run "
+        "through each language's recorded test command",
+        "control.wrong": "needs per-language fixture suites (see control.pass)",
+        "control.hang": "needs per-language fixture suites (see control.pass)",
+        "identity.candidate": "needs a live candidate process under the trusted "
+        "test driver, which only the hang fixture provides",
+        "identity.host_ids": "needs the hang fixture (see identity.candidate)",
+        "identity.capabilities": "needs the hang fixture (see identity.candidate)",
+        "identity.no_new_privs": "needs the hang fixture (see identity.candidate)",
+        "identity.seccomp": "needs the hang fixture (see identity.candidate)",
+        **{
+            f"hostile.{name}": "needs a per-language hostile test fixture whose "
+            "denial the driver's receipt reports"
+            for name in (
+                "fork_exec",
+                "process_group_escape",
+                "setuid",
+                "signal_supervisor",
+                "capability_use",
+                "grader_mount_read",
+                "control_file_forge",
+                "network",
+                "scratch_exec",
+                "unshare",
+                "mount",
+                "ptrace",
+                "load_time_escape",
+                "credential_env",
+            )
+        },
+    },
     "cleanup_recovery": {
         "cleanup.runner_sigkill.reconciled_absent": "the hosted runtime keeps no "
         "intent journal of launched container and network ids to reconcile after "
@@ -3506,9 +3538,6 @@ def main(
     checkout: Path = ROOT,
 ) -> int:
     args = parser().parse_args(argv)
-    if KIND_OF[args.kind] not in NOT_COLLECTED:
-        print(f"{args.kind} collection is not implemented", file=sys.stderr)
-        return 2
     uncovered = NOT_COLLECTED[KIND_OF[args.kind]]
     if uncovered:
         # Before any host effect: a record missing these probes never verifies.
