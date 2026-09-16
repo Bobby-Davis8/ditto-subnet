@@ -1,8 +1,8 @@
 """add audited noncompetitive team canary exclusions
 
 Revision ID: 9e4b27c1d5a3
-Revises: 9e4b7c2d1a63
-Create Date: 2026-09-14 00:00:00.000000
+Revises: f2c8d41a6b90
+Create Date: 2026-09-16 00:00:00.000000
 """
 
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "9e4b27c1d5a3"
-down_revision: str | Sequence[str] | None = "9e4b7c2d1a63"
+down_revision: str | Sequence[str] | None = "f2c8d41a6b90"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
