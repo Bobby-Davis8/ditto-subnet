@@ -399,8 +399,10 @@ describe('Backroom MCP tools', () => {
     // The coding-certification canary adds a single open-object write envelope
     // (~450 chars); its allowlist and lease reads ride inside
     // get_coding_control_plane and get_agent_coding_certifications, and its
-    // fields live in get_backroom_tool_help.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(139_500)
+    // fields live in get_backroom_tool_help. With set_team_canary's trims
+    // (-170), the hosted-v2 assignment tools (+5,691) and that envelope (+503)
+    // the catalog measures 139,757 on main ea20fc343.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(140_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
