@@ -90,7 +90,9 @@ class Scenario:
 
     def __init__(self) -> None:
         self.overrides: dict[tuple, str] = {}
-        self.router_remote = None  # defaults to the candidate container address
+        self.router_remote: str | None = (
+            None  # defaults to the candidate container address
+        )
         self.tampered_exe: set[str] = set()
         self.lying: set[str] = set()
         self.listener_sees: set[str] = set()
@@ -215,7 +217,7 @@ class FakeHost:
         self.nft = "deny"
         self.worker_pid = 4000
         self.router_listening = False
-        self.router_listener = None
+        self.router_listener: tuple[FakeSession, str] | None = None
         self.pending: dict[tuple, int] = {}
         self.requests: list[tuple] = []
         self.commands: list[tuple] = []
@@ -226,7 +228,7 @@ class FakeHost:
         self.agent_dir = False
         self.plan = None
         self.report = None
-        self.once_pid = None
+        self.once_pid: int | None = None
         self.gate_opened = 0
         self.info_calls = 0
 
