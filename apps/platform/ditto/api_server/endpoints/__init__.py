@@ -5,6 +5,9 @@ from __future__ import annotations
 from ditto.api_server.endpoints.admin_artifact_release_settings import (
     router as admin_artifact_release_settings_router,
 )
+from ditto.api_server.endpoints.admin_ath_rulings import (
+    router as admin_ath_rulings_router,
+)
 from ditto.api_server.endpoints.admin_attestation import (
     router as admin_attestation_router,
 )
@@ -37,6 +40,9 @@ from ditto.api_server.endpoints.admin_coding_ticket_sets import (
 )
 from ditto.api_server.endpoints.admin_confirmation_bundles import (
     router as admin_confirmation_bundles_router,
+)
+from ditto.api_server.endpoints.admin_confirmation_seed_anchors import (
+    router as admin_confirmation_seed_anchors_router,
 )
 from ditto.api_server.endpoints.admin_continual_retest_settings import (
     router as admin_continual_retest_settings_router,
@@ -91,6 +97,9 @@ from ditto.api_server.endpoints.admin_scoring_readiness import (
 )
 from ditto.api_server.endpoints.admin_screener_capacity import (
     router as admin_screener_capacity_router,
+)
+from ditto.api_server.endpoints.admin_screener_fanout_shadow import (
+    router as admin_screener_fanout_shadow_router,
 )
 from ditto.api_server.endpoints.admin_screener_policy_activation import (
     router as admin_screener_policy_activation_router,
@@ -173,6 +182,7 @@ __all__ = [
     "health_router",
     "inference_router",
     "admin_artifact_release_settings_router",
+    "admin_ath_rulings_router",
     "admin_attestation_router",
     "admin_benchmark_rollout_router",
     "admin_burn_settings_router",
@@ -186,6 +196,7 @@ __all__ = [
     "admin_leaderboard_router",
     "admin_validator_weights_router",
     "admin_lease_revocations_router",
+    "admin_confirmation_seed_anchors_router",
     "admin_copy_court_router",
     "admin_copy_review_router",
     "admin_coding_certifications_router",
@@ -204,6 +215,7 @@ __all__ = [
     "admin_retirement_router",
     "admin_scoring_readiness_router",
     "admin_screener_review_settings_router",
+    "admin_screener_fanout_shadow_router",
     "admin_screener_capacity_router",
     "admin_screener_policy_activation_router",
     "admin_submission_settings_router",

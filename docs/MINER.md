@@ -103,8 +103,8 @@ To submit, you need:
 - Python 3.12+ and [`uv`](https://docs.astral.sh/uv/)
 - a funded Bittensor coldkey
 - a hotkey registered on Finney netuid 118
-- enough TAO for the platform-controlled evaluation fee (currently 0.04 TAO,
-  or 40,000,000 rao)
+- enough TAO for the platform-controlled evaluation fee (0.1 TAO, or
+  100,000,000 rao, as of 2026-09-14; `ditto upload` shows the live amount)
 
 If the hotkey is not registered yet, you do not have to leave the CLI to fix
 it. `ditto upload` runs its pre-check before any TAO moves, and when the only
@@ -304,9 +304,13 @@ result.
 
 - DittoBench generates fresh tool-use and memory-recall cases for each
   submission. Production locks every harness to one consensus model, so model
-  choice is not a miner lever: on the current contract (**Bench v9**) that is
-  **`openai/gpt-oss-20b`**, served through the platform-owned OpenRouter
-  inference boundary. Reasoning effort is an intentional v9 strategy: a harness
+  choice is not a miner lever: on the current contract (**Bench v12**; Bench
+  v13 will be scored in shadow once its rollout is scheduled and activates by
+  a separate owner decision — see the starter kit's [*Bench v13: how to stay
+  inside the
+  gates*](../miners/dittobench-starter-kit/README.md#bench-v13-how-to-stay-inside-the-gates))
+  that is **`openai/gpt-oss-20b`**, served through the platform-owned
+  OpenRouter inference boundary. Reasoning effort is an intentional v9 strategy: a harness
   may request `low`, `medium`, or `high`; omission defaults to `medium`. Tune
   your prompting and reasoning budget for the active benchmark model; `GET
   /api/v1/public/bench/config` reports the authoritative contract. Your local
@@ -330,7 +334,13 @@ result.
   new version that
   improves on your current best by less than that 0.007 gate keeps the
   incumbency clock you already earned; a later rival with a lower score cannot
-  take the crown just because your newer tarball arrived after theirs. From
+  take the crown just because your newer tarball arrived after theirs. Once
+  the fleet runs crown incumbency (`crown_mode: incumbent` on the pinned
+  ledger), the crown is also defended from whoever held it at the previous
+  epoch pin: a senior lineage whose official score sits inside the band no
+  longer retakes it just because its lineage is older, and a challenger still
+  has to clear the band over the holder. Ties among non-holders are still
+  broken by who arrived first. From
   Bench v6 onward, that whole band shrinks smoothly once the incumbent exceeds
   0.60, keeping the crown contestable as scores approach the benchmark ceiling.
   That smooth decay is measured against a perfect score rather than against
@@ -756,7 +766,8 @@ own last output. A `stale` flag means the tail is from a prior lease —
 reissue keeps the last failure on the row while starting a new attempt.
 
 **How much does evaluation cost?** The Backroom-controlled fee is denominated in
-TAO and is currently **0.04 TAO (40,000,000 rao)**. The CLI fetches and shows
+TAO and was **0.1 TAO (100,000,000 rao)** as of 2026-09-14. Operators can change
+it in Backroom, so treat that as an example. The CLI fetches and shows
 the authoritative TAO amount before confirmation. TAO/USD pricing is used only
 for internal revenue reporting and cannot change whether a payment is accepted.
 
