@@ -3,9 +3,11 @@ package probe
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -57,10 +59,28 @@ func requireRootlessIsolatedDaemon(ctx context.Context, cli DockerCLI) error {
 	if err != nil {
 		return fmt.Errorf("probe: docker labels unavailable: %s", strings.TrimSpace(string(labels)))
 	}
-	if !strings.Contains(string(labels), isolatedDaemonLabel) {
+	if !daemonHasLabel(labels, isolatedDaemonLabel) {
 		return errors.New("probe: docker daemon lacks the isolated ownership label")
 	}
 	return nil
+}
+
+// daemonHasLabel mirrors the executor's exact label match: the daemon's label
+// list (or map) must carry the exact key=value entry, never a substring of an
+// unrelated label.
+func daemonHasLabel(body []byte, expected string) bool {
+	trimmed := bytes.TrimSpace(body)
+	var labels []string
+	if json.Unmarshal(trimmed, &labels) == nil {
+		return slices.Contains(labels, expected)
+	}
+	var labelMap map[string]string
+	if json.Unmarshal(trimmed, &labelMap) == nil {
+		key, value, ok := strings.Cut(expected, "=")
+		got, present := labelMap[key]
+		return ok && present && got == value
+	}
+	return false
 }
 
 // isolatedDaemonLabel mirrors the label the executor and sandbox require.
