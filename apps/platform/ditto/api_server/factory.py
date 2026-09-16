@@ -78,6 +78,7 @@ from ditto.api_server.endpoints import (
     admin_coding_reconciliation_router,
     admin_coding_ticket_sets_router,
     admin_confirmation_bundles_router,
+    admin_confirmation_seed_anchors_router,
     admin_continual_retest_settings_router,
     admin_copy_court_router,
     admin_copy_review_router,
@@ -311,6 +312,23 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if _process_role() == PLATFORM_ROLE
                 else None
             )
+
+            # Shadow router-track ledger relay: reads the ledger the offloaded
+            # dittobench-api scorer publishes so validators can fold it via
+            # GET /scoring/router-ledger. None (unconfigured) → the endpoint
+            # serves an empty ledger, the safe shadow default (zero emission).
+            from ditto.api_server.router_ledger_relay import (
+                create_router_ledger_reader_from_env,
+            )
+
+            router_ledger_reader = (
+                create_router_ledger_reader_from_env()
+                if _process_role() == PLATFORM_ROLE
+                else None
+            )
+            if router_ledger_reader is not None:
+                stack.push_async_callback(router_ledger_reader.aclose)
+            app.state.router_ledger_reader = router_ledger_reader
 
             from ditto.api_server.hippius import (
                 create_hippius_client,
@@ -679,6 +697,7 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     app.include_router(admin_copy_review_router, prefix="/api/v1")
     app.include_router(admin_ath_rulings_router, prefix="/api/v1")
     app.include_router(admin_copy_court_router, prefix="/api/v1")
+    app.include_router(admin_confirmation_seed_anchors_router, prefix="/api/v1")
     app.include_router(admin_coding_certifications_router, prefix="/api/v1")
     app.include_router(admin_coding_control_plane_router, prefix="/api/v1")
     app.include_router(admin_coding_catalog_router, prefix="/api/v1")

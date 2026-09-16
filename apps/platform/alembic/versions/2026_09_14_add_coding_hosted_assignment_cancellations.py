@@ -1,7 +1,7 @@
 """append-only operator cancellation of an unstarted hosted Coding assignment
 
 Revision ID: 4b7f09043317
-Revises: e6f4a9c2d781
+Revises: 9e4b7c2d1a63
 Create Date: 2026-09-14
 
 A cancellation is a new immutable row; no assignment, task or evidence row is
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "4b7f09043317"
-down_revision: str | Sequence[str] | None = "e6f4a9c2d781"
+down_revision: str | Sequence[str] | None = "9e4b7c2d1a63"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
