@@ -826,6 +826,58 @@ def _read_line(session: Any, fd: int, timeout: float) -> dict[str, Any]:
     return value
 
 
+DOCKER_OUTPUT_SECONDS = 90.0
+
+
+def count_process_output(
+    arguments: list[str], seconds: float, label: str, **kwargs: Any
+) -> int:
+    """Count a command's combined output within one deadline, without keeping it.
+
+    The pipe is read only when the selector reports it readable, so a command
+    that hangs or holds the pipe open without writing cannot outlive the
+    deadline; on any exit path the process is killed and reaped.
+    """
+
+    process = subprocess.Popen(
+        arguments,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        **kwargs,
+    )
+    assert process.stdout is not None
+    deadline = time.monotonic() + seconds
+    total = 0
+    try:
+        fd = process.stdout.fileno()
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, f"{label} output took too long")
+                if not selector.select(remaining):
+                    continue
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, f"{label} output took too long")
+        try:
+            code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise Refusal(f"{label} did not exit in time") from None
+        require(code == 0, f"{label} failed")
+        return total
+    finally:
+        if process.poll() is None:
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=10)
+        process.stdout.close()
+
+
 class SystemHost:
     """The real host. Fixed binaries, pinned Docker socket, bounded commands."""
 
@@ -1073,22 +1125,13 @@ class SystemHost:
     def docker_output_bytes(self, *args: str) -> int:
         """Count Docker's output (stdout and stderr) without keeping it."""
 
-        process = subprocess.Popen(
+        return count_process_output(
             ["/usr/bin/docker", *args],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            DOCKER_OUTPUT_SECONDS,
+            f"docker {args[0]}",
             cwd="/",
             **self._docker_env(),
         )
-        assert process.stdout is not None
-        total = 0
-        deadline = time.monotonic() + 90
-        while chunk := process.stdout.read(1 << 20):
-            total += len(chunk)
-            require(time.monotonic() < deadline, "docker output took too long")
-        require(process.wait(timeout=30) == 0, f"docker {args[0]} failed")
-        return total
 
     def subordinate_processes(self, start: int, count: int) -> int:
         total = 0

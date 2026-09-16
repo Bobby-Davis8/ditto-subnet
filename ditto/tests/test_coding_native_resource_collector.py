@@ -14,6 +14,8 @@ import functools
 import json
 import re
 import signal
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1762,3 +1764,70 @@ def test_an_interrupted_sigkill_scenario_unwinds_the_decoy_and_the_journal(rw):
     collector.stop_agent()
     collector.unwind()
     assert host.networks == set() and host.journal == []
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    """Records every process the output counter starts."""
+
+    processes = []
+    real = COLLECTOR.subprocess.Popen
+
+    def popen(*args, **kwargs):
+        process = real(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(COLLECTOR.subprocess, "Popen", popen)
+    return processes
+
+
+def test_process_output_counter_counts_combined_output(spawned):
+    script = "import sys; sys.stdout.write('abc'); sys.stderr.write('de')"
+    total = COLLECTOR.count_process_output(
+        [sys.executable, "-c", script], 30, "fake docker"
+    )
+    assert total == 5
+    assert spawned[0].returncode == 0
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # hangs without writing or closing the pipe
+        "import time; time.sleep(60)",
+        # writes a little, then holds the pipe open without filling a buffer
+        "import sys, time; sys.stdout.write('x'); sys.stdout.flush(); time.sleep(60)",
+    ],
+)
+def test_process_output_counter_kills_a_hung_command_at_its_deadline(spawned, script):
+    started = time.monotonic()
+    with pytest.raises(COLLECTOR.Refusal, match="fake docker output took too long"):
+        COLLECTOR.count_process_output(
+            [sys.executable, "-c", script], 0.5, "fake docker"
+        )
+    assert time.monotonic() - started < 10
+    assert len(spawned) == 1 and spawned[0].returncode is not None  # killed and reaped
+
+
+def test_process_output_counter_refuses_a_pipe_held_by_a_leftover_child(spawned):
+    # The command exits at once but leaves a child holding its output pipe.
+    script = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])"
+    )
+    started = time.monotonic()
+    with pytest.raises(COLLECTOR.Refusal, match="took too long"):
+        COLLECTOR.count_process_output(
+            [sys.executable, "-c", script], 0.5, "fake docker"
+        )
+    assert time.monotonic() - started < 4
+    assert spawned[0].returncode is not None
+
+
+def test_process_output_counter_refuses_a_failed_command(spawned):
+    with pytest.raises(COLLECTOR.Refusal, match="fake docker failed"):
+        COLLECTOR.count_process_output(
+            [sys.executable, "-c", "raise SystemExit(3)"], 30, "fake docker"
+        )
+    assert spawned[0].returncode == 3
