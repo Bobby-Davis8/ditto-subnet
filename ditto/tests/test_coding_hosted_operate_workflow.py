@@ -263,6 +263,7 @@ def test_review_ruleset_covers_every_root_capable_surface() -> None:
         "infra/scripts/coding-hosted-verify.py",
         "infra/github/coding-hosted-operate-*.json",
         "infra/terraform/stacks/gcp-platform/coding-hosted*.tf",
+        "infra/terraform/stacks/gcp-platform/prod.auto.tfvars",
         "infra/terraform/modules/coding-hosted-host/**",
     }
 

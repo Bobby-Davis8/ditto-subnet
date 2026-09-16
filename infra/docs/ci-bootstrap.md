@@ -179,7 +179,8 @@ Activation order:
 
 1. Install `infra/github/coding-hosted-operate-ruleset.json`. It requires one
    `admin` team approval, from someone other than the last pusher, for the
-   workflow, verifier, delegation JSON, and the host module and stack files.
+   workflow, verifier, delegation JSON, host module and stack files, and the
+   `prod.auto.tfvars` activation flag.
 2. Merge the reviewed change. Set `enable_coding_hosted_operate_workflow = true`
    in a separate reviewed change, then create a protected exact-current-main
    plan and inspect the IAM before applying through `infra-apply`. Never create
