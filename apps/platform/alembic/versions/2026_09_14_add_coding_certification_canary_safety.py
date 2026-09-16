@@ -1,7 +1,7 @@
 """recover claimed coding certification leases and add a strict allowlist
 
 Revision ID: c7a2e5d19b43
-Revises: e6f4a9c2d781
+Revises: 9e4b7c2d1a63
 Create Date: 2026-09-14
 
 Default-off safety changes for the shadow contract-v1 certification path.
@@ -50,7 +50,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "c7a2e5d19b43"
-down_revision: str | Sequence[str] | None = "e6f4a9c2d781"
+down_revision: str | Sequence[str] | None = "9e4b7c2d1a63"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
