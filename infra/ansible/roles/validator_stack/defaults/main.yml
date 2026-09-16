@@ -88,9 +88,14 @@ validator_stack_coding_egress_network: ""
 validator_stack_coding_egress_proxy: ""
 validator_stack_coding_host_gateway_ip: ""
 # Exact certification canary targets. The empty defaults refuse every lease.
-# The hotkey must equal validator_stack_hotkey, so the targets cannot be reused
-# on another validator.
-validator_stack_coding_canary_agent_ids: []
+# Each target is one mapping with exactly agent_id (canonical UUID),
+# artifact_sha256 and screened_image_sha256 (lowercase 64-hex), the same fields
+# as one Platform certification allowlist tuple; the fourth field is the
+# validator hotkey below. A lease whose artifact or screened-image digest
+# differs from a listed target is refused before any execution. The hotkey
+# must equal validator_stack_hotkey, so the targets cannot be reused on another
+# validator.
+validator_stack_coding_canary_targets: []
 validator_stack_coding_canary_validator_hotkey: ""
 
 validator_stack_cosign_version: v3.0.6

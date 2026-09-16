@@ -38,6 +38,7 @@ from ditto.validator.coding_canary import (
 )
 from ditto.validator.coding_canary_runtime import CodingCanaryRuntime
 from ditto.validator.coding_certification_socket import CertificationSocketTransport
+from ditto.validator.config import CodingCanaryTarget
 from ditto.validator.errors import (
     PlatformError,
     PlatformInfrastructureError,
@@ -52,7 +53,24 @@ _LEASE = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 _UPLOAD = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
 _HOTKEY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 _OTHER_AGENT = UUID("abababab-abab-4bab-8bab-abababababab")
-_TARGETS = CodingCanaryTargets.of([_AGENT], _HOTKEY)
+_ARTIFACT = "aa" * 32
+_SCREENED_IMAGE = "1a" * 32
+_TARGET = CodingCanaryTarget(
+    agent_id=_AGENT,
+    artifact_sha256=_ARTIFACT,
+    screened_image_sha256=_SCREENED_IMAGE,
+)
+_TARGETS = CodingCanaryTargets.of([_TARGET], _HOTKEY)
+
+
+def _target(**updates: Any) -> CodingCanaryTarget:
+    value: dict[str, Any] = {
+        "agent_id": _AGENT,
+        "artifact_sha256": _ARTIFACT,
+        "screened_image_sha256": _SCREENED_IMAGE,
+    }
+    value.update(updates)
+    return CodingCanaryTarget(**value)
 
 
 def _authority(**updates: object) -> CodingCertificationLeaseAuthority:
@@ -485,10 +503,10 @@ async def test_canary_worker_aborts_issued_lease_if_claim_fails() -> None:
     [
         CodingCanaryTargets(),
         CodingCanaryTargets.of([], _HOTKEY),
-        CodingCanaryTargets.of([_AGENT], ""),
-        CodingCanaryTargets.of([_OTHER_AGENT], _HOTKEY),
+        CodingCanaryTargets.of([_TARGET], ""),
+        CodingCanaryTargets.of([_target(agent_id=_OTHER_AGENT)], _HOTKEY),
         # Exact targets copied onto a validator with a different hotkey.
-        CodingCanaryTargets.of([_AGENT], "5" + "F" * 47),
+        CodingCanaryTargets.of([_TARGET], "5" + "F" * 47),
     ],
 )
 async def test_canary_worker_refuses_every_lease_outside_its_exact_targets(
@@ -515,6 +533,38 @@ async def test_canary_worker_default_targets_refuse_everything() -> None:
     assert not _TARGETS.permits(_AGENT, "5" + "F" * 47)
     assert not _TARGETS.refuses_all(_HOTKEY)
     assert _TARGETS.refuses_all("5" + "F" * 47)
+    assert _TARGETS.agent_ids == frozenset({_AGENT})
+
+
+@pytest.mark.parametrize(
+    ("authority", "bound"),
+    [
+        ({}, True),
+        ({"agent_artifact_sha256": "ab" * 32}, False),
+        ({"screened_image_sha256": "1b" * 32}, False),
+        ({"agent_artifact_sha256": _SCREENED_IMAGE}, False),
+        (
+            {
+                "agent_artifact_sha256": _SCREENED_IMAGE,
+                "screened_image_sha256": _ARTIFACT,
+            },
+            False,
+        ),
+        ({"agent_id": _OTHER_AGENT}, False),
+        ({"validator_hotkey": "5" + "F" * 47}, False),
+    ],
+)
+def test_canary_targets_bind_all_four_allowlist_fields(
+    authority: dict[str, object], bound: bool
+) -> None:
+    assert _TARGETS.binds(_authority(**authority), _HOTKEY) is bound
+    # A target for the same agent with another image never widens the match.
+    other_image = CodingCanaryTargets.of(
+        [_target(screened_image_sha256="1b" * 32)], _HOTKEY
+    )
+    assert other_image.binds(_authority(), _HOTKEY) is False
+    assert other_image.permits(_AGENT, _HOTKEY) is True
+    assert _TARGETS.binds(_authority(**authority), "5" + "F" * 47) is False
 
 
 async def test_canary_worker_offers_only_allowlisted_agents() -> None:
@@ -604,6 +654,9 @@ async def test_canary_worker_keeps_the_offer_until_the_scorer_is_ready() -> None
     [
         {"agent_id": _OTHER_AGENT},
         {"validator_hotkey": "5" + "F" * 47},
+        {"agent_artifact_sha256": "ab" * 32},
+        {"screened_image_sha256": "1b" * 32},
+        {"agent_artifact_sha256": "ab" * 32, "screened_image_sha256": "1b" * 32},
     ],
 )
 async def test_canary_worker_aborts_an_issued_lease_for_another_target(
@@ -627,6 +680,41 @@ async def test_canary_worker_aborts_an_issued_lease_for_another_target(
     assert platform.issues == 1
     assert platform.aborts == 1
     assert platform.claims == 0
+    assert runtime.certified == []
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        {"agent_artifact_sha256": "ab" * 32},
+        {"screened_image_sha256": "1b" * 32},
+    ],
+)
+async def test_canary_worker_refuses_a_claimed_lease_with_other_digests(
+    authority: dict[str, object],
+) -> None:
+    platform = _Platform()
+    platform.claimed = CodingCertificationLeaseResponse(
+        authority=_authority(**authority),
+        status=CodingCertificationLeaseStatus.CLAIMED,
+        claimed_at=_NOW,
+        screened_image_id="sha256:" + "ef" * 32,
+        screened_image_ref=f"ditto-screen/{_AGENT}:latest",
+        screened_image_upload_id=_UPLOAD,
+        weight_eligible=False,
+    )
+    runtime = _Runtime()
+    worker = _worker(platform, runtime)
+    worker.offer(_AGENT, 12)
+    with pytest.raises(PlatformInfrastructureError, match="allowlisted target"):
+        await worker.run_once()
+    assert platform.claims == 1
+    # Refused before any execution: no harness, grant, exchange, or certify.
+    assert platform.launches == 0
+    assert platform.grants == 0
+    assert platform.exchanges == 0
+    assert platform.revokes == 0
+    assert platform.submits == 0
     assert runtime.certified == []
 
 

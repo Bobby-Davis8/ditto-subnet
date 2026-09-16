@@ -289,7 +289,7 @@ async def _create_coding_canary_worker(
         )
 
     targets = CodingCanaryTargets.of(
-        config.coding_canary_agent_ids, config.coding_canary_validator_hotkey
+        config.coding_canary_targets, config.coding_canary_validator_hotkey
     )
     worker = CodingCanaryWorker(
         platform=platform,
@@ -302,13 +302,13 @@ async def _create_coding_canary_worker(
     if targets.refuses_all(config.validator_hotkey):
         logger.warning(
             "coding canary worker enabled but refuses every lease: it needs at "
-            "least one allowlisted agent and an allowlisted validator hotkey "
-            "equal to this validator's hotkey"
+            "least one allowlisted target identity and an allowlisted validator "
+            "hotkey equal to this validator's hotkey"
         )
     else:
         logger.info(
             "coding canary worker enabled targets=%d",
-            len(targets.agent_ids),
+            len(targets.entries),
         )
     return worker
 

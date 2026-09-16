@@ -80,7 +80,7 @@ def test_validator_certification_canary_is_double_gated_default_off() -> None:
     # The dedicated rootless coding daemon and exact targets default to empty,
     # which refuses both canary switches and every lease.
     assert DEFAULTS["validator_stack_coding_docker_host"] == ""
-    assert DEFAULTS["validator_stack_coding_canary_agent_ids"] == []
+    assert DEFAULTS["validator_stack_coding_canary_targets"] == []
     assert DEFAULTS["validator_stack_coding_canary_validator_hotkey"] == ""
     # Validation runs before the first host mutation in the role.
     include = "ansible.builtin.include_tasks: validate_coding_canary.yml"
@@ -99,9 +99,13 @@ def test_validator_certification_canary_is_double_gated_default_off() -> None:
     for line in (
         "VALIDATOR_CODING_CANARY_ENABLED={{ 'true' if "
         "coding_canary_enabled else 'false' }}",
-        "VALIDATOR_CODING_CANARY_AGENT_IDS={{ "
-        "validator_stack_coding_canary_agent_ids | join(',') if "
-        "coding_canary_enabled else '' }}",
+        "VALIDATOR_CODING_CANARY_TARGETS={{ "
+        "(validator_stack_coding_canary_targets | map(attribute='agent_id') | "
+        "zip(validator_stack_coding_canary_targets | "
+        "map(attribute='artifact_sha256'), "
+        "validator_stack_coding_canary_targets | "
+        "map(attribute='screened_image_sha256')) | map('join', ':') | "
+        "join(',')) if coding_canary_enabled else '' }}",
         "VALIDATOR_CODING_CANARY_VALIDATOR_HOTKEY={{ "
         "validator_stack_coding_canary_validator_hotkey if "
         "coding_canary_enabled else '' }}",

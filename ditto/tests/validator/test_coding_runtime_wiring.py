@@ -13,6 +13,7 @@ import ditto.validator.coding_canary_runtime as runtime_module
 from ditto.validator.coding_canary_runtime import CodingCanaryRuntime
 from ditto.validator.coding_certification_socket import CertificationSocketTransport
 from ditto.validator.coding_supervisor import CodingSupervisorRuntime
+from ditto.validator.config import CodingCanaryTarget
 
 
 def _config(*, remote: bool) -> Any:
@@ -252,7 +253,13 @@ def _canary_config(*, enabled: bool) -> Any:
         dittobench_api_url="http://sandbox-docker:8000",
         dittobench_control_token="coding-control-token-00000000000000000001",
         validator_hotkey="5" + "V" * 47,
-        coding_canary_agent_ids=(UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),),
+        coding_canary_targets=(
+            CodingCanaryTarget(
+                agent_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                artifact_sha256="aa" * 32,
+                screened_image_sha256="1a" * 32,
+            ),
+        ),
         coding_canary_validator_hotkey="5" + "V" * 47,
         coding_certification_control_token="coding-certification-token-000000001",
         coding_certification_socket_uid=61001,
@@ -359,7 +366,7 @@ async def test_canary_never_shares_the_local_shadow_scorer_client() -> None:
     config.dittobench_api_url = "http://sandbox-docker:8000"
     config.coding_canary_enabled = True
     config.coding_canary_poll_seconds = 10.0
-    config.coding_canary_agent_ids = ()
+    config.coding_canary_targets = ()
     config.coding_canary_validator_hotkey = ""
     for name, value in vars(_canary_config(enabled=True)).items():
         if name.startswith("coding_certification_"):
