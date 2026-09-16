@@ -1,5 +1,10 @@
 import '@tanstack/react-start/server-only'
 
+import { issueBenchmarkCanaryInputSchema, getBenchmarkCanaryInputSchema,
+  cancelBenchmarkCanaryInputSchema, listBenchmarkCanariesInputSchema } from '../lib/benchmark-canary.schemas'
+import { issueBenchmarkCanary, getBenchmarkCanary, listBenchmarkCanaries,
+  cancelBenchmarkCanary } from './admin.service'
+
 import {
   McpServer,
   type RegisteredTool,
@@ -30,6 +35,8 @@ import {
   benchmarkContractRefreshLookupInputSchema,
   getAthReviewInputSchema,
   openAthReviewInputSchema,
+  previewAthRulingsBatchInputSchema,
+  executeAthRulingsBatchInputSchema,
   searchAthPrecedentsInputSchema,
   quarantineResolutionSchema,
   resolveCopyReviewInputSchema,
@@ -90,8 +97,10 @@ import {
   traceDownloadUrlInputSchema,
   peekInferenceTraceInputSchema,
   applyScreenerReviewSettingsInputSchema,
+  screenerFanoutShadowInputSchema,
   applyCopyCourtSettingsInputSchema,
   copyCourtRecommendationsInputSchema,
+  confirmationSeedAnchorsInputSchema,
   rotateScreenerPolicyManifestInputSchema,
   setQueuePolicySettingsInputSchema,
   scheduleScreenerPolicyActivationInputSchema,
@@ -139,6 +148,9 @@ import {
   previewScreeningQuarantineBatch,
   openAthReview,
   resolveCopyReview,
+  createAthRulingsUpload,
+  previewAthRulingsBatch,
+  executeAthRulingsBatch,
   resolveScreeningQuarantine,
   resolveScreeningDispute,
   rescreenRejectedSubmission,
@@ -212,8 +224,10 @@ import {
   updateScreenerProviderSettings,
   updateScreenerNodeChannelSettings,
   fetchScreenerReviewControl,
+  fetchScreenerFanoutShadow,
   fetchCopyCourtControl,
   fetchCopyCourtRecommendations,
+  fetchConfirmationSeedAnchors,
   applyCopyCourtSettings,
   applyScreenerReviewSettings,
   fetchScreenerPolicyManifestControl,
@@ -223,6 +237,7 @@ import {
   fetchValidatorSlotSettings,
   fetchValidatorFleetObservability,
   fetchValidatorWeightDiagnostics,
+  fetchLedgerEpochSnapshots,
   fetchValidatorAssignments,
   setValidatorSlotSettings,
   fetchBurnSettings,
@@ -280,6 +295,8 @@ export const WRITE_TOOL_NAMES = new Set([
   'reject_screening_submission',
   'open_ath_review',
   'resolve_ath_review',
+  'create_ath_rulings_upload',
+  'execute_ath_rulings_batch',
   'execute_screening_quarantine_batch',
   'retry_validator_evaluation',
   'remove_failed_submission_from_queue',
@@ -294,6 +311,8 @@ export const WRITE_TOOL_NAMES = new Set([
   'qualify_scored_benchmark_rollout',
   'expand_benchmark_rollout_cohort',
   'start_benchmark_rollout',
+  'issue_benchmark_canary',
+  'cancel_benchmark_canary',
   'set_efficiency_bonus_settings',
   'set_continual_retest_settings',
   'set_core_qualification_policy',
@@ -505,6 +524,14 @@ function toolAnnotations(kind: 'read' | 'write', destructive = false) {
 // Keep the catalog decision-grade; the original, detailed operation notes stay
 // available on demand through `get_backroom_tool_help`.
 const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
+  get_ledger_epoch_snapshots:
+    'Read the epoch-pinned validator ledger history: per chain epoch, the frozen fold input digest, champion, incumbent, recipients, and whether the crown changed.',
+  create_ath_rulings_upload:
+    'Presigned five-minute PUT (<= 1 MiB JSON) for one ATH rulings document under this operator\'s prefix. Requires backroom:write.',
+  preview_ath_rulings_batch:
+    'Dry-run up to 50 open|clear|reject ATH rulings (uploadKey or inline) against live guards and the crown; per-item disposition, would_change_crown; returns a preview token. Never mutates.',
+  execute_ath_rulings_batch:
+    'Apply the previewed rulings under "APPLY ATH RULINGS BATCH"; re-reads the board, audits per item, refuses rows whose guards or crown outcome moved. Requires backroom:write.',
   get_validator_weight_diagnostics:
     'Read block-bound vTrust, revealed weights, pending timelock rounds, and each commit\'s implied reveal block; never submits weights.',
   agent_scoring_readiness:
@@ -553,8 +580,12 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Idempotently observe one current score snapshot. No scoring effect.',
   get_screener_review_settings:
     'Read L1/L2/L3 review settings and worker adoption; bypass is in queue policy.',
+  get_screener_fanout_shadow:
+    'Read bounded baseline/fan-out shadow comparisons, coverage, disagreements, latency, and spend.',
   get_copy_court_settings:
     'Read the copy-hold triage court posture and revision history.',
+  get_confirmation_seed_anchors:
+    'Read bench v13+ finalized-block confirmation seed anchors: pinned and still-waiting reigns, floor, and delta.',
   list_copy_court_recommendations:
     'Page the shadow court\'s non-authoritative verdicts for pending copy holds.',
   apply_screener_review_settings:
@@ -660,6 +691,10 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read rollout control: versions, start_ready, cohort, targets. Starts nothing.',
   start_benchmark_rollout:
     'Start a forward-only rollout. Confirmation: START BENCHMARK V{n}.',
+  list_benchmark_canaries: 'Page isolated benchmark canaries. No score or rollout authority.',
+  get_benchmark_canary: 'Read one diagnostic lease and its non-authoritative result summary.',
+  issue_benchmark_canary: 'Issue one bounded diagnostic lease for an explicit bench version, agent and validator. Never activates.',
+  cancel_benchmark_canary: 'Cancel one exact canary and revoke its inference. Does not affect canonical scores.',
   authorize_confirmation_bundle_retest:
     'Authorize one manual retest for a completed or failed bundle. Requires current generation, request UUID, reason, and exact phrase. Automatic retries stay disabled.',
   remove_failed_submission_from_queue:
@@ -965,6 +1000,51 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'create_ath_rulings_upload',
+    {
+      title: 'Create ATH rulings upload',
+      description:
+        'Issue a five-minute presigned PUT URL for one batched ATH rulings document. The object lands under this operator\'s own prefix (ath-rulings/v1/<actor>/...) of the private trace bucket; the upload must be application/json and at most 1 MiB. Upload the document with `curl -X PUT -H "Content-Type: application/json" --data-binary @rulings.json "<url>"`, then call preview_ath_rulings_batch with the returned key. Document shape: {"source": "<write-up path>", "rulings": [{"action": "open" | "clear" | "reject", "agent_id", "expected_sha256", "expected_score_count", "reason" (>= 3 chars, public and miner-visible, unbounded), "evidence_references": ["path:line" | "path:line-line", ...]}]}. Each agent may appear once per batch; a reject must cite at least one evidence reference. Small batches can skip the upload and pass `rulings` inline to preview_ath_rulings_batch. Requires backroom:write; answers 503 when rulings storage is not configured (preview inline instead).',
+      annotations: toolAnnotations('write', false),
+    },
+    async () => write(() => createAthRulingsUpload(props.session.email)),
+  )
+
+  registerTool(
+    'preview_ath_rulings_batch',
+    {
+      title: 'Preview ATH rulings batch',
+      description:
+        'Dry-run a batch of up to 50 ATH rulings without changing anything. Pass either uploadKey (from create_ath_rulings_upload) or the same document\'s `rulings` inline (Platform wire shape, snake_case). Every item is re-read from live state: agent_status, artifact SHA-256 and score count against the ruling\'s expected_sha256 / expected_score_count guards (stale_guard=true and disposition stale_guard when they moved), plus the review row, so the disposition says what execute will do: ready (with `steps`, e.g. a reject on a scored agent is ["open","reject"], on a held agent ["reject"]), already_applied (idempotent replay), conflict (conflict_reason is the 409 the underlying route would answer), not_found, or invalid (a reject without evidence_references). The crown arithmetic is the board the operator sees: the validator-equivalent KOTH fold (eligible ledger with stderr, quorum, confirmation and efficiency inputs) under the same fleet-gated tie-weighting and ceiling-band-clamp flags the public leaderboard applies, returned as `board` (champion, raw leader, fingerprint). `would_change_crown` marks rulings that hold or reject the champion / raw leader, or clear an agent whose canonical score would re-enter as champion or raw leader -- judged CUMULATIVELY against the board after the earlier items in the batch, so rejecting the champion in item 0 flags the runner-up a later item removes (a batch that empties the top five flags every row). The preview_token is HMAC-signed, bound to the signed-in operator, the rulings digest, the upload key, and the crown outcome, and expires after 10 minutes. Inline previews must resend the identical `rulings` to execute. Requires backroom:read.',
+      inputSchema: previewAthRulingsBatchInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) =>
+      result(
+        compacted(await previewAthRulingsBatch(input, props.session.email), {
+          items: { pin: ['agent_id', 'action', 'disposition'] },
+        }),
+      ),
+  )
+
+  registerTool(
+    'execute_ath_rulings_batch',
+    {
+      title: 'Execute ATH rulings batch',
+      description:
+        'Apply exactly the rulings a current preview token describes; confirmation must be "APPLY ATH RULINGS BATCH". The Platform verifies the token (operator, digest, TTL), re-downloads the uploaded document (or requires the identical inline `rulings`), RE-READS THE BOARD, and re-previews every item before touching it. Each ruling is then applied independently through the same open_ath_review / resolve_ath_review code path -- a reject on a scored agent opens the hold and resolves it in one item -- with the board re-read from Postgres after every ruling that lands, so item i is judged against the real board after items < i (not the preview\'s simulation); each is separately audited: the AthReview provenance and the clear/reject action rows carry batch_id, index, evidence_references, the rulings digest, the upload key, and the board fingerprint. Rows come back as applied / already_applied / failed with the refusal reason, so a partial batch is safe to preview and re-run. An applied row with `annotated: false` LANDED -- only the batch_id / evidence_references annotation on its audit rows failed; never re-run it. An item is refused when its guards moved, or when its crown outcome differs from the preview (would_change_crown flipped, or the champion / raw leader changed and the item touches the crown) -- preview again and read the new `board`. board_before and board_after report the crown around the batch. Requires backroom:write.',
+      inputSchema: executeAthRulingsBatchInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) =>
+      write(async () =>
+        compacted(await executeAthRulingsBatch(input, props.session.email), {
+          items: { pin: ['agent_id', 'action', 'status'] },
+        }),
+      ),
+  )
+
+  registerTool(
     'get_copy_review_source_diff',
     {
       title: 'Get copy-review source diff',
@@ -1031,7 +1111,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening disputes',
       description:
-        'Page through pending, resolved, or all one-time miner disputes oldest first by created_at then dispute_id. This is intentionally queue order: pending appeals are handled fairly instead of letting new disputes starve old ones. Returns count, limit, and offset.',
+        'Page through pending, resolved, or all one-time miner disputes oldest first by created_at then dispute_id. This is intentionally queue order: pending appeals are handled fairly instead of letting new disputes starve old ones. `kind`: `screening` (rejected quarantine) or `gate_notes` (a scored submission appeals its cited v13+ notes). Returns count, limit, and offset.',
       inputSchema: {
         status: z.enum(['pending', 'resolved', 'all']).default('pending'),
         ...MCP_PAGINATION_INPUT,
@@ -1592,7 +1672,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get authoritative agent scores',
       description:
-        "Authoritative production scores for one SN118 agent, by agent UUID or miner hotkey (a hotkey resolves to that miner's current leaderboard submission). Returns the finalized median composite, every accepted per-validator score with its per-axis tool/memory means, seed, run id, bench version, and transcript hash, the pinned dataset (seed + sha256 + seed block), the active and desired bench versions, and the agent's leaderboard context: rank, quorum vs provisional state, emission eligibility, and the composite breakdown with the aggregate benchmark-quality gate and token-efficiency penalty multipliers. A submission below quorum answers with `finalized: false` instead of an error: score_count of quorum, the accepted scores that DO exist with their composites and exact seeds, and median_composite null because no canonical aggregate exists yet. Those pre-quorum rows carry `validator_hotkey: null` (also run_id, tool_mean, memory_mean, median_ms, n) because the platform withholds validator identity until quorum — null means not published yet, never that no validator scored it; use list_stuck_submissions or agent_scoring_readiness for per-validator ticket state. Dataset pin fields are null before quorum; each accepted row carries the exact seed it was graded against. Only a genuinely unknown agent UUID errors. Reads the same public score ledger that drives validator weights, never influences it, and exposes no miner source. Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. Requires backroom:read.",
+        "Authoritative production scores for one SN118 agent, by agent UUID or miner hotkey (a hotkey resolves to that miner's current leaderboard submission). Returns the finalized median composite, every accepted per-validator score with its per-axis tool/memory means, seed, run id, bench version, and transcript hash, the pinned dataset (seed + sha256 + seed block), the active and desired bench versions, and the agent's leaderboard context: rank, quorum vs provisional state, emission eligibility, and the composite breakdown with the aggregate benchmark-quality gate and token-efficiency penalty multipliers. A submission below quorum answers with `finalized: false` instead of an error: score_count of quorum, the accepted scores that DO exist with their composites and exact seeds, and median_composite null because no canonical aggregate exists yet. Those pre-quorum rows carry `validator_hotkey: null` (also run_id, tool_mean, memory_mean, median_ms, n) because the platform withholds validator identity until quorum — null means not published yet, never that no validator scored it; use list_stuck_submissions or agent_scoring_readiness for per-validator ticket state. Dataset pin fields are null before quorum; each accepted row carries the exact seed it was graded against. Only a genuinely unknown agent UUID errors. Reads the same public score ledger that drives validator weights, never influences it, and exposes no miner source. Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. v13+ rows add `gate_evidence` (gate posture, gate summaries, flagged_case_count/share, gate_counts; aggregates only). Requires backroom:read.",
       inputSchema: agentScoresLookupInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1638,7 +1718,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get agent score history across bench versions',
       description:
-        "One SN118 agent's accepted validator scores grouped per benchmark version, by agent UUID or miner hotkey, so version-over-version deltas come from the authoritative ledger instead of dashboard scraping. Each version group returns the accepted-score count, median/min/max composite, median tool and memory means, scoring window, validator hotkeys, seeds, and the median-composite delta against the previous version. A submission only carries rows for versions it was actually scored or re-scored on. Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. Requires backroom:read and exposes no miner source.",
+        "One SN118 agent's accepted validator scores grouped per benchmark version, by agent UUID or miner hotkey, so version-over-version deltas come from the authoritative ledger instead of dashboard scraping. Each version group returns the accepted-score count, median/min/max composite, median tool and memory means, scoring window, validator hotkeys, seeds, and the median-composite delta against the previous version. A submission only carries rows for versions it was actually scored or re-scored on. v13+ groups add `gate_posture` and `median_flagged_case_share` (null below v13). Seeds are exact decimal strings, not numbers, because a 63-bit seed does not fit a JavaScript number and a rounded seed reproduces a different dataset. Requires backroom:read and exposes no miner source.",
       inputSchema: agentScoresLookupInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1878,6 +1958,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_screener_fanout_shadow',
+    {
+      title: 'Get screener fan-out shadow comparisons',
+      description:
+        'Page the non-authoritative two-stage fan-out shadow lane. Each item binds one baseline attempt to the same artifact digest, policy manifest, and settings revision, then reports specialist findings, source-grounded critic results, disagreements, coverage, latency, and actual usage when supplied. queued, incomplete, and skipped rows are coverage outcomes. Reserved cost is the conservative admission charge against the rolling 24-hour cap; reported cost is separate, and unmetered=true means cost was omitted. These records never change screening or queue state. Requires backroom:read.',
+      inputSchema: screenerFanoutShadowInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchScreenerFanoutShadow(input)),
+  )
+
+  registerTool(
     'get_copy_court_settings',
     {
       title: 'Get copy court settings',
@@ -1886,6 +1978,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchCopyCourtControl()),
+  )
+
+  registerTool(
+    'get_confirmation_seed_anchors',
+    {
+      title: 'Get confirmation seed anchors',
+      description:
+        'Read the bench v13+ finalized-block confirmation seed anchors for one version (default: active), oldest first: one row per (champion, bench_version) reign with ready_block, anchor_block, the pinned hash or null while the reign waits for finality, pinned_at, plus binding_active, floor, and delta. The ledger serves pinned rows only; a waiting row means catch-up-only issuance and deferral under enforce. Requires backroom:read.',
+      inputSchema: confirmationSeedAnchorsInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchConfirmationSeedAnchors(input)),
   )
 
   registerTool(
@@ -2187,6 +2291,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         ),
       )
     },
+  )
+
+  registerTool(
+    'get_ledger_epoch_snapshots',
+    {
+      title: 'Get epoch-pinned ledger history',
+      description:
+        'Read the epoch-pinned validator ledger, newest chain epoch first: per SubnetEpochIndex the pin block, entry count, SHA-256 digest of the exact ledger every validator folded, the champion derived under the frozen markers, the incumbent handed to the fold, recipient shares, and crown_changed against the previous pin. mode says whether pins (epoch) or the live read (live) are being served. Requires backroom:read and changes nothing.',
+      inputSchema: { limit: z.number().int().min(1).max(100).optional() },
+      annotations: toolAnnotations('read'),
+    },
+    async ({ limit }) => result(await fetchLedgerEpochSnapshots(limit ?? 24)),
   )
 
   registerTool(
@@ -2546,6 +2662,31 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       ),
   )
 
+  registerTool('list_benchmark_canaries', {
+    title: 'List benchmark canaries',
+    description: 'Page non-authoritative benchmark diagnostics, newest first. Requires backroom:read.',
+    inputSchema: listBenchmarkCanariesInputSchema,
+    annotations: toolAnnotations('read'),
+  }, async (input) => result(await listBenchmarkCanaries(input)))
+  registerTool('get_benchmark_canary', {
+    title: 'Get benchmark canary',
+    description: 'Read one exact diagnostic receipt. Completed means a signed result was recorded, not calibration or activation readiness. Scorer details and traces are not exposed. Requires backroom:read.',
+    inputSchema: getBenchmarkCanaryInputSchema,
+    annotations: toolAnnotations('read'),
+  }, async (input) => result(await getBenchmarkCanary(input)))
+  registerTool('issue_benchmark_canary', {
+    title: 'Issue benchmark canary',
+    description: 'Reserve exactly one full-profile diagnostic lease for an explicit supported, non-retired bench version. Bind a fresh canaryId, agent artifact/image digests, validator hotkey, idle slot and expected active version. Requires exact confirmation ISSUE CANARY V{benchVersion} {agentId}. One live canary fleet-wide; refuses existing ticket identities and unavailable capacity. Existing signed validator execution is reused, but results never enter score/confirmation tables, quorum, rewards or rollout authority. No automatic retry. Requires backroom:write.',
+    inputSchema: issueBenchmarkCanaryInputSchema,
+    annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => issueBenchmarkCanary(props.session.email, input)))
+  registerTool('cancel_benchmark_canary', {
+    title: 'Cancel benchmark canary',
+    description: 'Revoke an exact canary lease and inference capability without changing the agent or canonical scores. Requires reason and CANCEL CANARY {canaryId}. Requires backroom:write.',
+    inputSchema: cancelBenchmarkCanaryInputSchema,
+    annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => cancelBenchmarkCanary(props.session.email, input)))
+
   registerTool(
     'start_benchmark_rollout',
     {
@@ -2674,7 +2815,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Resolve screening dispute',
       description:
-        'Accept and release, or uphold, one miner dispute with an auditable miner-visible reason.',
+        'Accept (release) or uphold one miner dispute with an auditable miner-visible reason. A `gate_notes` resolution only records the verdict; status and scores never change.',
       inputSchema: {
         disputeId: z.string().uuid(),
         resolution: screeningDisputeResolutionSchema,
