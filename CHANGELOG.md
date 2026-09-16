@@ -2,6 +2,110 @@
 
 <!-- version list -->
 
+## v0.274.0 (2026-09-16)
+
+### Features
+
+- **coding**: Derive and launch-check hosted-v2 task profiles
+  ([#1865](https://github.com/ditto-assistant/ditto-subnet/pull/1865),
+  [`1dcea85`](https://github.com/ditto-assistant/ditto-subnet/commit/1dcea85298034ffabcf0836527261a9aec20c5d7))
+
+- **infra**: Default-off native coding PostgreSQL environment materialization
+  ([#1888](https://github.com/ditto-assistant/ditto-subnet/pull/1888),
+  [`127126d`](https://github.com/ditto-assistant/ditto-subnet/commit/127126dd325d09b73f9dc987dfc5baeb42b4e45f))
+
+- **infra**: Stable custody install and per-run native-v2 custody lifecycle
+  ([#1860](https://github.com/ditto-assistant/ditto-subnet/pull/1860),
+  [`137e574`](https://github.com/ditto-assistant/ditto-subnet/commit/137e574d815b039c3995ae404978f2bb6e7cc5c9))
+
+
+## v0.273.1 (2026-09-16)
+
+### Bug Fixes
+
+- Preserve v13 claim evidence in signed report wire format
+  ([#1944](https://github.com/ditto-assistant/ditto-subnet/pull/1944),
+  [`bcd7337`](https://github.com/ditto-assistant/ditto-subnet/commit/bcd733721d50012f5cca3f20d50c1d536b2675b5))
+
+
+## v0.273.0 (2026-09-16)
+
+### Documentation
+
+- Route Backroom reviews to the applicable v13 policy
+  ([#1942](https://github.com/ditto-assistant/ditto-subnet/pull/1942),
+  [`e4efec3`](https://github.com/ditto-assistant/ditto-subnet/commit/e4efec389ec03341ef3d71665dd36352d4d2ddb5))
+
+### Features
+
+- **bench**: Integrate the v13 pre-activation contract
+  ([#1937](https://github.com/ditto-assistant/ditto-subnet/pull/1937),
+  [`e1a8fa2`](https://github.com/ditto-assistant/ditto-subnet/commit/e1a8fa2b786143d4c74c57277d75a1cb57a9d4fb))
+
+- **platform**: Add isolated singleton benchmark canary leases
+  ([#1943](https://github.com/ditto-assistant/ditto-subnet/pull/1943),
+  [`f1e067d`](https://github.com/ditto-assistant/ditto-subnet/commit/f1e067d4f6084a5b963cc2b46a476faea87db4d4))
+
+
+## v0.272.0 (2026-09-16)
+
+### Features
+
+- **bench**: Integrate v13 tool semantics and assertion-aware effects
+  ([#1872](https://github.com/ditto-assistant/ditto-subnet/pull/1872),
+  [`554a90a`](https://github.com/ditto-assistant/ditto-subnet/commit/554a90aa88079e54752ca84fa5b7e55accfd8e20))
+
+
+## v0.271.0 (2026-09-16)
+
+### Features
+
+- **datagen**: Integrate v13 typed claims and assertion-aware grading
+  ([#1936](https://github.com/ditto-assistant/ditto-subnet/pull/1936),
+  [`52b48f2`](https://github.com/ditto-assistant/ditto-subnet/commit/52b48f28d37522a10c09d3f3ba494dc13591794a))
+
+
+## v0.270.0 (2026-09-16)
+
+### Features
+
+- **datagen**: V13 event programs, family compiler v2, injection cases
+  ([#1862](https://github.com/ditto-assistant/ditto-subnet/pull/1862),
+  [`eccbb6e`](https://github.com/ditto-assistant/ditto-subnet/commit/eccbb6e1cd6a6489dff010498860cdd22454b3bc))
+
+
+## v0.269.0 (2026-09-16)
+
+### Features
+
+- **datagen**: Add bench v13 plumbing and grader-only protocol types
+  ([#1861](https://github.com/ditto-assistant/ditto-subnet/pull/1861),
+  [`7124d13`](https://github.com/ditto-assistant/ditto-subnet/commit/7124d136ec20b9f1e0afee74e84f369399f2d56b))
+
+- **datagen**: V13 grammars, typo projector v2, and salted surface pass
+  ([#1863](https://github.com/ditto-assistant/ditto-subnet/pull/1863),
+  [`b3d7d92`](https://github.com/ditto-assistant/ditto-subnet/commit/b3d7d92b31d5e1d35a6c3a6a8134f19bf0d929a7))
+
+
+## v0.268.1 (2026-09-15)
+
+### Bug Fixes
+
+- **backroom**: Accept policy v13 invariant assessments
+  ([#1931](https://github.com/ditto-assistant/ditto-subnet/pull/1931),
+  [`6f6e9e6`](https://github.com/ditto-assistant/ditto-subnet/commit/6f6e9e6f35e39082d3607ca7d79b2acca4452931))
+
+
+## v0.268.0 (2026-09-15)
+
+### Features
+
+- Make the SN118 router shadow track score LIVE end-to-end (replay default + offload seam, published
+  ledger, leaderboard shadow badge)
+  ([#1917](https://github.com/ditto-assistant/ditto-subnet/pull/1917),
+  [`f88f259`](https://github.com/ditto-assistant/ditto-subnet/commit/f88f259f3fcedad7a40c4b9c50922d4a64374c49))
+
+
 ## v0.267.7 (2026-09-15)
 
 ### Bug Fixes
