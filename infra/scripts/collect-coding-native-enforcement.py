@@ -4089,15 +4089,20 @@ class PreexecCollector(ResourceCollector):
 
         uid = CANDIDATE_UIDS["executor_grading"]
         for _ in range(int(UNIT_WAIT_SECONDS / SAMPLE_SECONDS / 10)):
+            descendants: list[int] = []
             with contextlib.suppress(OSError, ValueError):
                 for child in self.host.children(found["init"]):
-                    for pid in (child, *self.host.children(child)):
-                        host_ids = parse_status_ids(self.host.proc(pid, "status"))
-                        if container_ids(host_ids, self.subordinate) == {
-                            "uid": uid,
-                            "gid": uid,
-                        }:
-                            return pid
+                    descendants += [child, *self.host.children(child)]
+            for pid in descendants:
+                # The supervisor is root in the container and every id outside
+                # the mapping refuses; neither ends the scan for the candidate.
+                with contextlib.suppress(OSError, ValueError):
+                    host_ids = parse_status_ids(self.host.proc(pid, "status"))
+                    if container_ids(host_ids, self.subordinate) == {
+                        "uid": uid,
+                        "gid": uid,
+                    }:
+                        return pid
             self.host.sleep(SAMPLE_SECONDS * 10)
         raise Refusal("preexec candidate process did not start")
 
