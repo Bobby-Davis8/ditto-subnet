@@ -24,8 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -50,6 +52,8 @@ const (
 	maxConcurrentPreexecRuns = 1
 )
 
+var preexecRunIDPattern = regexp.MustCompile(`^p[0-9]{1,3}$`)
+
 // PreexecRequest is one agent request. Keys are closed.
 type PreexecRequest struct {
 	Op  string `json:"op"`
@@ -62,6 +66,9 @@ type PreexecRequest struct {
 	// Fixture is "control.<name>" or "hostile.<name>", exactly as the catalog
 	// names its probes.
 	Fixture string `json:"fixture,omitempty"`
+	// TimeoutMS bounds one wait, so the collector keeps its own deadline
+	// rather than blocking on a run that never finishes.
+	TimeoutMS int `json:"timeout_ms,omitempty"`
 }
 
 // PreexecResponse is one agent response. It carries observations and staged
@@ -231,11 +238,21 @@ func NewPreexecAgent(ctx context.Context, config PreexecAgentConfig) (*PreexecAg
 	if err := verifyFixtureFiles(config, fixtures); err != nil {
 		return nil, err
 	}
+	// The fixture suite is not the benchmark's suite, so the fixture command is
+	// the one that runs it; the image's recorded command stays the approved
+	// grading command. What must agree is Rust's pinned authority, exactly as
+	// the offline verifier binds it.
 	for _, language := range catalog.Languages {
 		entry := fixtures.Languages[language]
 		image, ok := images.Images[language]
-		if !ok || !slices.Equal(entry.TestArgv, image.TestArgv[entry.TestGroup]) {
-			return nil, errors.New("probe: a fixture test command is not the language's recorded command")
+		if !ok {
+			return nil, errors.New("probe: a fixture language is not in the pinned image set")
+		}
+		if language != "rust" {
+			continue
+		}
+		if entry.Authority == nil || rustAuthorityOf(image.TestArgv[entry.TestGroup]) != entry.Authority.SHA256 {
+			return nil, errors.New("probe: the rust fixture authority is not the recorded rust authority")
 		}
 	}
 	child, cancel := context.WithCancel(ctx)
@@ -345,6 +362,10 @@ func (a *PreexecAgent) spec(request PreexecRequest, run *preexecRun) (PreexecSpe
 	if err != nil {
 		return spec, 0, err
 	}
+	// One fixture run executes the fixture suite's own recorded command for the
+	// approved group; every other group keeps the image's recorded command.
+	image.TestArgv = maps.Clone(image.TestArgv)
+	image.TestArgv[entry.TestGroup] = slices.Clone(entry.TestArgv)
 	spec.Image, spec.Group, spec.ExpectedTotal = image, entry.TestGroup, entry.ExpectedTotal
 	index := slices.IndexFunc(a.grading.TestGroups, func(group codinggrader.TestGroupSpec) bool {
 		return group.Group == entry.TestGroup
@@ -486,6 +507,12 @@ func (a *PreexecAgent) removeRun(run *preexecRun) {
 }
 
 func (a *PreexecAgent) wait(response PreexecResponse, request PreexecRequest) PreexecResponse {
+	response.Run = request.Run
+	if !preexecRunIDPattern.MatchString(request.Run) ||
+		request.TimeoutMS < 0 || request.TimeoutMS > maxResourceTimeoutMS {
+		response.Error = "probe: wait request is malformed"
+		return response
+	}
 	a.mu.Lock()
 	run, ok := a.runs[request.Run]
 	a.mu.Unlock()
@@ -498,8 +525,10 @@ func (a *PreexecAgent) wait(response PreexecResponse, request PreexecRequest) Pr
 	case <-a.ctx.Done():
 		response.Error = "probe: preexec agent is shutting down"
 		return response
+	case <-time.After(time.Duration(request.TimeoutMS) * time.Millisecond):
+		return response
 	}
-	response.Run, response.Done = request.Run, true
+	response.Done = true
 	response.SubjectSHA256, response.SuiteSHA256 = run.subject, run.suite
 	if run.err != nil {
 		response.RunFailed = true
@@ -639,4 +668,15 @@ func ServePreexecAgent(ctx context.Context, agent *PreexecAgent, input io.Reader
 			return nil
 		}
 	}
+}
+
+// rustAuthorityOf reads the pinned authority digest out of a recorded Rust test
+// command, the same way the offline verifier does.
+func rustAuthorityOf(argv []string) string {
+	for index := 1; index+1 < len(argv); index += 2 {
+		if argv[index] == "--authority-sha256" {
+			return argv[index+1]
+		}
+	}
+	return ""
 }

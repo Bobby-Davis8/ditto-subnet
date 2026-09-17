@@ -28,11 +28,11 @@ func fixturesManifest(t *testing.T) []byte {
 	return mustRead(t, "../fixtures/preexec/fixtures.json")
 }
 
-// preexecEnforcementImages is the CI image set with each language's recorded
-// test command replaced by that language's fixture command. The agent requires
-// the two documents to agree: the manifest the production launch executes is
-// built from the image set, so a fixture command that is not the image's own
-// recorded command would run a suite the approval never pinned.
+// preexecEnforcementImages is the CI image set with Rust's recorded authority
+// digest set to the fixture authority, which is the one binding the agent
+// requires between the two documents. Every other recorded command stays the
+// image's own: the fixture suite runs the fixture's command, not the
+// benchmark's.
 func preexecEnforcementImages(t *testing.T) []byte {
 	t.Helper()
 	images, err := ciEnforcementImages("sha256:" + strings.Repeat("c", 64))
@@ -43,20 +43,19 @@ func preexecEnforcementImages(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rust := fixtures.Languages["rust"]
 	decoder := json.NewDecoder(bytes.NewReader(images))
 	decoder.UseNumber()
 	var doc map[string]any
 	if err := decoder.Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
-	for _, language := range catalog.Languages {
-		entry := fixtures.Languages[language]
-		argv := make([]any, 0, len(entry.TestArgv))
-		for _, item := range entry.TestArgv {
-			argv = append(argv, item)
+	image := doc["images"].(map[string]any)["rust"].(map[string]any)
+	argv := image["test_argv"].(map[string]any)[rust.TestGroup].([]any)
+	for index := 1; index+1 < len(argv); index += 2 {
+		if argv[index] == "--authority-sha256" {
+			argv[index+1] = rust.Authority.SHA256
 		}
-		image := doc["images"].(map[string]any)[language].(map[string]any)
-		image["test_argv"].(map[string]any)[entry.TestGroup] = argv
 	}
 	raw, err := catalog.Canonical(doc)
 	if err != nil {
@@ -163,6 +162,9 @@ func TestPreexecAgentStagesOnlyTheRecordedFixtureAndSuite(t *testing.T) {
 	if !slices.Equal(spec.Image.TestArgv[spec.Group], entry.TestArgv) {
 		t.Fatalf("spec runs %v, not the recorded fixture command", spec.Image.TestArgv[spec.Group])
 	}
+	if slices.Equal(spec.Image.TestArgv["visible"], entry.TestArgv) {
+		t.Fatal("the fixture command replaced another group's recorded command")
+	}
 	if spec.ExpectedTotal != entry.ExpectedTotal {
 		t.Fatalf("spec expected total = %d", spec.ExpectedTotal)
 	}
@@ -175,7 +177,7 @@ func TestPreexecAgentStagesOnlyTheRecordedFixtureAndSuite(t *testing.T) {
 	if !slices.Equal(protected, []string{"hidden_test.go"}) {
 		t.Fatalf("protected grader = %v", protected)
 	}
-	done := agent.Handle(PreexecRequest{Op: "wait", Run: response.Run})
+	done := agent.Handle(PreexecRequest{Op: "wait", Run: response.Run, TimeoutMS: 30000})
 	if !done.Done || done.Passed == nil || *done.Passed != 2 || done.Total == nil || *done.Total != 2 {
 		t.Fatalf("wait=%#v", done)
 	}
@@ -207,7 +209,7 @@ func TestPreexecAgentNeverStagesTheSuiteInTheWorkspace(t *testing.T) {
 				t.Fatalf("%s staged the hidden suite in the workspace", language)
 			}
 		}
-		agent.Handle(PreexecRequest{Op: "wait", Run: response.Run})
+		agent.Handle(PreexecRequest{Op: "wait", Run: response.Run, TimeoutMS: 30000})
 	}
 }
 
@@ -239,7 +241,9 @@ func TestPreexecAgentRefusesRequestsOutsideThePinnedSet(t *testing.T) {
 		{"digest in the repository", PreexecRequest{Op: "start", Language: "go", Repository: "r.invalid/x@sha256:0", Fixture: "control.pass"}},
 		{"traversing repository", PreexecRequest{Op: "start", Language: "go", Repository: "r.invalid/../x", Fixture: "control.pass"}},
 		{"unknown op", PreexecRequest{Op: "collect"}},
-		{"unknown run", PreexecRequest{Op: "wait", Run: "p99"}},
+		{"unknown run", PreexecRequest{Op: "wait", Run: "p99", TimeoutMS: 1}},
+		{"malformed run id", PreexecRequest{Op: "wait", Run: "r0", TimeoutMS: 1}},
+		{"wait beyond the bound", PreexecRequest{Op: "wait", Run: "p0", TimeoutMS: 1 << 30}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if response := agent.Handle(testCase.request); response.Error == "" {
@@ -265,7 +269,7 @@ func TestPreexecAgentReportsABuildThatNeverRanTheSuite(t *testing.T) {
 	if start.Error != "" {
 		t.Fatal(start.Error)
 	}
-	done := agent.Handle(PreexecRequest{Op: "wait", Run: start.Run})
+	done := agent.Handle(PreexecRequest{Op: "wait", Run: start.Run, TimeoutMS: 30000})
 	if !done.BuildFailed || done.Passed == nil || *done.Passed != 0 {
 		t.Fatalf("wait=%#v", done)
 	}
@@ -277,7 +281,7 @@ func TestPreexecAgentStartupRefusesInconsistentAuthority(t *testing.T) {
 		name string
 		turn func(*PreexecAgentConfig)
 	}{
-		{"fixtures name another command than the images", func(config *PreexecAgentConfig) {
+		{"rust authority differs from the recorded rust command", func(config *PreexecAgentConfig) {
 			images, err := ciEnforcementImages("sha256:" + strings.Repeat("c", 64))
 			if err != nil {
 				t.Fatal(err)
