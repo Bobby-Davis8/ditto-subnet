@@ -33,15 +33,19 @@ type HostedHarnessConfig struct {
 // Unlike the v8 sandbox it sets --memory-swap equal to --memory and --pull
 // never (Peyton, 2026-09-15).
 func NewHostedHarnessDocker(config HostedHarnessConfig) *LocalDocker {
+	memory := strconv.FormatUint(config.MemoryLimitBytes, 10)
 	return &LocalDocker{
-		HarnessPort: "8080", MemoryLimit: strconv.FormatUint(config.MemoryLimitBytes, 10),
+		HarnessPort: "8080", MemoryLimit: memory,
 		TmpfsLimit: strconv.FormatUint(config.ScratchLimitBytes, 10),
 		CPULimit:   fmt.Sprintf("%d.%03d", config.CPUQuotaMillis/1000, config.CPUQuotaMillis%1000),
 		PidsLimit:  int(config.PidsLimit), StartTimeout: 2 * time.Minute,
 		Harden: true, RequireRootless: true, RequireIsolatedDaemon: true,
 		HostGatewayIP: config.HostGatewayIP, EgressNetwork: config.EgressNetwork, EgressProxy: config.EgressProxy,
 		SeccompProfile: config.SeccompProfile, AppArmorProfile: config.AppArmorProfile,
-		MemorySwapEqualsMemory: true, PullNever: true, LaunchIntent: config.LaunchIntent,
+		// #1930 made the swap cap an explicit limit rather than a flag; equal to
+		// the memory limit is what hosted-v2 passes, and codingharness refuses
+		// any harness whose swap cap is not exactly its memory cap.
+		MemorySwapLimit: memory, PullNever: true, LaunchIntent: config.LaunchIntent,
 	}
 }
 
