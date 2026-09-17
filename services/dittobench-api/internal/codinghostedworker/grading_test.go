@@ -181,7 +181,6 @@ func preexecProbeProfile() GradingProfile {
 	return GradingProfile{
 		Schema: "dittobench-coding-hosted-grading-profile-v2", ImageDigest: "sha256:" + strings.Repeat("a", 64),
 		GraderContractSHA256: codinggrader.HostedGraderContractSHA256(), GraderBundleSHA256: strings.Repeat("b", 64),
-		TestManifestSHA256: strings.Repeat("c", 64),
 		ResourcePolicy: codinggrader.ResourcePolicy{
 			CandidateLimits: codingrunner.DefaultLimits(), ProtectedLimits: codingrunner.DefaultLimits(),
 			MaxCombinedDiskBytes: 4 << 30, MemoryLimitBytes: 1 << 30, ScratchLimitBytes: 1 << 30, PidsLimit: 256, CPUQuotaMillis: 1000,
