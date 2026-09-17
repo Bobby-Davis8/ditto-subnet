@@ -18,10 +18,12 @@ package probe
 // collector maps every receipt to a catalog outcome itself.
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -591,4 +593,50 @@ func (b ProductionPreexecBackend) Start(ctx context.Context, spec PreexecSpec) (
 			Passed: run.Passed, Total: run.Total,
 		}, err
 	}}, nil
+}
+
+// ServePreexecAgent serves the pre-exec line protocol on the collector's pipe,
+// one request at a time, with the same bounds as the resource agent.
+func ServePreexecAgent(ctx context.Context, agent *PreexecAgent, input io.Reader, output io.Writer) error {
+	defer agent.Close()
+	lines := make(chan []byte)
+	failed := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(input)
+		scanner.Buffer(make([]byte, maxAgentLine), maxAgentLine)
+		for scanner.Scan() {
+			lines <- append([]byte(nil), scanner.Bytes()...)
+		}
+		failed <- scanner.Err()
+	}()
+	encoder := json.NewEncoder(output)
+	for count := 0; ; count++ {
+		var line []byte
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-failed:
+			if err != nil {
+				return fmt.Errorf("probe: preexec agent input: %w", err)
+			}
+			return nil
+		case line = <-lines:
+		}
+		if count >= maxAgentRequests {
+			return errors.New("probe: agent request bound reached")
+		}
+		request, err := DecodePreexecRequest(line)
+		var response PreexecResponse
+		if err != nil {
+			response = PreexecResponse{Schema: PreexecAgentSchema, Op: "invalid", Error: err.Error()}
+		} else {
+			response = agent.Handle(request)
+		}
+		if err := encoder.Encode(response); err != nil {
+			return err
+		}
+		if err == nil && request.Op == "exit" {
+			return nil
+		}
+	}
 }
