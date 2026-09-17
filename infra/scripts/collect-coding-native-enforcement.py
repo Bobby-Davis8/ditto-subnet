@@ -2554,7 +2554,10 @@ def parse_status_confinement(raw: bytes) -> dict[str, Any]:
     result: dict[str, Any] = {"capabilities": capabilities}
     for key, name in (("NoNewPrivs", "no_new_privs"), ("Seccomp", "seccomp_mode")):
         value = fields.get(key, "")
-        require(re.fullmatch(r"[0-9]{1,3}", value) is not None, f"candidate status lacks {key}")
+        require(
+            re.fullmatch(r"[0-9]{1,3}", value) is not None,
+            f"candidate status lacks {key}",
+        )
         result[name] = int(value)
     return result
 
@@ -3973,9 +3976,7 @@ class PreexecCollector(ResourceCollector):
         self.input_raw = {**self.input_raw, "preexec_fixtures": raw}
         self.fixtures = self.evidence.parse_preexec_fixtures(raw)
         self.profiles["preexec_fixtures_sha256"] = self.fixtures
-        self.inputs = {
-            name: doc["sha256"] for name, doc in self.profiles.items()
-        }
+        self.inputs = {name: doc["sha256"] for name, doc in self.profiles.items()}
         # The fixture suite is not the benchmark's suite, so the fixture runs
         # its own recorded command. What must agree between the two documents
         # is Rust's pinned authority, exactly as the offline verifier binds it.
@@ -3989,7 +3990,11 @@ class PreexecCollector(ResourceCollector):
         )
 
     def start_agent(self) -> None:
-        files = {WORK_FILES[name]: raw for name, raw in self.input_raw.items() if name in WORK_FILES}
+        files = {
+            WORK_FILES[name]: raw
+            for name, raw in self.input_raw.items()
+            if name in WORK_FILES
+        }
         files[PREEXEC_FIXTURES_FILE] = self.input_raw["preexec_fixtures"]
         self.host.prepare_work_dir(self.uid, self.gid, files)
         arguments = [str(self.runner), "preexec-agent"]
@@ -4114,9 +4119,7 @@ class PreexecCollector(ResourceCollector):
         host_uid, host_gid = parse_status_ids(self.host.proc(pid, "status"))
         confinement = parse_status_confinement(self.host.proc(pid, "status"))
         self.identity[language] = {
-            "identity.candidate": container_ids(
-                (host_uid, host_gid), self.subordinate
-            ),
+            "identity.candidate": container_ids((host_uid, host_gid), self.subordinate),
             "identity.host_ids": {"host_uid": host_uid, "host_gid": host_gid},
             "identity.capabilities": confinement["capabilities"],
             "identity.no_new_privs": {"no_new_privs": confinement["no_new_privs"]},

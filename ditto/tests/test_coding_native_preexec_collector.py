@@ -26,6 +26,13 @@ FIXTURES = base.PREEXEC_FIXTURES
 FIXTURES_RAW = base.PREEXEC_FIXTURES_RAW
 CONTROLS = ("hang", "pass", "wrong")
 LANGUAGES = base.EVIDENCE.LANGUAGES
+CAPABILITY_SETS = (
+    "ambient",
+    "bounding",
+    "effective",
+    "inheritable",
+    "permitted",
+)
 
 
 class PreexecScenario(resource.Scenario):
@@ -38,7 +45,7 @@ class PreexecScenario(resource.Scenario):
         # Fixtures whose run times out.
         self.timed_out: set[tuple[str, str]] = set()
         self.build_failed: set[tuple[str, str]] = set()
-        self.capabilities = {name: 0 for name in ("ambient", "bounding", "effective", "inheritable", "permitted")}
+        self.capabilities = dict.fromkeys(CAPABILITY_SETS, 0)
         self.no_new_privs = 1
         self.seccomp_mode = 2
         self.candidate_uid = CANDIDATE
@@ -251,7 +258,7 @@ class PreexecWorld(resource.ResourceWorld):
     def host(self, scenario: PreexecScenario | None = None) -> PreexecFakeHost:
         return PreexecFakeHost(self, scenario or PreexecScenario())
 
-    def collector(self, host, kind: str = "preexec"):
+    def collector(self, host, kind: str = "preexec"):  # noqa: ARG002
         config = COLLECTOR.parse_preexec_config(json.dumps(self.config).encode())
         return COLLECTOR.PreexecCollector(host, config, checkout=self.world.checkout)
 
@@ -320,11 +327,12 @@ def test_identity_comes_from_the_live_candidate(pw):
             "host_uid": SUBUID + CANDIDATE - 1,
             "host_gid": SUBUID + CANDIDATE - 1,
         }
-        assert observed(record, "identity.capabilities", language) == {
-            name: 0
-            for name in ("ambient", "bounding", "effective", "inheritable", "permitted")
+        assert observed(record, "identity.capabilities", language) == dict.fromkeys(
+            CAPABILITY_SETS, 0
+        )
+        assert observed(record, "identity.no_new_privs", language) == {
+            "no_new_privs": 1
         }
-        assert observed(record, "identity.no_new_privs", language) == {"no_new_privs": 1}
         assert observed(record, "identity.seccomp", language) == {"seccomp_mode": 2}
 
 
@@ -335,9 +343,7 @@ def test_every_hostile_fixture_runs_its_own_subject(pw):
         entry = FIXTURES["languages"][language]
         wanted = {f"control.{name}" for name in CONTROLS}
         wanted |= {f"hostile.{name}" for name in entry["hostile"]}
-        ran = {
-            value["fixture"] for value in started if value["language"] == language
-        }
+        ran = {value["fixture"] for value in started if value["language"] == language}
         assert ran == wanted
 
 
@@ -366,7 +372,8 @@ def test_a_privileged_candidate_does_not_verify(pw):
     scenario = PreexecScenario()
     scenario.capabilities = {**scenario.capabilities, "effective": 1 << 21}
     record, _ = pw.collect(scenario)
-    assert base.find_probe(record, "identity.capabilities", "python")["matched"] is False
+    probe = base.find_probe(record, "identity.capabilities", "python")
+    assert probe["matched"] is False
     assert pw.verify(record) is not None
 
 
