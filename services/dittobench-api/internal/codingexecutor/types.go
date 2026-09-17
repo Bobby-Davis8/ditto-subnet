@@ -54,8 +54,16 @@ type Config struct {
 	// DockerHost selects a dedicated daemon endpoint. Empty inherits the
 	// process DOCKER_HOST.
 	DockerHost string
-	hosted     bool
+	// LaunchIntent, when set, durably records the exact container name before
+	// Docker create runs (the hosted runtime's launch journal). A failure
+	// prevents the create.
+	LaunchIntent LaunchIntent
+	hosted       bool
 }
+
+// LaunchIntent records the ownership label value and the container and network
+// names a launch is about to create, before it creates them.
+type LaunchIntent func(ctx context.Context, run string, containers, networks []string) error
 
 func (config Config) validate() error {
 	contractSHA := codinggrader.GraderContractSHA256()
