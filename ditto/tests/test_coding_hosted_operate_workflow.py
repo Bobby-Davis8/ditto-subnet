@@ -49,11 +49,10 @@ def test_every_root_capable_job_requires_the_protected_environment() -> None:
         assert job["environment"] == "coding-hosted-operate"
     environment = json.loads(ENVIRONMENT.read_text())
     assert environment["prevent_self_review"] is True
-    assert {reviewer["id"] for reviewer in environment["reviewers"]} == {
-        6766068,
-        170978465,
-    }
-    assert len(environment["reviewers"]) == 2
+    assert environment["reviewers"] == [
+        {"type": "User", "id": 6766068},
+        {"type": "Team", "id": 12645310},
+    ]
     assert environment["deployment_branch_policy"] == {
         "protected_branches": False,
         "custom_branch_policies": True,
@@ -224,7 +223,7 @@ def test_workflow_identity_is_pinned_to_this_main_workflow() -> None:
         "assertion.event_name == 'workflow_dispatch'",
         "assertion.workflow_ref == 'ditto-assistant/ditto-subnet/.github/workflows/"
         "coding-hosted-operate.yml@refs/heads/main'",
-        "assertion.actor_id in ['6766068', '170978465']",
+        "assertion.actor_id == '6766068'",
     ):
         assert clause in text
     assert (

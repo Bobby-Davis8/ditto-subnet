@@ -403,7 +403,9 @@ def test_l2_policy_v13_prompt_adds_i8_and_authority_boundaries() -> None:
     assert "reject unjustified removal" in v13
     assert "evaluation_identity_authoritative" in v13
     assert "`bench_version` activating learned routing" in v13
-    assert l2_prompt_revision(13) == "l2-terra-source-review-v37-policy-v13"
+    assert "exact path-and-digest provenance" in v13
+    assert "null compact score field" in v13
+    assert l2_prompt_revision(13) == "l2-terra-source-review-v38-policy-v13"
 
     legacy = _l2_tools_for_policy(12)[-1]["parameters"]["properties"]["invariants"]
     current = _l2_tools_for_policy(13)[-1]["parameters"]["properties"]["invariants"]
@@ -761,6 +763,23 @@ async def test_certified_l1_low_escalates_when_always_escalate(
     )
 
     assert result.risk_level == "low"
+    assert l1.calls == 1
+    assert l2.calls == 1
+
+
+async def test_certified_l1_low_escalates_when_posture_requires_it() -> None:
+    """The integrity double-check posture reaches L2/L3 without the env."""
+    l1 = _FakeL1(_l1("low", clearance_certified=True))
+    l2 = _FakeL2(_model_result(_safe()))
+    layered = LayeredSourceReviewAgent(
+        l1=l1,  # type: ignore[arg-type]
+        l2=l2,  # type: ignore[arg-type]
+        mode="enforce",
+        always_escalate=True,
+    )
+
+    await layered.review("unused", artifact_sha256="c" * 64, attempt_id=ATTEMPT)
+
     assert l1.calls == 1
     assert l2.calls == 1
 

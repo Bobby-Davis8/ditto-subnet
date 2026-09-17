@@ -14,7 +14,7 @@ coding_executor_host_count = 0
 # Native v2 qualification foundation only, with the explicitly nominated custodian.
 # Requires a reviewed protected plan/apply; no runtime or private-data authority.
 enable_coding_hosted_host     = true
-coding_hosted_operators       = ["user:brian@omniaura.ai"]
+coding_hosted_operators       = ["user:peyton@omniaura.ai"]
 enable_coding_hosted_postgres = true
 
 # The root-capable protected host workflow grant needs its own reviewed change.
