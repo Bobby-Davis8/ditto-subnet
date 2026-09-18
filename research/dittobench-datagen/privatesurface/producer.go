@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ditto-assistant/dittobench-datagen/gen"
+	"github.com/ditto-assistant/dittobench-datagen/internal/protectedtext"
 )
 
 const endpoint = "https://openrouter.ai/api/v1/chat/completions"
@@ -47,6 +48,7 @@ const validatePrompt = `Independently compare the before and after synthetic ben
 // Profile is explicitly selected; there is no default model or fallback route.
 // Versioned prompt bytes and privacy requirements participate in its digest.
 type Profile struct {
+	RewriteMode        string `json:"rewrite_mode,omitempty"`
 	RewriteModel       string `json:"rewrite_model"`
 	RewriteProvider    string `json:"rewrite_provider"`
 	ValidatorModel     string `json:"validator_model"`
@@ -56,6 +58,9 @@ type Profile struct {
 }
 
 func (p Profile) Digest() (string, error) {
+	if p.RewriteMode != "" && p.RewriteMode != "literal-text-v1" {
+		return "", errors.New("private producer: invalid rewrite mode")
+	}
 	for _, field := range []string{p.RewriteModel, p.RewriteProvider, p.ValidatorModel, p.ValidatorProvider} {
 		if strings.TrimSpace(field) != field || field == "" || len(field) > 256 || strings.ContainsAny(field, "\r\n") {
 			return "", errors.New("private producer: invalid profile")
@@ -278,6 +283,29 @@ func (c *Client) probeOne(ctx context.Context, req gen.PrivateSurfaceRequest, at
 		return "", SurfaceReceipt{}, err
 	}
 	prompt := rewritePrompt + contextPrompt
+	if c.profile.RewriteMode == "literal-text-v1" {
+		// Keep language natural for the writer while applying the same exact
+		// literal counts afterward. This mode has a distinct profile identity.
+		masked, prompt, markers = req.Text, rewritePrompt, nil
+		seen := map[string]bool{}
+		for _, v := range req.Protected {
+			if v != "" && !seen[v] && protectedtext.Count(req.Text, v) > 0 {
+				markers = append(markers, v)
+				seen[v] = true
+			}
+		}
+		restore = func(candidate string) (string, error) {
+			for _, v := range markers {
+				if protectedtext.Count(req.Text, v) != protectedtext.Count(candidate, v) {
+					return "", errProtected
+				}
+			}
+			if strings.Contains(candidate, "⟦v13_"+digest([]byte(req.Text))[:16]+"_") {
+				return "", errProtected
+			}
+			return candidate, nil
+		}
+	}
 	rewriteKind := "string"
 	if attempt > 0 {
 		prompt += retryPrompt
