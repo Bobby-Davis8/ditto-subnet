@@ -224,6 +224,13 @@ func (w World) V13StoryDocument(arcIndex int) (V13FactDocumentRequest, []string,
 	if !add(len(ids)-1, "independent_thread", "A separate similarly named thread with its own reference, owner, provider and final status. Never equate it to another thread.", map[string]string{"person": decoy.Person, "subject": decoy.Alias, "owner": decoy.Owner, "provider": decoy.Provider, "provider_kind": decoy.ProviderKind, "reference": decoy.Reference, "reference_kind": decoy.ReferenceKind, "status": decoy.Status}) {
 		return fail()
 	}
+	for record, id := range ids {
+		for _, background := range v13StoryBackground(w.Seed, id) {
+			if !add(record, "local_background", background.relation, background.values) {
+				return fail()
+			}
+		}
+	}
 	if err := ValidateV13FactDocumentRequest(r); err != nil {
 		return fail()
 	}

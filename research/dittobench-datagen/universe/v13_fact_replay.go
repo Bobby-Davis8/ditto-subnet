@@ -7,7 +7,7 @@ import (
 
 // Shared by generation and renderer-profile provenance so a generator change
 // cannot reuse a previously qualified provider/profile identity.
-const V13FactGenerationRevision = "v13-fact-generation-v9"
+const V13FactGenerationRevision = "v13-fact-generation-v10"
 
 // V13FactRenderEvent is private producer provenance. A transcript is not an
 // independent semantic approval: replay is allowed only after the enclosing
