@@ -61,7 +61,7 @@ func FactProfileDigest(profile Profile) (string, error) {
 	if _, err := profile.Digest(); err != nil {
 		return "", err
 	}
-	return universe.V13FactRenderDigest([]any{"fact-renderer-v4", profile, factAuthorPrompt, factCheckPrompt, "author-bindings-withheld", "exact-model-provider-identity", "three-record-token-plan", "max-two-author-structural-attempts", "no-semantic-or-transport-retry", 0.8, 0.0})
+	return universe.V13FactRenderDigest([]any{"fact-renderer-v5", profile, factAuthorPrompt, factCheckPrompt, "author-bindings-withheld", "checker-concrete-assertions", "exact-model-provider-identity", "three-record-token-plan", "max-two-author-structural-attempts", "no-semantic-or-transport-retry", 0.8, 0.0})
 }
 
 func exactFactIdentity(receipt CompletionReceipt, model string) bool {
@@ -146,7 +146,7 @@ func (r *FactRenderer) planAttempt(ctx context.Context, request universe.V13Fact
 func (r *FactRenderer) Check(ctx context.Context, request universe.V13FactRenderRequest, bound universe.V13FactRenderPlan) (resultErr error) {
 	p := r.client.profile
 	var reason string
-	raw, receipt, err := r.client.complete(ctx, p.ValidatorModel, p.ValidatorProvider, factCheckPrompt, map[string]any{"truth": request, "rendered": bound}, "verdict", "string", 0)
+	raw, receipt, err := r.client.complete(ctx, p.ValidatorModel, p.ValidatorProvider, factCheckPrompt, map[string]any{"truth": resolvedFactCheckTruth(request), "rendered": bound}, "verdict", "string", 0)
 	defer func() {
 		requestSHA, _ := universe.V13FactRenderDigest(request)
 		planSHA, _ := universe.V13FactRenderDigest(bound)
@@ -192,4 +192,28 @@ func decodeFactVerdict(raw json.RawMessage) (bool, string, error) {
 		return false, "", errors.New("invalid semantic verdict")
 	}
 	return *verdict.Accepted, verdict.Reason, nil
+}
+
+// The independent checker compares concrete assertions, not author template
+// syntax. Resolve exact bindings locally to avoid asking it to perform a
+// second, error-prone interpretation of token indirection.
+func resolvedFactCheckTruth(r universe.V13FactRenderRequest) any {
+	resolve := func(token string) string {
+		if value, ok := r.Bindings[token]; ok {
+			return value
+		}
+		return token
+	}
+	facts := append([]universe.V13RenderAssertion(nil), r.Facts...)
+	for i := range facts {
+		facts[i].Entity = resolve(facts[i].Entity)
+		facts[i].Field = resolve(facts[i].Field)
+		facts[i].Value = resolve(facts[i].Value)
+		facts[i].Date = resolve(facts[i].Date)
+	}
+	query := append([]universe.V13RenderQuery(nil), r.Query...)
+	for i := range query {
+		query[i].Field = resolve(query[i].Field)
+	}
+	return map[string]any{"revision": r.Revision, "subject": resolve(r.Subject), "subject_entity": resolve(r.SubjectEntity), "subject_mode": r.SubjectMode, "subject_binding": "The task explicitly identifies subject_entity as the entity referred to by subject; this link is supplied separately from the authored records.", "facts": facts, "query": query}
 }
