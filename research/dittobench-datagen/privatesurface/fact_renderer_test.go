@@ -32,7 +32,7 @@ func TestFactRendererBoundedStructuralRetry(t *testing.T) {
 					p.Records[0] = "{{value0}}"
 				}
 				plan, _ := json.Marshal(p)
-				content, _ := json.Marshal(map[string]string{"text": string(plan)})
+				content, _ := json.Marshal(map[string]json.RawMessage{"plan": plan})
 				provider := "Azure"
 				if mode == "identity" {
 					provider = "wrong"
@@ -94,6 +94,15 @@ func TestFactRendererDirectFactsAndIndependentCheck(t *testing.T) {
 		provider := "Azure"
 		var content []byte
 		if model == "openai/gpt-4.1" {
+			schema := body["response_format"].(map[string]any)["json_schema"].(map[string]any)["schema"].(map[string]any)
+			planSchema := schema["properties"].(map[string]any)["plan"].(map[string]any)
+			if planSchema["type"] != "object" || planSchema["additionalProperties"] != false {
+				t.Error("author schema is not a strict direct object")
+			}
+			records := planSchema["properties"].(map[string]any)["records"].(map[string]any)
+			if records["minItems"] != float64(3) || records["maxItems"] != float64(3) {
+				t.Error("record cardinality not pinned")
+			}
 			user := body["messages"].([]any)[1].(map[string]any)["content"].(string)
 			if !strings.Contains(user, "record_required_tokens") || strings.Contains(user, "reference_text") {
 				t.Error("not structured-fact input")
@@ -101,13 +110,18 @@ func TestFactRendererDirectFactsAndIndependentCheck(t *testing.T) {
 			if strings.Contains(user, "Ada") || strings.Contains(user, "Tuesday") {
 				t.Error("author received concrete bindings")
 			}
-			content, _ = json.Marshal(map[string]string{"text": string(rawPlan)})
+			content, _ = json.Marshal(map[string]json.RawMessage{"plan": rawPlan})
 		} else {
+			schema := body["response_format"].(map[string]any)["json_schema"].(map[string]any)["schema"].(map[string]any)
+			verdictSchema := schema["properties"].(map[string]any)["verdict"].(map[string]any)
+			if verdictSchema["type"] != "object" {
+				t.Error("verdict is double-encoded")
+			}
 			if model != "google/gemini-2.5-flash" {
 				t.Error("wrong independent model")
 			}
 			provider = "Google"
-			content, _ = json.Marshal(map[string]string{"verdict": `{"accepted":true,"reason":"All facts and query preserved."}`})
+			content, _ = json.Marshal(map[string]json.RawMessage{"verdict": json.RawMessage(`{"accepted":true,"reason":"All facts and query preserved."}`)})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": model, "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": string(content)}}}, "usage": map[string]any{"cost": 0.001, "prompt_tokens": 10, "completion_tokens": 10}})
 	}))
@@ -149,7 +163,7 @@ func TestFactRendererIdentityAndSemanticFailures(t *testing.T) {
 				if mode == "identity" {
 					provider = "WrongProvider"
 				}
-				content, _ := json.Marshal(map[string]string{"verdict": `{"accepted":false,"reason":"A required assertion is missing."}`})
+				content, _ := json.Marshal(map[string]json.RawMessage{"verdict": json.RawMessage(`{"accepted":false,"reason":"A required assertion is missing."}`)})
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": "google/gemini-2.5-flash", "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": string(content)}}}, "usage": map[string]any{"cost": 0.001}})
 			}))
 			defer server.Close()
@@ -175,14 +189,14 @@ func TestFactRendererIdentityAndSemanticFailures(t *testing.T) {
 
 func TestFactVerdictStrict(t *testing.T) {
 	for _, inner := range []string{`{"reason":"missing decision"}`, `{"accepted":null,"reason":"null"}`, `{"accepted":true,"reason":""}`, `{"accepted":true,"reason":"ok","extra":1}`, `{"accepted":true,"reason":"ok"} {}`} {
-		raw, _ := json.Marshal(map[string]string{"verdict": inner})
+		raw := []byte(`{"verdict":` + inner + `}`)
 		if _, _, err := decodeFactVerdict(raw); err == nil {
 			t.Fatalf("malformed verdict accepted: %s", inner)
 		}
 	}
 	for _, accepted := range []bool{true, false} {
 		inner, _ := json.Marshal(map[string]any{"accepted": accepted, "reason": "Explicit explanation."})
-		raw, _ := json.Marshal(map[string]string{"verdict": string(inner)})
+		raw, _ := json.Marshal(map[string]json.RawMessage{"verdict": inner})
 		got, reason, err := decodeFactVerdict(raw)
 		if err != nil || got != accepted || reason == "" {
 			t.Fatal("valid verdict lost")
