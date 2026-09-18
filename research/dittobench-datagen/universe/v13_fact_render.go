@@ -145,6 +145,7 @@ func v13FactRenderRequest(w v13FactWorld, s v13Schema, business bool) (V13FactRe
 }
 
 var v13RenderToken = regexp.MustCompile(`\{\{[a-z]+[0-9]+\}\}`)
+var v13RelativeChronology = regexp.MustCompile(`(?i)\b(later|earlier|then|subsequently|afterwards?|beforehand)\b`)
 
 // BindV13FactRenderPlan is structural validation ONLY. Independent Check is
 // mandatory before any returned text can be used for a generated case.
@@ -182,6 +183,11 @@ func BindV13FactRenderPlan(r V13FactRenderRequest, p V13FactRenderPlan) (V13Fact
 		return v13RenderToken.ReplaceAllStringFunc(text, func(token string) string { return r.Bindings[token] }), nil
 	}
 	for i, text := range p.Records {
+		for _, fact := range r.Facts {
+			if fact.Record == i && fact.Mode == "dated" && v13RelativeChronology.MatchString(text) {
+				return bound, fmt.Errorf("relative chronology forbidden in dated record; use the explicit date token")
+			}
+		}
 		v, err := bind(text, r.Allowed[i], r.Required[i])
 		if err != nil {
 			return bound, err
