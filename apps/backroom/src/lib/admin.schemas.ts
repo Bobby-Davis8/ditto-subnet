@@ -297,8 +297,8 @@ export const screenerReviewSettingsSchema = z
     l2_fallback_models: z.array(screenerReviewModelSchema).max(2),
     l3_enabled: z.boolean().default(true),
     l3_model: z.literal('openai/gpt-5.6-sol'),
-    timeout_seconds: z.number().int().min(30).max(900),
-    max_steps: z.number().int().min(1).max(20),
+    timeout_seconds: z.number().int().min(30).max(1_800),
+    max_steps: z.number().int().min(1).max(48),
     source_review_max_steps: z.number().int().min(1).max(240).default(200),
     source_review_max_read_bytes: z.number().int().min(32_000).max(16_000_000).default(8_000_000),
     source_review_max_completion_tokens: z.number().int().min(2_000).max(32_000).default(8_000),
@@ -330,6 +330,7 @@ export const screenerReviewSettingsSchema = z
     max_cost_usd: z.number().positive().max(10),
     critic_reasoning_effort: z.enum(['low', 'medium', 'high']),
     cache_ttl_seconds: z.number().int().min(60).max(2_592_000),
+    l2_always_escalate: z.boolean().default(false),
     audit_retention_days: z.number().int().min(1).max(365),
     policy_manifest_profile: policyManifestProfileSchema.default('l1'),
     policy_manifest_rotation_id: z.string().regex(/^[a-zA-Z0-9._-]{1,80}$/).default('v8-luna-source-review-behavioral-oracle'),
@@ -888,9 +889,40 @@ export const artifactReleaseRevisionSchema = z.object({
   created_at: z.string().nullable(),
 })
 
+export const sourceReleaseGateSchema = z.object({
+  version: z.string(),
+  automatic_confirmation_enabled: z.boolean(),
+  collector_cursor_block: z.number().nullable().optional(),
+  collector_cursor_hash: z.string().nullable().optional(),
+  collector_runtime_code_hash: z.string().nullable().optional(),
+  collector_blocked_reason: z.string().nullable().optional(),
+  last_payout_block: z.number().nullable().optional(),
+  last_payout_blocked_reason: z.string().nullable().optional(),
+  last_payout_attributed: z.boolean().optional(),
+  unresolved_payout_count: z.number().optional(),
+  pending_receipt_count: z.number().optional(),
+  pending_kings: z.number().int().nonnegative(),
+  confirmed_kings: z.number().int().nonnegative(),
+  rows_limit: z.literal(25),
+  rows_has_more: z.boolean(),
+  rows: z.array(z.object({
+    agent_id: z.string().uuid(),
+    artifact_sha256: z.string(),
+    crowned_at: z.string(),
+    weight_confirmed_at: z.string().nullable(),
+    emission_confirmed_at: z.string().nullable(),
+    emission_block: z.number().int().nonnegative().nullable(),
+    emission_block_hash: z.string().nullable(),
+    emission_epoch_index: z.number().int().nonnegative().nullable(),
+    emission_ledger_digest: z.string().nullable(),
+  })).max(25),
+})
+
 export const artifactReleaseControlSchema = z.object({
   current: artifactReleaseRevisionSchema,
   history: z.array(artifactReleaseRevisionSchema).max(100),
+  // Absent on older Platform releases; never synthesize proof of gate rollout.
+  release_gate: sourceReleaseGateSchema.optional(),
 })
 
 // `z.object` strips what it does not declare, and this board stores a whole
@@ -1851,6 +1883,7 @@ export const SIMILARITY_BUDGET_DEFAULT = {
 // already have an additive client-first default path.
 export const DEFERRED_SOURCE_REVIEW_DEFAULT = {
   mode: 'off',
+  integrity_double_check_mode: 'off',
   min_cohort_size: 8,
   composite_mad_multiplier: 6,
   axis_mad_multiplier: 6,
@@ -1870,8 +1903,17 @@ export const deferredSourceReviewModeSchema = z.enum([
   'bypass',
 ])
 
+// Second, stronger deep review for every top-five entrant, including rows that
+// already passed the full pre-score screen. Enforce is refused by Platform until
+// screener review scope `integrity-double-check` holds a usable posture.
+export const integrityDoubleCheckModeSchema = z.enum(['off', 'observe', 'enforce'])
+export const INTEGRITY_DOUBLE_CHECK_SCOPE = 'integrity-double-check'
+
 const deferredSourceReviewSchema = z.object({
   mode: deferredSourceReviewModeSchema.default(DEFERRED_SOURCE_REVIEW_DEFAULT.mode),
+  integrity_double_check_mode: integrityDoubleCheckModeSchema.default(
+    DEFERRED_SOURCE_REVIEW_DEFAULT.integrity_double_check_mode,
+  ),
   min_cohort_size: z.number().int().min(5).max(100).default(
     DEFERRED_SOURCE_REVIEW_DEFAULT.min_cohort_size,
   ),
@@ -1891,6 +1933,7 @@ const deferredSourceReviewSchema = z.object({
 
 const deferredSourceReviewWriteSchema = deferredSourceReviewSchema.extend({
   mode: deferredSourceReviewModeSchema,
+  integrity_double_check_mode: integrityDoubleCheckModeSchema,
   min_cohort_size: z.number().int().min(5).max(100),
   composite_mad_multiplier: z.number().min(1).max(20),
   axis_mad_multiplier: z.number().min(1).max(20),

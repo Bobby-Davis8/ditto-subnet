@@ -2,6 +2,119 @@
 
 <!-- version list -->
 
+## v0.277.5 (2026-09-18)
+
+### Bug Fixes
+
+- **platform**: Attribute initialization reveals before payouts
+  ([#1975](https://github.com/ditto-assistant/ditto-subnet/pull/1975),
+  [`82f63e6`](https://github.com/ditto-assistant/ditto-subnet/commit/82f63e665481df4403913e71ef0bf32ca6bd46cc))
+
+
+## v0.277.4 (2026-09-18)
+
+### Bug Fixes
+
+- **platform**: Admit audited Subtensor v466 source receipts
+  ([#1974](https://github.com/ditto-assistant/ditto-subnet/pull/1974),
+  [`a58e24e`](https://github.com/ditto-assistant/ditto-subnet/commit/a58e24efbbedbbf38635753c6715c0e4165f0d5a))
+
+
+## v0.277.3 (2026-09-18)
+
+### Bug Fixes
+
+- **platform**: Accept SCALE tuple events in payout provenance
+  ([#1972](https://github.com/ditto-assistant/ditto-subnet/pull/1972),
+  [`ad1930b`](https://github.com/ditto-assistant/ditto-subnet/commit/ad1930b6087c10db2f4457fcabb4cfbdd4a083ae))
+
+
+## v0.277.2 (2026-09-17)
+
+### Bug Fixes
+
+- **platform**: Bind source disclosure to paid submission receipts
+  ([#1965](https://github.com/ditto-assistant/ditto-subnet/pull/1965),
+  [`756b7ef`](https://github.com/ditto-assistant/ditto-subnet/commit/756b7ef26804c2e39eb8bb4992eb7f9ee000302e))
+
+
+## v0.277.1 (2026-09-17)
+
+### Bug Fixes
+
+- Keep v13 effort prompts coupled to graded intent
+  ([#1967](https://github.com/ditto-assistant/ditto-subnet/pull/1967),
+  [`ef7da1e`](https://github.com/ditto-assistant/ditto-subnet/commit/ef7da1ed01c37f895e32a34cc078ee01832f9319))
+
+
+## v0.277.0 (2026-09-17)
+
+### Bug Fixes
+
+- **bench**: Bind prelaunch V13 restraint requests to visible contexts
+  ([#1964](https://github.com/ditto-assistant/ditto-subnet/pull/1964),
+  [`dde979a`](https://github.com/ditto-assistant/ditto-subnet/commit/dde979af0c4ae7af628d2d1982242debbcfc05cb))
+
+- **model-relay**: Never ship a trace artifact that is not a zstd frame
+  ([#1553](https://github.com/ditto-assistant/ditto-subnet/pull/1553),
+  [`913cdec`](https://github.com/ditto-assistant/ditto-subnet/commit/913cdec737f594b22c6fcd86abecd842aced2e6d))
+
+### Features
+
+- **dittobench-api**: Validator-minted case URLs attribute concurrent /run
+  ([#1491](https://github.com/ditto-assistant/ditto-subnet/pull/1491),
+  [`13321fe`](https://github.com/ditto-assistant/ditto-subnet/commit/13321fedd3780cf33f20f95993e97fd5fa840ad1))
+
+
+## v0.276.2 (2026-09-17)
+
+### Bug Fixes
+
+- **screening**: Restore detailed miner review feedback
+  ([#1962](https://github.com/ditto-assistant/ditto-subnet/pull/1962),
+  [`b4f7621`](https://github.com/ditto-assistant/ditto-subnet/commit/b4f76215b06d065f3fdc426a8a8c8ad0ac7f0f4e))
+
+
+## v0.276.1 (2026-09-17)
+
+### Bug Fixes
+
+- **dashboard**: Prioritize screening outcomes over retained scores
+  ([#1960](https://github.com/ditto-assistant/ditto-subnet/pull/1960),
+  [`10111ef`](https://github.com/ditto-assistant/ditto-subnet/commit/10111ef2fd8a70c3e1733f7fb979694b50458f46))
+
+- **screener**: Accept Platform reviewer budgets across consumers
+  ([#1959](https://github.com/ditto-assistant/ditto-subnet/pull/1959),
+  [`d9cce4d`](https://github.com/ditto-assistant/ditto-subnet/commit/d9cce4d16c8310ee6cbcb4b889fd98d311b50d15))
+
+
+## v0.276.0 (2026-09-17)
+
+### Features
+
+- **platform**: Top-five integrity double-check on a stronger reviewer posture
+  ([#1946](https://github.com/ditto-assistant/ditto-subnet/pull/1946),
+  [`efc3d3a`](https://github.com/ditto-assistant/ditto-subnet/commit/efc3d3a39d89acfbb19115078658f825b952e76f))
+
+
+## v0.275.0 (2026-09-17)
+
+### Features
+
+- **screener**: Fingerprint the public keep/declarative-preference compiler
+  ([#1947](https://github.com/ditto-assistant/ditto-subnet/pull/1947),
+  [`a7e2dce`](https://github.com/ditto-assistant/ditto-subnet/commit/a7e2dce5d7adf30ee41cac71a78d1f3df18e77e2))
+
+
+## v0.274.1 (2026-09-17)
+
+### Bug Fixes
+
+- **security**: Revoke Brian operator access
+  ([#1945](https://github.com/ditto-assistant/ditto-subnet/pull/1945),
+  [`75e0991`](https://github.com/ditto-assistant/ditto-subnet/commit/75e0991e2daf488127e4f38575915d8def73c748))
+
+
 ## v0.274.0 (2026-09-16)
 
 ### Features

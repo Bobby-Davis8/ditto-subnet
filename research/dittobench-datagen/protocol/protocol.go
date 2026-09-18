@@ -511,16 +511,18 @@ type RunRequest struct {
 	BenchVersion int    `json:"bench_version,omitempty"`
 	ToolEndpoint string `json:"tool_endpoint,omitempty"`
 	UserID       string `json:"user_id,omitempty"`
-	// InferenceBaseURL was a validator-minted, case-scoped v10 relay capability;
-	// exclusive per-case windows forced serial /run, so v10..v12 scoring overlaps
-	// cases on the process-wide session URL and leaves it empty. From
-	// bench_version 13 the scorer sends `<gateway>/run/<case_id>`: the same
-	// source-bound broker route with the case NAMED in the path, which the
-	// broker reads as the case claim for claim-span attribution (equivalent to
-	// X-Ditto-Case-Id; never an admission input). A harness that builds its
-	// model client from this field per /run stays attributable at any
-	// concurrency; one that ignores it falls back to its launch-configured base
-	// URL and is attributable only while it is the sole case in flight.
+	// InferenceBaseURL is a validator-minted, case-scoped relay URL for this
+	// case. Below v13, model calls through it are attributed to the case even
+	// while several /run overlap; it carries attribution only and opens no
+	// exclusive case window, so admission, accounting and scoring are identical
+	// on it and on the process-wide session URL. It is revoked when the case
+	// ends, so it must not be kept as the shared client for a later case. A
+	// harness may ignore it and keep its launch-configured base URL, which stays
+	// supported and attributed exactly as before; the field is absent when the
+	// scorer has no URL to offer.
+	// From v13, the scorer instead preserves its /run/<case_id> route for
+	// claim-provenance capture; that route is an advisory case claim and is
+	// not a revocable opaque token. Build a separate model client per case.
 	InferenceBaseURL string `json:"inference_base_url,omitempty"`
 }
 

@@ -165,7 +165,7 @@ func TestV13BrokerRecordsOfferedCatalogPerAttributedCompletion(t *testing.T) {
 	defer stop()
 
 	// One case in flight: every completion is attributed to it exactly.
-	if !broker.beginRunCase(sessionID, "case-a") {
+	if _, started := broker.beginRunCase(sessionID, "case-a"); !started {
 		t.Fatal("beginRunCase")
 	}
 	postCatalogChat(t, broker, openAICatalogRequest)

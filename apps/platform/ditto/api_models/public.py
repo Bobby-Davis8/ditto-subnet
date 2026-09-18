@@ -466,9 +466,19 @@ class PublicArtifactRelease(BaseModel):
             default=None,
             description=(
                 "When validators' revealed on-chain weights (post commit-reveal) "
-                "were first seen set on this king. Source release is king-only and "
-                "the embargo window is measured from this instant; null while a "
-                "king still awaits on-chain confirmation."
+                "were first seen set on this king. This is not proof of earnings "
+                "and does not start the disclosure embargo."
+            ),
+        ),
+    ] = None
+    emission_confirmed_at: Annotated[
+        datetime | None,
+        Field(
+            default=None,
+            description=(
+                "Finalized block time of verified winner emissions for this exact "
+                "submission in a completed tempo. The embargo starts here; null "
+                "until actual earnings are confirmed."
             ),
         ),
     ] = None
@@ -3251,6 +3261,34 @@ class PublicScreeningReviewLocation(BaseModel):
     category: Annotated[str, Field(min_length=1, max_length=64)]
 
 
+class PublicScreeningReviewNote(BaseModel):
+    """Allowlisted public fields; future private protocol fields stay private."""
+
+    model_config = ConfigDict(extra="ignore")
+    kind: Literal["concern", "cleared", "observation"]
+    category: str
+    path: str | None = None
+    line: int | None = None
+    summary: str
+    confidence: float | None = None
+    stage: Literal["l1", "l2", "l3"]
+
+
+class PublicScreeningInvariantDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    invariant: str
+    disposition: Literal["pass", "breach", "inconclusive"]
+    pass_clause: str | None = None
+    summary: str
+    evidence_indices: list[int]
+
+
+class PublicScreeningInvariantAssessment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int
+    decisions: list[PublicScreeningInvariantDecision]
+
+
 class PublicScreeningReviewFinding(BaseModel):
     """Digest-verified final finding safe for public rejected-attempt feedback."""
 
@@ -3265,6 +3303,7 @@ class PublicScreeningReviewFinding(BaseModel):
         list[PublicScreeningReviewLocation], Field(default_factory=list, max_length=16)
     ]
     summary: Annotated[str, Field(min_length=1, max_length=240)]
+    invariant_assessment: PublicScreeningInvariantAssessment | None = None
 
 
 class PublicScreeningAttempt(BaseModel):
@@ -3286,6 +3325,7 @@ class PublicScreeningAttempt(BaseModel):
     quarantine_resolution_reason: str | None = None
     review_evidence: list[PublicScreeningReviewEvidence] = Field(default_factory=list)
     review_finding: PublicScreeningReviewFinding | None = None
+    review_notes: list[PublicScreeningReviewNote] = Field(default_factory=list)
 
 
 class PublicAdmissionRetry(BaseModel):

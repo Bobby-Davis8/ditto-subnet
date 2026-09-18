@@ -1034,6 +1034,14 @@ describe('Backroom MCP tools', () => {
     })
     const control = {
       current: revision(3),
+      release_gate: {
+        version: 'completed-winner-emission-v1', automatic_confirmation_enabled: false,
+        pending_kings: 7,
+        confirmed_kings: 0,
+        rows_limit: 25,
+        rows_has_more: false,
+        rows: [],
+      },
       // Deliberately unordered: the MCP contract, not upstream incidental
       // ordering, guarantees newest-first audit pages.
       // Revision 1 was backfilled after revisions 2 and 3. Timestamp order,
@@ -1062,6 +1070,7 @@ describe('Backroom MCP tools', () => {
     })
     expect(readJsonResult(currentOnly)).toMatchObject({
       current: { revision: 3 },
+      release_gate: { version: 'completed-winner-emission-v1', automatic_confirmation_enabled: false, pending_kings: 7, confirmed_kings: 0 },
       history: [],
       history_count: 3,
       history_limit: 0,
@@ -2753,6 +2762,7 @@ describe('Backroom MCP tools', () => {
       owner_concurrent_submission_limit: 2,
       deferred_source_review: {
         mode: 'off',
+        integrity_double_check_mode: 'off',
         min_cohort_size: 8,
         composite_mad_multiplier: 6,
         axis_mad_multiplier: 6,
@@ -2857,6 +2867,7 @@ describe('Backroom MCP tools', () => {
           owner_concurrent_submission_limit: 2,
           deferred_source_review: {
             mode: 'off',
+            integrity_double_check_mode: 'off',
             min_cohort_size: 8,
             composite_mad_multiplier: 6,
             axis_mad_multiplier: 6,
