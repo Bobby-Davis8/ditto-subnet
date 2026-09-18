@@ -9,7 +9,10 @@ from dataclasses import replace
 import pytest
 
 from ditto.db.models import PrivateBenchmarkPreparation
-from ditto.db.queries.private_benchmark_datasets import find_private_dataset
+from ditto.db.queries.private_benchmark_datasets import (
+    FACT_GENERATION_REVISION,
+    find_private_dataset,
+)
 from ditto.db.queries.private_benchmark_preparations import request_private_preparation
 from ditto.private_benchmark_worker import (
     PrivateWorkerError,
@@ -21,7 +24,7 @@ from ditto.private_benchmark_worker import (
 from ditto.tests.db.test_private_benchmark_datasets import identity
 
 
-def producer(tmp_path, profile, mode="success"):
+def producer(tmp_path, profile, mode="success", generation_mode="legacy-rewrite"):
     root = (tmp_path / "private").resolve()
     root.mkdir(mode=0o700)
     binary = root / "producer"
@@ -44,7 +47,10 @@ if mode == "reject":
     sys.exit(1)
 def arg(name): return args[args.index(name) + 1]
 assert float(arg("-max-cost-usd")) == 10
-salt = int.from_bytes(pathlib.Path(arg("-salt-file")).read_bytes(), "big")
+fact_mode = arg("-generation") == "fact-world"
+salt = 1
+if not fact_mode:
+    salt = int.from_bytes(pathlib.Path(arg("-salt-file")).read_bytes(), "big")
 common = {{"seed": int(arg("-seed")), "bench_version": 13, "surface_salt": salt}}
 base = json.dumps({{**common, "prompt": "base"}}).encode()
 data = json.dumps({{**common, "prompt": "private"}}).encode()
@@ -57,6 +63,39 @@ receipt = json.dumps({{
 output = pathlib.Path(arg("-output"))
 output.mkdir(mode=0o700)
 files = [("base.json", base), ("dataset.json", data), ("validation.json", receipt)]
+if fact_mode:
+    assert "-salt-file" not in args
+    entropy = pathlib.Path(arg("-fact-entropy-file")).read_bytes()
+    assert len(entropy) == 16
+    world = int.from_bytes(entropy[:8], "big", signed=True)
+    presentation = int.from_bytes(entropy[8:], "big", signed=True)
+    manifest = {{
+        "revision": {FACT_GENERATION_REVISION!r}, "seed": int(arg("-seed")),
+        "world_seed": world, "presentation_seed": presentation,
+        "run_size": arg("-run-size"), "profile_sha256": {profile!r},
+        "qualified": False,
+    }}
+    events = [
+        {{"phase": "plan", "request_sha256": "a"*64, "plan_sha256": "b"*64}},
+        {{"phase": "check", "request_sha256": "a"*64, "plan_sha256": "c"*64}},
+    ]
+    data = json.dumps({{
+        "seed": int(arg("-seed")), "bench_version": 13,
+        "fact_generation": {{"revision": {FACT_GENERATION_REVISION!r},
+            "world_seed": world, "presentation_seed": presentation,
+            "events": events}},
+    }}).encode()
+    base = json.dumps(manifest).encode()
+    receipt = json.dumps({{
+        "schema": "private-fact-generation-validation-v1", "accepted": True,
+        "qualified": False, "replay_verified": True,
+        "generation_revision": {FACT_GENERATION_REVISION!r},
+        "generation_sha256": sha(base), "dataset_sha256": sha(data),
+        "transform_profile_sha256": {profile!r},
+        "run_size": arg("-run-size"), "render_event_count": 2,
+    }}).encode()
+    files = [("generation.json", base), ("dataset.json", data),
+             ("validation.json", receipt)]
 for name, body in files:
     path = output / name
     path.write_bytes(body)
@@ -79,12 +118,38 @@ if mode == "symlink":
         validator_provider="route-b",
         api_key="only-provider-secret",
         timeout_seconds=5,
+        generation_mode=generation_mode,
     )
 
 
 async def reserve(sessions, key):
     async with sessions() as session, session.begin():
         return await request_private_preparation(session, identity=key)
+
+
+async def test_fact_worker_uses_reserved_entropy_and_distinct_output_contract(
+    tmp_path, session_maker
+):
+    key = replace(identity(), generation_mode="fact-world-v1")
+    config = producer(
+        tmp_path, key.transform_profile_sha256, generation_mode="fact-world-v1"
+    )
+    await reserve(session_maker, key)
+    assert await run_once(config, session_maker) == "ready"
+    assert await run_once(config, session_maker) == "idle"
+    async with session_maker() as session:
+        result = await find_private_dataset(session, identity=key)
+        assert result is not None and result.identity.generation_mode == "fact-world-v1"
+
+
+async def test_worker_rejects_generation_mode_mismatch_before_production(
+    tmp_path, session_maker
+):
+    key = replace(identity(), generation_mode="fact-world-v1")
+    config = producer(tmp_path, key.transform_profile_sha256)
+    await reserve(session_maker, key)
+    assert await run_once(config, session_maker) == "failed"
+    assert list(config.work_root.iterdir()) == [config.executable]
 
 
 async def test_worker_pins_once_without_inheriting_credentials(

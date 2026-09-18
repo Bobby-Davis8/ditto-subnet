@@ -118,8 +118,9 @@ def _object(body: bytes, maximum: int) -> dict:
 
 def _validate(identity, base_bytes, dataset_bytes, receipt_bytes) -> None:
     identity.digest()
-    if identity.generation_mode != "legacy-rewrite":
-        raise PrivateDatasetError("fact-world validation receipt is not supported yet")
+    if identity.generation_mode == "fact-world-v1":
+        _validate_fact(identity, base_bytes, dataset_bytes, receipt_bytes)
+        return
     base = _object(base_bytes, MAX_ARTIFACT_BYTES)
     dataset = _object(dataset_bytes, MAX_ARTIFACT_BYTES)
     for obj in (base, dataset):
@@ -142,6 +143,83 @@ def _validate(identity, base_bytes, dataset_bytes, receipt_bytes) -> None:
         or receipt.get("transform_profile_sha256") != identity.transform_profile_sha256
     ):
         raise PrivateDatasetError("private artifact validation receipt mismatch")
+
+
+FACT_GENERATION_REVISION = "v13-fact-generation-v5"
+
+
+def _validate_fact(identity, manifest_bytes, dataset_bytes, receipt_bytes) -> None:
+    # base_bytes is the existing private source-provenance storage column. In
+    # fact mode it contains generation.json, NOT a legacy pre-rewrite dataset.
+    manifest = _object(manifest_bytes, MAX_ARTIFACT_BYTES)
+    dataset = _object(dataset_bytes, MAX_ARTIFACT_BYTES)
+    receipt = _object(receipt_bytes, MAX_RECEIPT_BYTES)
+    generation = dataset.get("fact_generation")
+    if not isinstance(generation, dict):
+        raise PrivateDatasetError("private fact generation provenance missing")
+    for key in ("world_seed", "presentation_seed"):
+        value = manifest.get(key)
+        if (
+            type(value) is not int
+            or not -(2**63) <= value < 2**63
+            or value == 0
+            or type(generation.get(key)) is not int
+            or generation[key] != value
+        ):
+            raise PrivateDatasetError("private fact entropy mismatch")
+    events = generation.get("events")
+    if (
+        manifest.get("revision") != FACT_GENERATION_REVISION
+        or generation.get("revision") != FACT_GENERATION_REVISION
+        or manifest["world_seed"] in {identity.seed, manifest["presentation_seed"]}
+        or type(manifest.get("seed")) is not int
+        or manifest["seed"] != identity.seed
+        or type(dataset.get("seed")) is not int
+        or dataset["seed"] != identity.seed
+        or type(dataset.get("bench_version")) is not int
+        or dataset["bench_version"] != 13
+        or type(dataset.get("surface_salt", 0)) is not int
+        or dataset.get("surface_salt", 0) != 0
+        or manifest.get("run_size") != identity.run_size
+        or manifest.get("profile_sha256") != identity.transform_profile_sha256
+        or manifest.get("qualified") is not False
+        or not isinstance(events, list)
+        or not events
+        or len(events) % 2
+        or receipt.get("schema") != "private-fact-generation-validation-v1"
+        or receipt.get("accepted") is not True
+        or receipt.get("qualified") is not False
+        or receipt.get("replay_verified") is not True
+        or receipt.get("generation_revision") != FACT_GENERATION_REVISION
+        or receipt.get("generation_sha256") != _sha(manifest_bytes)
+        or receipt.get("dataset_sha256") != _sha(dataset_bytes)
+        or receipt.get("transform_profile_sha256") != identity.transform_profile_sha256
+        or receipt.get("run_size") != identity.run_size
+        or type(receipt.get("render_event_count")) is not int
+        or receipt["render_event_count"] != len(events)
+    ):
+        raise PrivateDatasetError("private fact generation receipt mismatch")
+    # Native replay is authoritative; this structural fence additionally makes
+    # an incomplete/unpaired audit impossible to pin via this boundary.
+    for plan, check in zip(events[::2], events[1::2], strict=True):
+        if not isinstance(plan, dict) or not isinstance(check, dict):
+            raise PrivateDatasetError("private fact render audit invalid")
+        if not isinstance(plan.get("phase"), str):
+            raise PrivateDatasetError("private fact render audit invalid")
+        expected = {"plan": "check", "document_plan": "document_check"}.get(
+            plan.get("phase")
+        )
+        if expected is None or check.get("phase") != expected:
+            raise PrivateDatasetError("private fact render audit invalid")
+        for key in ("request_sha256", "plan_sha256"):
+            if (
+                not isinstance(plan.get(key), str)
+                or not _DIGEST.fullmatch(plan[key])
+                or not isinstance(check.get(key), str)
+                or not _DIGEST.fullmatch(check[key])
+                or (key == "request_sha256" and check[key] != plan[key])
+            ):
+                raise PrivateDatasetError("private fact render audit invalid")
 
 
 def _read(

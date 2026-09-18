@@ -214,7 +214,21 @@ async def finish_private_preparation(
     """Atomic artifact pin plus ready state. Stale writers cannot publish."""
     row = await _owned_claim(session, claim, now)
     base = _object(base_bytes, MAX_ARTIFACT_BYTES)
-    if base.get("surface_salt") != int.from_bytes(claim.surface_salt, "big"):
+    if claim.identity.generation_mode == "fact-world-v1":
+        entropy_matches = (
+            _valid_entropy(claim.identity, claim.surface_salt)
+            and type(base.get("world_seed")) is int
+            and type(base.get("presentation_seed")) is int
+            and base["world_seed"]
+            == int.from_bytes(claim.surface_salt[:8], "big", signed=True)
+            and base["presentation_seed"]
+            == int.from_bytes(claim.surface_salt[8:], "big", signed=True)
+        )
+    else:
+        entropy_matches = base.get("surface_salt") == int.from_bytes(
+            claim.surface_salt, "big"
+        )
+    if not entropy_matches:
         raise PrivateDatasetError("private preparation entropy mismatch")
     result = await pin_private_dataset(
         session,

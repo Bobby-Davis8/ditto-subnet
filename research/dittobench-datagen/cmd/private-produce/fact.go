@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -70,6 +71,24 @@ func runFactProducer(seed int64, size, out string, profile privatesurface.Profil
 	// candidate receipt must never be accepted as a rollout validation receipt.
 	receipt, _ := json.Marshal(map[string]any{"revision": "v13-fact-candidate-v2", "generation_revision": gen.V13FactGenerationRevision, "dataset_sha256": pin, "profile_sha256": profileSHA, "run_size": size, "calls": call, "qualified": false, "semantic_coverage": "not-qualified", "remaining_surface_qualification_required": true})
 	if err := writePrivate(out, "fact-candidate.json", receipt); err != nil {
+		return err
+	}
+	// This receipt attests checked generation and exact native replay, NOT
+	// rollout qualification. Platform accepts it only from its approved local
+	// producer process and separately verifies the reserved entropy binding.
+	manifestHash := sha256.Sum256(identity)
+	validation, err := json.Marshal(map[string]any{
+		"schema": "private-fact-generation-validation-v1", "accepted": true,
+		"qualified": false, "replay_verified": true,
+		"generation_revision": gen.V13FactGenerationRevision,
+		"generation_sha256":   fmt.Sprintf("%x", manifestHash),
+		"dataset_sha256":      pin, "transform_profile_sha256": profileSHA,
+		"run_size": size, "render_event_count": len(artifact.FactGeneration.Events),
+	})
+	if err != nil {
+		return err
+	}
+	if err := writePrivate(out, "validation.json", validation); err != nil {
 		return err
 	}
 	fmt.Println("fact candidate produced privately; NOT qualified, pinned, leased or activated")

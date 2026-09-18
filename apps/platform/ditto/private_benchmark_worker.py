@@ -56,9 +56,14 @@ class ProducerConfig:
     concurrency: int = 4
     max_cost_usd: float = 10
     timeout_seconds: float = 7200
+    generation_mode: str = "legacy-rewrite"
 
     def arguments(self) -> list[str]:
         return [
+            "-generation",
+            "fact-world"
+            if self.generation_mode == "fact-world-v1"
+            else "legacy-rewrite",
             "-rewrite-model",
             self.rewrite_model,
             "-rewrite-provider",
@@ -112,6 +117,7 @@ def _check_config(config: ProducerConfig) -> None:
     try:
         if (
             not re.fullmatch(r"[0-9a-f]{64}", config.executable_sha256)
+            or config.generation_mode not in {"legacy-rewrite", "fact-world-v1"}
             or not re.fullmatch(r"[0-9a-f]{64}", config.profile_sha256)
             or not 1 <= config.concurrency <= 16
             or not math.isfinite(config.max_cost_usd)
@@ -193,6 +199,8 @@ async def verify_producer(config: ProducerConfig) -> None:
 
 
 async def _produce(config: ProducerConfig, claim: PreparationClaim) -> dict[str, bytes]:
+    if config.generation_mode != claim.identity.generation_mode:
+        raise PrivateWorkerError("private worker generation mode mismatch")
     directory = config.work_root / f"{claim.preparation_id}-{claim.token}"
     directory.mkdir(mode=0o700)
     _private_directory(directory)
@@ -210,7 +218,9 @@ async def _produce(config: ProducerConfig, claim: PreparationClaim) -> dict[str,
             str(claim.identity.seed),
             "-run-size",
             claim.identity.run_size,
-            "-salt-file",
+            "-fact-entropy-file"
+            if config.generation_mode == "fact-world-v1"
+            else "-salt-file",
             str(salt),
             "-output",
             str(output),
@@ -219,7 +229,15 @@ async def _produce(config: ProducerConfig, claim: PreparationClaim) -> dict[str,
     )
     _private_directory(output)
     return {
-        "base_bytes": _read_private(output / "base.json", MAX_ARTIFACT_BYTES),
+        "base_bytes": _read_private(
+            output
+            / (
+                "generation.json"
+                if config.generation_mode == "fact-world-v1"
+                else "base.json"
+            ),
+            MAX_ARTIFACT_BYTES,
+        ),
         "dataset_bytes": _read_private(output / "dataset.json", MAX_ARTIFACT_BYTES),
         "validation_receipt_bytes": _read_private(
             output / "validation.json", MAX_RECEIPT_BYTES
@@ -270,6 +288,9 @@ def config_from_env() -> ProducerConfig:
     try:
         return ProducerConfig(
             executable=Path(os.environ[prefix + "EXECUTABLE"]),
+            generation_mode=os.environ.get(
+                prefix + "GENERATION_MODE", "legacy-rewrite"
+            ),
             executable_sha256=os.environ[prefix + "EXECUTABLE_SHA256"],
             profile_sha256=os.environ[prefix + "PROFILE_SHA256"],
             work_root=Path(os.environ[prefix + "WORK_ROOT"]),
