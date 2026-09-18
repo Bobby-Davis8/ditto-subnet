@@ -7,19 +7,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/privatesurface"
 )
 
-func runFactProducer(seed int64, size, out string, profile privatesurface.Profile, limit float64) error {
+func runFactProducer(seed int64, size, out string, profile privatesurface.Profile, limit float64, entropyFile string) error {
 	if _, ok := gen.ProfileForVersion(size, 13); !ok {
 		return errors.New("fact producer: invalid run size")
 	}
 	profileSHA, err := privatesurface.FactProfileDigest(profile)
+	if err != nil {
+		return err
+	}
+	world, presentation, err := factEntropy(seed, entropyFile)
 	if err != nil {
 		return err
 	}
@@ -37,15 +43,6 @@ func runFactProducer(seed int64, size, out string, profile privatesurface.Profil
 	})
 	if err != nil {
 		return err
-	}
-	var entropy [16]byte
-	if _, err := rand.Read(entropy[:]); err != nil {
-		return errors.New("fact producer: entropy unavailable")
-	}
-	world := int64(binary.BigEndian.Uint64(entropy[:8]))
-	presentation := int64(binary.BigEndian.Uint64(entropy[8:]))
-	if world == 0 || world == seed {
-		return errors.New("fact producer: invalid independent entropy")
 	}
 	identity, _ := json.Marshal(map[string]any{"revision": gen.V13FactGenerationRevision, "seed": seed, "world_seed": world, "presentation_seed": presentation, "run_size": size, "profile_sha256": profileSHA, "budget_usd": limit, "qualified": false})
 	if err := writePrivate(out, "generation.json", identity); err != nil {
@@ -77,4 +74,42 @@ func runFactProducer(seed int64, size, out string, profile privatesurface.Profil
 	}
 	fmt.Println("fact candidate produced privately; NOT qualified, pinned, leased or activated")
 	return nil
+}
+
+// Reserved entropy is private producer input, never a public lease identifier.
+// It pins both independent draws across a worker retry; it is not the legacy
+// eight-byte rewriting salt. Reject invalid files before allocating an output
+// directory or creating a provider client.
+func factEntropy(leaseSeed int64, path string) (int64, int64, error) {
+	var raw [16]byte
+	if path == "" {
+		if _, err := rand.Read(raw[:]); err != nil {
+			return 0, 0, errors.New("fact producer: entropy unavailable")
+		}
+	} else {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() != 16 {
+			return 0, 0, errors.New("fact producer: invalid entropy file")
+		}
+		file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return 0, 0, errors.New("fact producer: entropy unavailable")
+		}
+		defer file.Close()
+		actual, err := file.Stat()
+		if err != nil || !os.SameFile(info, actual) || actual.Mode().Perm()&0077 != 0 || actual.Size() != 16 {
+			return 0, 0, errors.New("fact producer: entropy file changed")
+		}
+		data, err := io.ReadAll(io.LimitReader(file, 17))
+		if err != nil || len(data) != 16 {
+			return 0, 0, errors.New("fact producer: invalid entropy length")
+		}
+		copy(raw[:], data)
+	}
+	world := int64(binary.BigEndian.Uint64(raw[:8]))
+	presentation := int64(binary.BigEndian.Uint64(raw[8:]))
+	if world == 0 || world == leaseSeed || presentation == 0 || world == presentation {
+		return 0, 0, errors.New("fact producer: invalid independent entropy")
+	}
+	return world, presentation, nil
 }

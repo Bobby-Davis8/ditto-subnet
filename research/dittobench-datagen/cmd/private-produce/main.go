@@ -41,6 +41,7 @@ func run() error {
 	rewriteReasoning := flag.String("rewrite-reasoning", "", "explicit reasoning effort; replaces temperature when set")
 	validatorReasoning := flag.String("validator-reasoning", "", "explicit independent-validator reasoning effort")
 	saltFile := flag.String("salt-file", "", "private regular 8-byte big-endian reserved entropy file")
+	factEntropyFile := flag.String("fact-entropy-file", "", "fact-world only: private 16-byte reserved world/presentation entropy")
 	profileOnly := flag.Bool("profile-sha", false, "print profile digest without inference or artifacts")
 	maxCost := flag.Float64("max-cost-usd", 0, "required per-invocation allocation from the remaining total spending budget")
 	flag.Parse()
@@ -66,7 +67,10 @@ func run() error {
 		if *probe != 0 || *saltFile != "" {
 			return errors.New("fact producer: legacy probes and salt files are not supported")
 		}
-		return runFactProducer(*seed, *runSize, *out, profile, *maxCost)
+		return runFactProducer(*seed, *runSize, *out, profile, *maxCost, *factEntropyFile)
+	}
+	if *factEntropyFile != "" {
+		return errors.New("private producer: fact entropy requires fact-world mode")
 	}
 	client, err := privatesurface.NewClient(profile, os.Getenv("OPENROUTER_API_KEY"))
 	if err != nil {
