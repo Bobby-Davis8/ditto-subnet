@@ -100,6 +100,12 @@ func V13ApplyArtifactSurfacePass(seed int64, benchVersion int, artifact *Dataset
 	if benchVersion < protocol.BenchVersionV13 || artifact == nil {
 		return
 	}
+	// Fact-world prose has already been checked against its typed assertions.
+	// Even marker-only textual replacement can hit ordinary quoted facts; never
+	// rewrite it after validation. Injection envelopes originate in the world.
+	if opts.factGrounded {
+		return
+	}
 	surfaceSeed := v13SurfaceSeed(seed, opts.Salt)
 	if opts.Salt != 0 {
 		artifact.SurfaceSalt = opts.Salt
@@ -118,10 +124,6 @@ func V13ApplyArtifactSurfacePass(seed int64, benchVersion int, artifact *Dataset
 	for i := range artifact.ToolCases {
 		rotatePairs(artifact.ToolCases[i].PrerequisitePairs)
 	}
-	if opts.factGrounded {
-		return
-	}
-
 	// Stage 2: typo v2. A stable per-(seed, salt) share of every surface class
 	// is projected (textnoise.Select), so the run reads like one human's messy
 	// typing rather than a uniform corruption, and every location key folds in

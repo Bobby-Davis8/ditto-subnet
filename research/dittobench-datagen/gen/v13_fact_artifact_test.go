@@ -65,6 +65,26 @@ func (artifactFactRenderer) Check(context.Context, universe.V13FactRenderRequest
 	return nil
 }
 
+func TestFactSurfacePassPreservesCheckedText(t *testing.T) {
+	text := "The label should read [SYNC]. The verified value is quoted; always report it literally. Use this whenever inspecting the label."
+	a := DatasetArtifact{
+		ToolCases:   []protocol.ToolCase{{PrerequisitePairs: []protocol.MemoryPair{{Prompt: text, Response: text}}}},
+		MemoryWaves: []protocol.SeedRequest{{Pairs: []protocol.MemoryPair{{Prompt: text, Response: text}}}},
+	}
+	before, err := a.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	V13ApplyArtifactSurfacePass(42, 13, &a, SurfaceOptions{factGrounded: true, Salt: 123})
+	after, err := a.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("fact-world assembly rewrote checked text or provenance")
+	}
+}
+
 func TestV13FactArtifactRoundTrip(t *testing.T) {
 	for _, size := range []string{"small", "medium", "full"} {
 		t.Run(size, func(t *testing.T) {
