@@ -3,6 +3,7 @@ package privatesurface
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,64 @@ import (
 
 	"github.com/ditto-assistant/dittobench-datagen/universe"
 )
+
+func TestFactRendererBoundedStructuralRetry(t *testing.T) {
+	for _, mode := range []string{"recover", "exhaust", "audit-failure", "identity"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			var audits []FactRenderAudit
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls++
+				var body map[string]any
+				_ = json.NewDecoder(req.Body).Decode(&body)
+				if calls == 2 {
+					user := body["messages"].([]any)[1].(map[string]any)["content"].(string)
+					if !strings.Contains(user, "structural_feedback") || !strings.Contains(user, "{{value0}}") {
+						t.Error("missing targeted feedback")
+					}
+				}
+				p := universe.V13FactRenderPlan{Records: [3]string{"omitted", "{{value1}}", "{{value2}}"}, Question: "{{subject0}}?"}
+				if mode == "recover" && calls == 2 {
+					p.Records[0] = "{{value0}}"
+				}
+				plan, _ := json.Marshal(p)
+				content, _ := json.Marshal(map[string]string{"text": string(plan)})
+				provider := "Azure"
+				if mode == "identity" {
+					provider = "wrong"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": "openai/gpt-4.1", "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": string(content)}}}, "usage": map[string]any{"cost": 0.001}})
+			}))
+			defer s.Close()
+			p := Profile{RewriteModel: "openai/gpt-4.1", RewriteProvider: "azure", ValidatorModel: "google/gemini-2.5-flash", ValidatorProvider: "google-vertex"}
+			r, err := NewFactRenderer(p, "test", 4, func(BudgetSnapshot) error { return nil }, func(a FactRenderAudit) error {
+				audits = append(audits, a)
+				if mode == "audit-failure" {
+					return errors.New("disk failed")
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.client.url = s.URL
+			_, err = r.Plan(context.Background(), factRequestFixture())
+			if (err == nil) != (mode == "recover") {
+				t.Fatal("incorrect retry outcome")
+			}
+			want := 2
+			if mode == "audit-failure" || mode == "identity" {
+				want = 1
+			}
+			if calls != want || len(audits) != want || audits[0].Accepted {
+				t.Fatal("retry bound or audit violated")
+			}
+			if mode == "recover" && (!audits[1].Accepted || audits[1].Attempt != 2) {
+				t.Fatal("retry success not audited")
+			}
+		})
+	}
+}
 
 func factRequestFixture() universe.V13FactRenderRequest {
 	r := universe.V13FactRenderRequest{Revision: "test", Subject: "{{subject0}}", Bindings: map[string]string{"{{subject0}}": "the task", "{{value0}}": "Ada", "{{value1}}": "Bea", "{{value2}}": "Tuesday"}, QuestionAllowed: []string{"{{subject0}}"}}
