@@ -145,7 +145,7 @@ def _validate(identity, base_bytes, dataset_bytes, receipt_bytes) -> None:
         raise PrivateDatasetError("private artifact validation receipt mismatch")
 
 
-FACT_GENERATION_REVISION = "v13-fact-generation-v7"
+FACT_GENERATION_REVISION = "v13-fact-generation-v8"
 
 
 def _validate_fact(identity, manifest_bytes, dataset_bytes, receipt_bytes) -> None:

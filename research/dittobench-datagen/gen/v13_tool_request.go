@@ -242,7 +242,7 @@ func toolFactRequest(tc protocol.ToolCase) (universe.V13FactDocumentRequest, boo
 				return universe.V13FactDocumentRequest{}, false, fmt.Errorf("fact request: unsupported decision")
 			}
 			kind, values["subject"] = "stored_fact_query", subject
-			relation = "Ask the assistant to recall the narrator's subject from memory. Do not provide or suggest its value."
+			relation = "The subject argument names an attribute whose VALUE the narrator previously stored (for example a number, combination, password or contact detail). Ask the assistant to recall that stored value for the narrator. Use subject as the attribute being asked about, never ask for the subject OF that attribute or define the attribute itself. Do not provide or suggest the stored value."
 		}
 	} else {
 		return universe.V13FactDocumentRequest{}, false, nil
