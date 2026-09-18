@@ -102,7 +102,7 @@ func (r *FactRenderer) documentAttempt(ctx context.Context, request universe.V13
 		return plan, fmt.Errorf("%w: trailing document data", errFactStructure)
 	}
 	if _, err := universe.BindV13FactDocument(request, plan); err != nil {
-		return plan, fmt.Errorf("%w: invalid record contract", errFactStructure)
+		return plan, fmt.Errorf("%w: %v", errFactStructure, err)
 	}
 	return plan, nil
 }

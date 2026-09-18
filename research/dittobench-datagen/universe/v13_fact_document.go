@@ -136,13 +136,13 @@ func BindV13FactDocument(r V13FactDocumentRequest, p V13FactDocumentPlan) (V13Fa
 		}
 		out.Records[i] = v13RenderToken.ReplaceAllStringFunc(text, func(token string) string { return r.Bindings[token] })
 		if len(out.Records[i]) < record.MinBytes || len(out.Records[i]) > record.MaxBytes {
-			return fail()
+			return V13FactDocumentPlan{}, fmt.Errorf("fact document: record %d length outside required %d..%d bytes; expand or shorten non-factual texture without changing assertions", i, record.MinBytes, record.MaxBytes)
 		}
 		if record.InteriorFacts {
 			for token := range required {
 				position := float64(strings.Index(out.Records[i], r.Bindings[token])) / float64(len(out.Records[i]))
 				if position < 0.15 || position > 0.85 {
-					return fail()
+					return V13FactDocumentPlan{}, fmt.Errorf("fact document: record %d requires every binding in its middle 15%%..85%%; keep opening and closing texture free of bindings", i)
 				}
 			}
 		}
