@@ -38,6 +38,9 @@ func TestV13OrdinaryDocumentAuthority(t *testing.T) {
 			}
 		}
 		for _, p := range w.People {
+			if !reflect.DeepEqual(records[p.ToolNotePairID], map[string]string{"nickname": p.Nickname, "event_context": p.Context}) || !strings.Contains(relations[p.ToolNotePairID], "has finished reconciling stale contact addresses") || !strings.Contains(relations[p.ToolNotePairID], "canonical contact evidence must not be deleted") {
+				t.Fatal("disposable receipt lost its completed action, actor context or deletion boundary")
+			}
 			if !reflect.DeepEqual(records[p.EmailPairID], map[string]string{"previous_employer": p.PreviousEmployer, "previous_email": p.PreviousEmail}) {
 				t.Fatal("historical email join changed")
 			}
