@@ -127,7 +127,7 @@ func BindV13FactDocument(r V13FactDocumentRequest, p V13FactDocumentPlan) (V13Fa
 		}
 		for token := range required {
 			if seen[token] == 0 {
-				return fail()
+				return V13FactDocumentPlan{}, fmt.Errorf("fact document: record %d is missing an assigned argument token; include EVERY token from its assertion arguments, without substituting a role label", i)
 			}
 		}
 		plain := v13RenderToken.ReplaceAllString(text, "")

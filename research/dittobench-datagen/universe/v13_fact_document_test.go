@@ -128,6 +128,7 @@ func TestV13FactDocumentRejectsInvalidBindings(t *testing.T) {
 func TestV13FactDocumentFeedbackDoesNotExposeBindings(t *testing.T) {
 	r := V13FactDocumentRequest{Revision: V13FactDocumentRevision, Domain: "story", Bindings: map[string]string{"{{owner0}}": "PRIVATE-OWNER"}, Records: []V13FactDocumentRecord{{MinBytes: 100, MaxBytes: 300, InteriorFacts: true, Assertions: []V13DocumentAssertion{{Kind: "owner", Relation: "initial owner", Arguments: map[string]string{"person": "{{owner0}}"}}}}}}
 	for _, tc := range []struct{ text, want string }{
+		{"An owner was assigned.", "missing an assigned argument token"},
 		{"{{owner0}}", "100..300 bytes"},
 		{"{{owner0}}" + strings.Repeat(" neutral", 20), "middle 15%..85%"},
 	} {

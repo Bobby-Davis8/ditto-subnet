@@ -52,7 +52,7 @@ func TestFactDocumentTransportBoundaries(t *testing.T) {
 					if mode == "exhaust" || (mode == "retry" && authors == 1) {
 						plan.Records[0] = "Missing."
 					}
-					if mode == "retry" && authors == 2 && !strings.Contains(user, "structural_feedback") {
+					if mode == "retry" && authors == 2 && (!strings.Contains(user, "structural_feedback") || !strings.Contains(user, "missing an assigned argument token")) {
 						t.Error("missing retry feedback")
 					}
 					content, _ = json.Marshal(map[string]any{"plan": plan})
