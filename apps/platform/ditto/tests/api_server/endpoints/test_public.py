@@ -8001,9 +8001,84 @@ class TestPublicActivity:
                 }
             ],
             "summary": finding.summary,
+            "invariant_assessment": None,
         }
         assert "artifact_sha256" not in attempt["review_finding"]
         assert "digest" not in attempt["review_evidence"][0]
+
+    async def test_historical_adjudicated_reject_publishes_notes_without_finding(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from ditto_screening_protocol.models import (
+            SourceReviewNote,
+            source_review_notes_digest,
+        )
+
+        agent_id = UUID(
+            await _seed_agent(
+                session_maker,
+                miner=_MINER_A,
+                status=AgentStatus.REJECTED,
+                screening_policy_version=13,
+            )
+        )
+        now, attempt_id = datetime.now(UTC), uuid4()
+        notes = [
+            SourceReviewNote(
+                kind="concern",
+                path="src/answer.rs",
+                line=37,
+                summary="The fallback replaces the model-authored answer.",
+            )
+        ]
+        async with session_maker() as session, session.begin():
+            session.add_all(
+                [
+                    ScreeningAttempt(
+                        attempt_id=attempt_id,
+                        agent_id=agent_id,
+                        screener_hotkey=_MINER_B,
+                        policy_version=13,
+                        status="rejected",
+                        started_at=now - timedelta(minutes=2),
+                        deadline=now + timedelta(minutes=28),
+                        finished_at=now,
+                        reason_code="adjudicated-source-review-reject",
+                        public_reason=(
+                            "The final reviewer confirmed an answer override."
+                        ),
+                    ),
+                    ScreeningQuarantine(
+                        quarantine_id=uuid4(),
+                        agent_id=agent_id,
+                        attempt_id=attempt_id,
+                        screener_hotkey=_MINER_B,
+                        policy_version=13,
+                        manifest_digest="ab" * 32,
+                        reason_code="adjudicated-source-review-reject",
+                        finding=None,
+                        status="resolved",
+                        resolution="rescreen",
+                        resolved_at=now,
+                        resolved_by="platform:deferred-source-review",
+                        review_notes=[note.model_dump(mode="json") for note in notes],
+                        review_notes_digest=source_review_notes_digest(notes),
+                    ),
+                ]
+            )
+        _install_db(app, session_maker)
+        response = await client.get(f"/api/v1/public/agent/{agent_id}/pipeline")
+        assert response.status_code == 200
+        attempt = response.json()["screening_attempts"][0]
+        assert attempt["review_finding"] is None
+        assert attempt["reason"] == "The final reviewer confirmed an answer override."
+        assert attempt["review_notes"] == [
+            note.model_dump(mode="json") for note in notes
+        ]
+        assert "review_notes_digest" not in attempt
 
     async def test_evaluation_projects_live_work_from_validator_heartbeat(
         self,
@@ -10492,10 +10567,11 @@ async def _crown(
     agent_id: str,
     first_crowned_at: datetime,
     weight_confirmed_at: datetime | None | object = _UNSET,
+    emission_confirmed_at: datetime | None | object = _UNSET,
 ) -> None:
     """Mark an agent as having held the KOTH crown.
 
-    By default the on-chain weight confirmation is stamped at the same instant
+    By default both weight and emission confirmations are stamped at the same instant
     (a fully armed king). Pass ``weight_confirmed_at=None`` for an ever-king that
     has not yet been confirmed on-chain, so its window has not started.
     """
@@ -10508,6 +10584,11 @@ async def _crown(
                 agent_id=UUID(agent_id),
                 first_crowned_at=first_crowned_at,
                 weight_confirmed_at=confirmed,
+                emission_confirmed_at=(
+                    confirmed
+                    if emission_confirmed_at is _UNSET
+                    else emission_confirmed_at
+                ),
             )
         )
 
@@ -10960,8 +11041,10 @@ class TestPublicArtifactRelease:
         assert "embargoed until" in response.json()["message"]
         storage.presigned_get_url.assert_not_awaited()
 
-    async def test_ever_king_awaiting_onchain_weight_stays_embargoed(
+    @pytest.mark.parametrize("weights_observed", [False, True])
+    async def test_king_without_completed_earnings_stays_embargoed(
         self,
+        weights_observed: bool,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
@@ -10970,13 +11053,15 @@ class TestPublicArtifactRelease:
         agent_id = await _seed_k3(
             session_maker, miner=_MINER_A, composites=[0.7, 0.8, 0.9]
         )
-        # Touched the crown 49h ago, but the chain has not yet confirmed weights
-        # were set on it: the window has NOT started, even though 48h elapsed.
+        # Neither a crown nor legacy revealed weights establish completed earnings.
         await _crown(
             session_maker,
             agent_id=agent_id,
             first_crowned_at=now - timedelta(hours=49),
-            weight_confirmed_at=None,
+            weight_confirmed_at=(
+                now - timedelta(hours=49) if weights_observed else None
+            ),
+            emission_confirmed_at=None,
         )
         _install_db(app, session_maker)
         storage = AsyncMock()
@@ -10993,10 +11078,11 @@ class TestPublicArtifactRelease:
         assert release["download_available"] is False
         assert release["available_at"] is None
         assert release["crowned_at"] is not None
-        assert release["weight_confirmed_at"] is None
+        assert (release["weight_confirmed_at"] is not None) is weights_observed
+        assert release["emission_confirmed_at"] is None
         response = await client.get(f"/api/v1/public/agent/{agent_id}/artifact")
         assert response.status_code == 425
-        assert "on-chain" in response.json()["message"]
+        assert "confirmed winner emissions" in response.json()["message"]
         storage.presigned_get_url.assert_not_awaited()
 
 

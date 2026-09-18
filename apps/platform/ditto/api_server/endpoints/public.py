@@ -171,6 +171,8 @@ from ditto.api_models.public import (
     BenchServiceability,
     FleetAvailability,
     FleetHealth,
+    PublicScreeningInvariantAssessment,
+    PublicScreeningReviewNote,
     ScorerLiveness,
     ValidatorAssignmentState,
 )
@@ -274,6 +276,7 @@ from ditto.db.models import (
     Score,
     ScreenerCapacitySnapshot,
     ScreenerNode,
+    ScreeningAttempt,
     ScreeningDispute,
     ScreeningQuarantine,
     ScreeningRetryOverride,
@@ -395,6 +398,7 @@ from ditto.db.queries.tickets import (
 from ditto.score_order import score_order_key
 from ditto.screener_policy_state import effective_screening_policy_version
 from ditto_screening_protocol.bench_v9 import V9EvidenceBenchVersion
+from ditto_screening_protocol.models import SourceReviewNote, source_review_notes_digest
 
 logger = logging.getLogger(__name__)
 
@@ -910,19 +914,57 @@ def _public_terminal_screening_review(
     quarantine: ScreeningQuarantine | None,
     *,
     artifact_sha256: str,
-) -> tuple[list[PublicScreeningReviewEvidence], PublicScreeningReviewFinding | None]:
+    attempt: ScreeningAttempt,
+) -> tuple[
+    list[PublicScreeningReviewEvidence],
+    PublicScreeningReviewFinding | None,
+    list[PublicScreeningReviewNote],
+]:
     """Project only verified review data from a terminal cheating rejection.
 
-    Active quarantines and release/rescreen resolutions retain their private source
+    Active quarantines and released reviews retain their private source
     layout. The public projection strips evidence digests and the artifact digest,
     and never contains source snippets, prompts, transcripts, or challenge values.
+    Deferred adjudicated rejections historically store a rescreen resolution;
+    the exact rejected attempt and reason code establish that terminal decision.
     """
     if (
         quarantine is None
+        or quarantine.agent_id != attempt.agent_id
+        or quarantine.attempt_id != attempt.attempt_id
+        or quarantine.policy_version != attempt.policy_version
         or quarantine.status != "resolved"
-        or quarantine.resolution != "reject"
+        or not (
+            quarantine.resolution == "reject"
+            or (
+                quarantine.resolution == "rescreen"
+                and attempt.status == "rejected"
+                and attempt.reason_code == "adjudicated-source-review-reject"
+                and quarantine.reason_code == attempt.reason_code
+            )
+        )
     ):
-        return [], None
+        return [], None, []
+
+    # These bounded reviewer-authored summaries are public-safe by protocol.
+    # They are working observations, not additional final rejection findings.
+    notes: list[PublicScreeningReviewNote] = []
+    if isinstance(quarantine.review_notes, list) and len(quarantine.review_notes) <= 48:
+        try:
+            parsed_notes = [
+                SourceReviewNote.model_validate(item)
+                for item in quarantine.review_notes
+            ]
+            if (
+                source_review_notes_digest(parsed_notes)
+                == quarantine.review_notes_digest
+            ):
+                notes = [
+                    PublicScreeningReviewNote.model_validate(note.model_dump())
+                    for note in parsed_notes
+                ]
+        except ValueError:
+            pass
 
     evidence: list[PublicScreeningReviewEvidence] = []
     if isinstance(quarantine.evidence, list):
@@ -943,31 +985,42 @@ def _public_terminal_screening_review(
         ]
 
     if not isinstance(quarantine.finding, dict):
-        return evidence, None
+        return evidence, None, notes
     try:
         finding = SourceReviewFinding.model_validate(quarantine.finding)
     except ValueError:
-        return evidence, None
+        return evidence, None, notes
     if (
         quarantine.finding_digest is None
         or finding.canonical_digest() != quarantine.finding_digest
         or finding.artifact_sha256 != artifact_sha256
     ):
-        return evidence, None
-    return evidence, PublicScreeningReviewFinding(
-        reviewer_revision=finding.prompt_revision,
-        risk_level=finding.risk_level,
-        confidence=finding.confidence,
-        categories=sorted(set(finding.categories)),
-        locations=[
-            PublicScreeningReviewLocation(
-                path=item.path,
-                line=item.line,
-                category=item.category,
-            )
-            for item in finding.evidence
-        ],
-        summary=finding.summary,
+        return evidence, None, notes
+    return (
+        evidence,
+        PublicScreeningReviewFinding(
+            reviewer_revision=finding.prompt_revision,
+            risk_level=finding.risk_level,
+            confidence=finding.confidence,
+            categories=sorted(set(finding.categories)),
+            locations=[
+                PublicScreeningReviewLocation(
+                    path=item.path,
+                    line=item.line,
+                    category=item.category,
+                )
+                for item in finding.evidence
+            ],
+            summary=finding.summary,
+            invariant_assessment=(
+                PublicScreeningInvariantAssessment.model_validate(
+                    finding.invariant_assessment.model_dump()
+                )
+                if finding.invariant_assessment is not None
+                else None
+            ),
+        ),
+        notes,
     )
 
 
@@ -987,13 +1040,9 @@ def _public_artifact_release(
 ) -> PublicArtifactRelease:
     """Project source visibility without mutating a public GET request.
 
-    Source release is **king-only** and gated by on-chain weights: an agent's
-    source is revealed only once it has (1) held the KOTH crown and (2) had
-    validators' revealed on-chain weights set on it (post commit-reveal). The
-    embargo window is measured from that on-chain confirmation
-    (``king_reveal.weight_confirmed_at``), not from the score quorum. An agent
-    that touched the crown but is not yet chain-confirmed stays ``embargoed``
-    with no unlock time; one that never reigned stays ``unavailable`` forever.
+    Source release requires a crown and verified completed winner emissions for
+    this exact submission. The embargo starts at ``emission_confirmed_at``;
+    revealed weights alone never establish earnings or an unlock time.
 
     Subnet policy short-circuits all of that. It is checked first, ahead of
     even the rejected/banned branch, because it is the one input whose answer
@@ -1012,9 +1061,12 @@ def _public_artifact_release(
     weight_confirmed_at = (
         king_reveal.weight_confirmed_at if king_reveal is not None else None
     )
+    emission_confirmed_at = (
+        king_reveal.emission_confirmed_at if king_reveal is not None else None
+    )
     available_at = (
-        weight_confirmed_at + timedelta(hours=policy.embargo_hours)
-        if weight_confirmed_at is not None
+        emission_confirmed_at + timedelta(hours=policy.embargo_hours)
+        if emission_confirmed_at is not None
         else None
     )
     release_status: Literal[
@@ -1030,8 +1082,7 @@ def _public_artifact_release(
         # Never held the crown: the source stays private (king-only release).
         release_status = "unavailable"
     elif available_at is None:
-        # Ever king, but on-chain weights not yet confirmed: withheld with no
-        # unlock time until commit-reveal confirms validators backed this miner.
+        # A crown or revealed weights alone do not establish completed earnings.
         release_status = "embargoed"
     else:
         release_status = "available" if now >= available_at else "embargoed"
@@ -1046,6 +1097,7 @@ def _public_artifact_release(
         finalized_at=finalized_at,
         crowned_at=first_crowned_at,
         weight_confirmed_at=weight_confirmed_at,
+        emission_confirmed_at=emission_confirmed_at,
         available_at=(
             available_at if release_status in ("embargoed", "available") else None
         ),
@@ -6851,6 +6903,7 @@ async def agent_pipeline(
         attempt.attempt_id: _public_terminal_screening_review(
             quarantines_by_attempt.get(attempt.attempt_id),
             artifact_sha256=agent.sha256,
+            attempt=attempt,
         )
         for attempt in attempts
     }
@@ -7244,6 +7297,7 @@ async def agent_pipeline(
                 )[2],
                 review_evidence=public_reviews_by_attempt[attempt.attempt_id][0],
                 review_finding=public_reviews_by_attempt[attempt.attempt_id][1],
+                review_notes=public_reviews_by_attempt[attempt.attempt_id][2],
             )
             for attempt in attempts
         ],
@@ -7429,10 +7483,10 @@ async def agent_artifact(
     )
     if release.status != "available" or score_quorum is None:
         detail = "source is awaiting a three-validator score quorum"
-        if king_reveal.weight_confirmed_at is None:
+        if king_reveal.emission_confirmed_at is None:
             detail = (
-                "source is awaiting on-chain confirmation that validator weights "
-                "were set on this king (commit-reveal)"
+                "source is awaiting confirmed winner emissions from a completed "
+                "tempo for this submission"
             )
         elif release.available_at is not None:
             detail = f"source is embargoed until {release.available_at.isoformat()}"

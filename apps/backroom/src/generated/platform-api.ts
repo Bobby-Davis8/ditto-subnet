@@ -6262,6 +6262,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/validator/weight-submission-receipt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Weight Receipt
+         * @description Durably acknowledge a signed commit claim without granting source release.
+         */
+        post: operations["submit_weight_receipt_api_v1_validator_weight_submission_receipt_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mcp": {
         parameters: {
             query?: never;
@@ -6640,6 +6660,7 @@ export interface components {
             current: components["schemas"]["ArtifactReleaseSettingsRevision"];
             /** History */
             history: components["schemas"]["ArtifactReleaseSettingsRevision"][];
+            release_gate: components["schemas"]["SourceReleaseGateStatus"];
         };
         /**
          * AdminAthRuling
@@ -16433,6 +16454,12 @@ export interface components {
              */
             composite_mad_multiplier: number;
             /**
+             * Integrity Double Check Mode
+             * @default off
+             * @enum {string}
+             */
+            integrity_double_check_mode: "off" | "observe" | "enforce";
+            /**
              * Min Axis Delta
              * @default 0.15
              */
@@ -17131,6 +17158,69 @@ export interface components {
             ditto_user_id?: string | null;
             /** Linked */
             linked: boolean;
+        };
+        /** FinalizedWeightAttempt */
+        FinalizedWeightAttempt: {
+            /**
+             * Attempt Id
+             * Format: uuid
+             */
+            attempt_id: string;
+            /** Ciphertext Hash */
+            ciphertext_hash: string;
+            /** Ciphertext Hex */
+            ciphertext_hex: string;
+            /** Commit Block */
+            commit_block: number;
+            /** Commit Block Hash */
+            commit_block_hash: string;
+            /** Extrinsic Hash */
+            extrinsic_hash: string;
+            /** Extrinsic Index */
+            extrinsic_index: number;
+            /** Normalized Weights */
+            normalized_weights: [
+                number,
+                number
+            ][];
+            /** Reveal Round */
+            reveal_round: number;
+            /** Version Key */
+            version_key: number;
+        };
+        /** FinalizedWeightReceipt */
+        FinalizedWeightReceipt: {
+            attempt: components["schemas"]["FinalizedWeightAttempt"];
+            /**
+             * Mechanism Id
+             * @default 0
+             * @constant
+             */
+            mechanism_id: 0;
+            /** Netuid */
+            netuid: number;
+            provenance: components["schemas"]["WeightProvenance"];
+            /** Request Digest */
+            request_digest: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             */
+            schema_version: 1;
+            /** Task Id */
+            task_id: number;
+            /** Validator Hotkey */
+            validator_hotkey: string;
+            /** Weights */
+            weights: {
+                [key: string]: number;
+            };
         };
         /**
          * FleetRelease
@@ -18305,6 +18395,11 @@ export interface components {
              * @description SHA-256 over the canonical JSON of entries plus the served fold markers. Two validators folding the same pin hold the same digest; it is what a validator echoes back so the platform can show which snapshot each weight vector came from.
              */
             ledger_digest?: string | null;
+            /**
+             * Ledger Snapshot Id
+             * @description Immutable ledger snapshot identity for commit provenance.
+             */
+            ledger_snapshot_id?: string | null;
             /**
              * Pinned At
              * @description When the pin was taken (UTC); equals generated_at on a pin.
@@ -19962,6 +20057,11 @@ export interface components {
              * @default 6
              */
             embargo_hours: number;
+            /**
+             * Emission Confirmed At
+             * @description Finalized block time of verified winner emissions for this exact submission in a completed tempo. The embargo starts here; null until actual earnings are confirmed.
+             */
+            emission_confirmed_at?: string | null;
             /** Finalized At */
             finalized_at?: string | null;
             /**
@@ -19976,7 +20076,7 @@ export interface components {
             status: "awaiting_quorum" | "under_review" | "embargoed" | "available" | "unavailable" | "withheld";
             /**
              * Weight Confirmed At
-             * @description When validators' revealed on-chain weights (post commit-reveal) were first seen set on this king. Source release is king-only and the embargo window is measured from this instant; null while a king still awaits on-chain confirmation.
+             * @description When validators' revealed on-chain weights (post commit-reveal) were first seen set on this king. This is not proof of earnings and does not start the disclosure embargo.
              */
             weight_confirmed_at?: string | null;
         };
@@ -22935,6 +23035,8 @@ export interface components {
             /** Review Evidence */
             review_evidence?: components["schemas"]["PublicScreeningReviewEvidence"][];
             review_finding?: components["schemas"]["PublicScreeningReviewFinding"] | null;
+            /** Review Notes */
+            review_notes?: components["schemas"]["PublicScreeningReviewNote"][];
             /** Screener Hotkey */
             screener_hotkey: string;
             /**
@@ -22972,6 +23074,29 @@ export interface components {
              */
             submitted_at: string;
         };
+        /** PublicScreeningInvariantAssessment */
+        PublicScreeningInvariantAssessment: {
+            /** Decisions */
+            decisions: components["schemas"]["PublicScreeningInvariantDecision"][];
+            /** Schema Version */
+            schema_version: number;
+        };
+        /** PublicScreeningInvariantDecision */
+        PublicScreeningInvariantDecision: {
+            /**
+             * Disposition
+             * @enum {string}
+             */
+            disposition: "pass" | "breach" | "inconclusive";
+            /** Evidence Indices */
+            evidence_indices: number[];
+            /** Invariant */
+            invariant: string;
+            /** Pass Clause */
+            pass_clause?: string | null;
+            /** Summary */
+            summary: string;
+        };
         /**
          * PublicScreeningReviewEvidence
          * @description One public-safe policy observation from a terminal cheating decision.
@@ -22993,6 +23118,7 @@ export interface components {
             categories: string[];
             /** Confidence */
             confidence: number;
+            invariant_assessment?: components["schemas"]["PublicScreeningInvariantAssessment"] | null;
             /** Locations */
             locations?: components["schemas"]["PublicScreeningReviewLocation"][];
             /** Reviewer Revision */
@@ -23016,6 +23142,32 @@ export interface components {
             line: number;
             /** Path */
             path: string;
+        };
+        /**
+         * PublicScreeningReviewNote
+         * @description Allowlisted public fields; future private protocol fields stay private.
+         */
+        PublicScreeningReviewNote: {
+            /** Category */
+            category: string;
+            /** Confidence */
+            confidence?: number | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "concern" | "cleared" | "observation";
+            /** Line */
+            line?: number | null;
+            /** Path */
+            path?: string | null;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "l1" | "l2" | "l3";
+            /** Summary */
+            summary: string;
         };
         /**
          * PublicSubmissionFamily
@@ -23987,6 +24139,7 @@ export interface components {
              * @default {
              *       "axis_mad_multiplier": 6,
              *       "composite_mad_multiplier": 6,
+             *       "integrity_double_check_mode": "off",
              *       "min_axis_delta": 0.15,
              *       "min_cohort_size": 8,
              *       "min_composite_delta": 0.1,
@@ -26200,6 +26353,11 @@ export interface components {
              */
             fanout_shadow_timeout_seconds: number;
             /**
+             * L2 Always Escalate
+             * @default false
+             */
+            l2_always_escalate: boolean;
+            /**
              * L2 Fallback Models
              * @default [
              *       "z-ai/glm-5.2",
@@ -26500,6 +26658,86 @@ export interface components {
          * @enum {string}
          */
         SourceDisclosure: "public" | "never";
+        /**
+         * SourceReleaseEligibilityRow
+         * @description Bounded receipt metadata, without raw validator payloads or source.
+         */
+        SourceReleaseEligibilityRow: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /**
+             * Crowned At
+             * Format: date-time
+             */
+            crowned_at: string;
+            /** Emission Block */
+            emission_block: number | null;
+            /** Emission Block Hash */
+            emission_block_hash: string | null;
+            /** Emission Confirmed At */
+            emission_confirmed_at: string | null;
+            /** Emission Epoch Index */
+            emission_epoch_index: number | null;
+            /** Emission Ledger Digest */
+            emission_ledger_digest: string | null;
+            /** Weight Confirmed At */
+            weight_confirmed_at: string | null;
+        };
+        /** SourceReleaseGateStatus */
+        SourceReleaseGateStatus: {
+            /**
+             * Automatic Confirmation Enabled
+             * @default false
+             */
+            automatic_confirmation_enabled: boolean;
+            /** Collector Blocked Reason */
+            collector_blocked_reason?: string | null;
+            /** Collector Cursor Block */
+            collector_cursor_block?: number | null;
+            /** Collector Cursor Hash */
+            collector_cursor_hash?: string | null;
+            /** Collector Runtime Code Hash */
+            collector_runtime_code_hash?: string | null;
+            /** Confirmed Kings */
+            confirmed_kings: number;
+            /**
+             * Last Payout Attributed
+             * @default false
+             */
+            last_payout_attributed: boolean;
+            /** Last Payout Block */
+            last_payout_block?: number | null;
+            /** Last Payout Blocked Reason */
+            last_payout_blocked_reason?: string | null;
+            /** Pending Kings */
+            pending_kings: number;
+            /**
+             * Pending Receipt Count
+             * @default 0
+             */
+            pending_receipt_count: number;
+            /** Rows */
+            rows: components["schemas"]["SourceReleaseEligibilityRow"][];
+            /** Rows Has More */
+            rows_has_more: boolean;
+            /**
+             * Rows Limit
+             * @default 25
+             */
+            rows_limit: number;
+            /**
+             * Unresolved Payout Count
+             * @default 0
+             */
+            unresolved_payout_count: number;
+            /** Version */
+            version: string;
+        };
         /**
          * SourceReviewAdjudication
          * @description Terminal clear/reject decision on a review that would otherwise hold.
@@ -27470,6 +27708,35 @@ export interface components {
              * @description SHA-256 hex digest of the stored transcript bytes.
              */
             transcript_sha256: string;
+        };
+        /** SubmitWeightReceiptRequest */
+        SubmitWeightReceiptRequest: {
+            receipt: components["schemas"]["FinalizedWeightReceipt"];
+            /** Signature */
+            signature: string;
+            /** Timestamp */
+            timestamp: number;
+        };
+        /** SubmitWeightReceiptResponse */
+        SubmitWeightReceiptResponse: {
+            /**
+             * Attempt Id
+             * Format: uuid
+             */
+            attempt_id: string;
+            /** Receipt Digest */
+            receipt_digest: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /**
+             * Stored
+             * @default true
+             * @constant
+             */
+            stored: true;
         };
         /**
          * SystemMetrics
@@ -29151,6 +29418,29 @@ export interface components {
             uid: number;
             /** Value */
             value: number;
+        };
+        /** WeightProvenance */
+        WeightProvenance: {
+            /** Bench Version */
+            bench_version: number;
+            /**
+             * Champion Agent Id
+             * Format: uuid
+             */
+            champion_agent_id: string;
+            /** Champion Artifact Sha256 */
+            champion_artifact_sha256: string;
+            /** Epoch Index */
+            epoch_index: number;
+            /** Ledger Digest */
+            ledger_digest: string;
+            /**
+             * Ledger Snapshot Id
+             * Format: uuid
+             */
+            ledger_snapshot_id: string;
+            /** Vector Digest */
+            vector_digest: string;
         };
         /**
          * WeightsFold
@@ -40991,6 +41281,55 @@ export interface operations {
             };
             /** @description No exact-profile confirmation work. */
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_weight_receipt_api_v1_validator_weight_submission_receipt_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-validator-hotkey"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitWeightReceiptRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubmitWeightReceiptResponse"];
+                };
+            };
+            /** @description Invalid validator identity, signature, or timestamp. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Receipt conflicts with its immutable job or ledger. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

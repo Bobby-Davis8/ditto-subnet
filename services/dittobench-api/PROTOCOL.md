@@ -199,8 +199,11 @@ The validator sends one `RunRequest` per case; the harness returns a
 }
 ```
 
-`inference_base_url` is additive-optional. For `bench_version` <= 12 the scorer
-leaves it empty and harnesses keep the process-wide inference URL. From
+`inference_base_url` is additive-optional. For `bench_version` <= 12, a sandbox-backed run receives an opaque
+`<gateway>/cases/<token>` URL for trace attribution only, with no exclusive
+window or scoring change. It is revoked when that `/run` ends (then returns
+401). Without a sandbox gateway the field is omitted. Build a separate model
+client per case; never cache one case URL for another case. From
 `bench_version` 13 the scorer sends the **case-scoped** form of the same
 source-bound broker route, `<gateway>/run/<case_id>` (the `case_id` is
 URL-path-escaped), and a harness that builds its model client from this field
@@ -217,8 +220,8 @@ currently has in flight, and -- when the claim names one of those cases -- the
 verified case id, so the relay's trace capture can file the call under its
 benchmark case under concurrent `/run`. Without any claim a serial run is still
 attributed exactly; a concurrent run records the candidate set. Harnesses built
-on `ditto-harness`'s `ChatModelConfig::OpenAiCompat` cannot set the header (no
-per-request headers) and should honor `inference_base_url` instead.
+on `ditto-harness`'s `ChatModelConfig::OpenAiCompat` can set headers fixed at model construction; a client shared across cases
+cannot dynamically re-stamp them. Prefer the per-case `inference_base_url`.
 
 **v13 attribution contract.** Under `bench_version >= 13` a chat completion
 made while several cases are in flight that names no case (neither the

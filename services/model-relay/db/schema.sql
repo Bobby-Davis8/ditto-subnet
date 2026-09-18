@@ -843,7 +843,13 @@ SET default_table_access_method = heap;
 CREATE TABLE public.agent_kingship (
     agent_id uuid NOT NULL,
     first_crowned_at timestamp with time zone DEFAULT now() NOT NULL,
-    weight_confirmed_at timestamp with time zone
+    weight_confirmed_at timestamp with time zone,
+    emission_confirmed_at timestamp with time zone,
+    emission_block bigint,
+    emission_block_hash text,
+    emission_epoch_index bigint,
+    emission_ledger_digest text,
+    emission_evidence jsonb
 );
 
 
@@ -4060,6 +4066,85 @@ CREATE TABLE public.screening_retry_overrides (
 
 
 --
+-- Name: source_emission_collector_cursors; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.source_emission_collector_cursors (
+    netuid integer NOT NULL,
+    block bigint NOT NULL,
+    block_hash text NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    runtime_code_hash text,
+    last_blocked_reason text
+);
+
+
+--
+-- Name: source_emission_collector_cursors_netuid_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.source_emission_collector_cursors_netuid_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: source_emission_collector_cursors_netuid_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.source_emission_collector_cursors_netuid_seq OWNED BY public.source_emission_collector_cursors.netuid;
+
+
+--
+-- Name: source_emission_payout_resolutions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.source_emission_payout_resolutions (
+    netuid integer NOT NULL,
+    block_hash text NOT NULL,
+    agent_id uuid NOT NULL,
+    artifact_sha256 text NOT NULL,
+    proof jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: source_emission_payouts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.source_emission_payouts (
+    netuid integer NOT NULL,
+    block_hash text NOT NULL,
+    block bigint NOT NULL,
+    proof jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    last_checked_at timestamp with time zone,
+    terminal boolean DEFAULT false NOT NULL,
+    blocked_reason text
+);
+
+
+--
+-- Name: source_emission_vector_bindings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.source_emission_vector_bindings (
+    netuid integer NOT NULL,
+    validator_hotkey text NOT NULL,
+    receipt_digest text,
+    block bigint NOT NULL,
+    reveal_block_hash text NOT NULL,
+    vector_digest text,
+    evidence jsonb NOT NULL
+);
+
+
+--
 -- Name: submission_deposit_address_revisions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4543,6 +4628,57 @@ CREATE TABLE public.validator_tickets (
 
 
 --
+-- Name: validator_weight_receipts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.validator_weight_receipts (
+    validator_hotkey text NOT NULL,
+    request_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    netuid integer NOT NULL,
+    receipt_digest text NOT NULL,
+    ciphertext_hash text NOT NULL,
+    receipt jsonb NOT NULL,
+    first_seen_at timestamp with time zone NOT NULL,
+    signed_at bigint NOT NULL,
+    signature text NOT NULL
+);
+
+
+--
+-- Name: validator_weight_requests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.validator_weight_requests (
+    validator_hotkey text NOT NULL,
+    request_id uuid NOT NULL,
+    netuid integer NOT NULL,
+    request_digest text NOT NULL,
+    request jsonb NOT NULL,
+    first_seen_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: validator_weights_fold_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.validator_weights_fold_history (
+    validator_hotkey text NOT NULL,
+    fold_digest text NOT NULL,
+    folded_at bigint NOT NULL,
+    vector_digest text NOT NULL,
+    epoch_index bigint,
+    ledger_digest text,
+    champion_agent_id uuid,
+    weights_fold jsonb NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature text NOT NULL,
+    signed_heartbeat jsonb
+);
+
+
+--
 -- Name: artifact_fetch_audit seq; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -4659,6 +4795,13 @@ ALTER TABLE ONLY public.screener_provider_settings_revisions ALTER COLUMN revisi
 --
 
 ALTER TABLE ONLY public.screener_review_settings_revisions ALTER COLUMN revision SET DEFAULT nextval('public.screener_review_settings_revisions_revision_seq'::regclass);
+
+
+--
+-- Name: source_emission_collector_cursors netuid; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_emission_collector_cursors ALTER COLUMN netuid SET DEFAULT nextval('public.source_emission_collector_cursors_netuid_seq'::regclass);
 
 
 --
@@ -6235,6 +6378,38 @@ ALTER TABLE ONLY public.screener_shadow_reviews
 
 
 --
+-- Name: source_emission_collector_cursors pk_source_emission_collector_cursors; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_emission_collector_cursors
+    ADD CONSTRAINT pk_source_emission_collector_cursors PRIMARY KEY (netuid);
+
+
+--
+-- Name: source_emission_payout_resolutions pk_source_emission_payout_resolutions; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_emission_payout_resolutions
+    ADD CONSTRAINT pk_source_emission_payout_resolutions PRIMARY KEY (netuid, block_hash);
+
+
+--
+-- Name: source_emission_payouts pk_source_emission_payouts; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_emission_payouts
+    ADD CONSTRAINT pk_source_emission_payouts PRIMARY KEY (netuid, block_hash);
+
+
+--
+-- Name: source_emission_vector_bindings pk_source_emission_vector_bindings; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_emission_vector_bindings
+    ADD CONSTRAINT pk_source_emission_vector_bindings PRIMARY KEY (netuid, validator_hotkey);
+
+
+--
 -- Name: submission_deposit_address_revisions pk_submission_deposit_address_revisions; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6328,6 +6503,30 @@ ALTER TABLE ONLY public.validator_queue_withdrawals
 
 ALTER TABLE ONLY public.validator_slot_settings_revisions
     ADD CONSTRAINT pk_validator_slot_settings_revisions PRIMARY KEY (revision);
+
+
+--
+-- Name: validator_weight_receipts pk_validator_weight_receipts; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.validator_weight_receipts
+    ADD CONSTRAINT pk_validator_weight_receipts PRIMARY KEY (validator_hotkey, request_id, attempt_id);
+
+
+--
+-- Name: validator_weight_requests pk_validator_weight_requests; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.validator_weight_requests
+    ADD CONSTRAINT pk_validator_weight_requests PRIMARY KEY (validator_hotkey, request_id);
+
+
+--
+-- Name: validator_weights_fold_history pk_validator_weights_fold_history; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.validator_weights_fold_history
+    ADD CONSTRAINT pk_validator_weights_fold_history PRIMARY KEY (validator_hotkey, fold_digest);
 
 
 --
@@ -6712,6 +6911,14 @@ ALTER TABLE ONLY public.screener_nodes
 
 ALTER TABLE ONLY public.upload_admission_reservations
     ADD CONSTRAINT uq_upload_admission_reservations_token UNIQUE (token);
+
+
+--
+-- Name: validator_weight_receipts uq_validator_weight_receipts_receipt_digest; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.validator_weight_receipts
+    ADD CONSTRAINT uq_validator_weight_receipts_receipt_digest UNIQUE (receipt_digest);
 
 
 --
@@ -7741,6 +7948,20 @@ CREATE INDEX validator_tickets_open_idx ON public.validator_tickets USING btree 
 --
 
 CREATE INDEX validator_tickets_provider_outage_idx ON public.validator_tickets USING btree (provider_outage_epoch) WHERE (provider_outage_epoch IS NOT NULL);
+
+
+--
+-- Name: validator_weight_receipts_ciphertext_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX validator_weight_receipts_ciphertext_idx ON public.validator_weight_receipts USING btree (netuid, validator_hotkey, ciphertext_hash);
+
+
+--
+-- Name: validator_weights_fold_history_lookup_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX validator_weights_fold_history_lookup_idx ON public.validator_weights_fold_history USING btree (validator_hotkey, folded_at);
 
 
 --

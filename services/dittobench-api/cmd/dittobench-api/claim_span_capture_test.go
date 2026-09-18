@@ -123,7 +123,7 @@ func TestClaimSpanCaptureIsNoOpBelowV13(t *testing.T) {
 	// Registering a /run case allocates no ledger below v13, and handleTool's
 	// recorder gate reads false so tool responses stream through untouched.
 	broker := &inferenceBroker{sessions: map[string]*brokerSession{"old": session, "new": v13Session()}}
-	if !broker.beginRunCase("old", "case-b") || session.claimSpanCases != nil {
+	if _, started := broker.beginRunCase("old", "case-b"); !started || session.claimSpanCases != nil {
 		t.Fatal("v12 beginRunCase must not allocate a claim-span ledger")
 	}
 	if broker.claimSpanCaptureEnabledFor("old") || broker.claimSpanCaptureEnabledFor("") || broker.claimSpanCaptureEnabledFor("missing") {
@@ -139,7 +139,7 @@ func TestClaimSpanCaptureIsNoOpBelowV13(t *testing.T) {
 // reports as no_model_completion instead of an unavailable (fail-open) read.
 func TestClaimSpanRegisteredCaseWithoutCallsSettlesEmpty(t *testing.T) {
 	broker := &inferenceBroker{sessions: map[string]*brokerSession{"sess": {benchVersion: protocol.BenchVersionV13}}}
-	if !broker.beginRunCase("sess", "case-silent") {
+	if _, started := broker.beginRunCase("sess", "case-silent"); !started {
 		t.Fatal("beginRunCase must register the case")
 	}
 	broker.endRunCase("sess", "case-silent")

@@ -261,17 +261,16 @@ func marshalSeedRequest(req protocol.SeedRequest, benchVersion int) ([]byte, err
 // non-memory tool calls through (so the validator observes the trajectory), and
 // the user_id the case's memory graph was seeded under (multi-graph isolation).
 // The zero value reproduces self-report behavior (no endpoint, default user).
+// InferenceBaseURL, when set, is a validator-minted case-scoped broker URL sent
+// as inference_base_url for this case only. A harness that uses it makes its
+// model calls attributable to the case; one that ignores it keeps the
+// process-wide URL. Below v13 the opaque URL is revoked when the case ends;
+// v13 retains its claim-bearing /run/<case_id> route for provenance capture.
+// Build the model client per case, never share one case URL across cases.
 type CaseOptions struct {
-	ToolEndpoint string
-	UserID       string
-	BenchVersion int
-	// InferenceBaseURL is the case-scoped inference base URL the scorer mints
-	// for Bench v13+ (`<gateway>/run/<case_id>`): the same source-bound broker
-	// route with the case named in the path, so a harness that builds its model
-	// client from the request's inference_base_url -- the starter kit does --
-	// keeps every completion attributable under concurrent /run without setting
-	// a header. Empty below v13 and on the direct-harness path, in which case
-	// the wire field is omitted and the request bytes are unchanged.
+	ToolEndpoint     string
+	UserID           string
+	BenchVersion     int
 	InferenceBaseURL string
 }
 
@@ -431,7 +430,7 @@ func runOneWithTelemetry(ctx context.Context, harnessURL string, c protocol.Tool
 		BenchVersion: wireBenchVersion,
 		ToolEndpoint: opts.ToolEndpoint,
 		UserID:       opts.UserID,
-		// Case-scoped relay route (v13+); omitted when empty so earlier request
+		// Case-scoped relay route; omitted when empty so direct-harness request
 		// bytes are unchanged.
 		InferenceBaseURL: opts.InferenceBaseURL,
 	}

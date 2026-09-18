@@ -2168,8 +2168,8 @@ class TerraSolSourceReviewAgent:
         self._cache_ttl_seconds = cache_ttl_seconds
         if analyst_reasoning_effort != "model_default":
             raise ValueError("L2 analyst reasoning effort must be model_default")
-        if critic_reasoning_effort not in {"low", "medium"}:
-            raise ValueError("L2 critic reasoning effort must be low or medium")
+        if critic_reasoning_effort not in {"low", "medium", "high"}:
+            raise ValueError("L2 critic reasoning effort must be low, medium, or high")
         self._analyst_reasoning_effort = analyst_reasoning_effort
         self._critic_reasoning_effort = critic_reasoning_effort
         self._model = model
@@ -4133,9 +4133,11 @@ class LayeredSourceReviewAgent:
         clear_min_notes: int = 3,
         adjudicator: SourceReviewAdjudicator | None = None,
         adjudicator_reserve_seconds: float = 0.0,
+        always_escalate: bool = False,
     ) -> None:
         if mode not in {"off", "shadow", "enforce"}:
             raise ValueError("invalid L2 mode")
+        self._always_escalate = always_escalate
         self._l1 = l1
         self._l2 = l2
         self._mode = mode
@@ -4324,7 +4326,7 @@ class LayeredSourceReviewAgent:
         if review_deadline is None and deadline is not None and self._adjudicator:
             review_deadline = self._exploration_deadline(deadline)
         court_deadline = self._court_deadline(deadline, review_deadline)
-        always_escalate = os.environ.get(
+        always_escalate = self._always_escalate or os.environ.get(
             "SCREENER_L2_ALWAYS_ESCALATE", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
         should_escalate = (
@@ -5636,7 +5638,7 @@ _L2_FAILURE_CODES: Mapping[str, str] = {
     "L2 call graph has invalid collections": "call-graph-invalid",
     "L2 call graph is not an object": "call-graph-invalid",
     "L2 analyst reasoning effort must be model_default": "config-invalid",
-    "L2 critic reasoning effort must be low or medium": "config-invalid",
+    "L2 critic reasoning effort must be low, medium, or high": "config-invalid",
     "at least one starter provenance manifest is required": "config-invalid",
     "invalid L2 mode": "config-invalid",
     "L2 review exceeded lease budget": "lease-budget-exhausted",
