@@ -5,6 +5,10 @@ import (
 	"errors"
 )
 
+// Shared by generation and renderer-profile provenance so a generator change
+// cannot reuse a previously qualified provider/profile identity.
+const V13FactGenerationRevision = "v13-fact-generation-v6"
+
 // V13FactRenderEvent is private producer provenance. A transcript is not an
 // independent semantic approval: replay is allowed only after the enclosing
 // artifact's digest has been verified against trusted issuance authority.

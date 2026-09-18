@@ -57,6 +57,12 @@ func runFactProducer(seed int64, size, out string, profile privatesurface.Profil
 	if err != nil {
 		return errors.New("fact producer: generation failed; inspect private call receipts and budget checkpoint")
 	}
+	return writeFactCandidate(out, seed, size, profileSHA, identity, artifact, call)
+}
+
+// Shared native serialization boundary, also exercised by the cross-language
+// contract test with a test-only renderer. No test renderer exists in the CLI.
+func writeFactCandidate(out string, seed int64, size, profileSHA string, identity []byte, artifact gen.DatasetArtifact, call int) error {
 	pin, raw, err := artifact.SHA256Hex()
 	if err != nil {
 		return err

@@ -8,7 +8,7 @@ import (
 	"github.com/ditto-assistant/dittobench-datagen/universe"
 )
 
-const V13FactGenerationRevision = "v13-fact-generation-v5"
+const V13FactGenerationRevision = universe.V13FactGenerationRevision
 
 // V13FactGeneration stays inside the trusted private artifact. WorldSeed is
 // independent of the public lease seed and controls both memory and fixtures.

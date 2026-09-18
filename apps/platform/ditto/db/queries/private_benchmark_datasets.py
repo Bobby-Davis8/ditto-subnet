@@ -145,7 +145,7 @@ def _validate(identity, base_bytes, dataset_bytes, receipt_bytes) -> None:
         raise PrivateDatasetError("private artifact validation receipt mismatch")
 
 
-FACT_GENERATION_REVISION = "v13-fact-generation-v5"
+FACT_GENERATION_REVISION = "v13-fact-generation-v6"
 
 
 def _validate_fact(identity, manifest_bytes, dataset_bytes, receipt_bytes) -> None:
@@ -185,7 +185,6 @@ def _validate_fact(identity, manifest_bytes, dataset_bytes, receipt_bytes) -> No
         or manifest.get("qualified") is not False
         or not isinstance(events, list)
         or not events
-        or len(events) % 2
         or receipt.get("schema") != "private-fact-generation-validation-v1"
         or receipt.get("accepted") is not True
         or receipt.get("qualified") is not False
@@ -199,27 +198,34 @@ def _validate_fact(identity, manifest_bytes, dataset_bytes, receipt_bytes) -> No
         or receipt["render_event_count"] != len(events)
     ):
         raise PrivateDatasetError("private fact generation receipt mismatch")
-    # Native replay is authoritative; this structural fence additionally makes
-    # an incomplete/unpaired audit impossible to pin via this boundary.
-    for plan, check in zip(events[::2], events[1::2], strict=True):
-        if not isinstance(plan, dict) or not isinstance(check, dict):
-            raise PrivateDatasetError("private fact render audit invalid")
-        if not isinstance(plan.get("phase"), str):
-            raise PrivateDatasetError("private fact render audit invalid")
-        expected = {"plan": "check", "document_plan": "document_check"}.get(
-            plan.get("phase")
-        )
-        if expected is None or check.get("phase") != expected:
+    # Native replay is authoritative. Counterfactual programs reuse token plans
+    # with different bindings, yielding extra checks, not alternating pairs.
+    # Every newly authored plan must still be checked immediately. Native replay
+    # verifies the exact cached-plan reuse and complete generation schedule.
+    pending = None
+    have_program_plan = False
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("phase"), str):
             raise PrivateDatasetError("private fact render audit invalid")
         for key in ("request_sha256", "plan_sha256"):
+            if not isinstance(event.get(key), str) or not _DIGEST.fullmatch(event[key]):
+                raise PrivateDatasetError("private fact render audit invalid")
+        phase = event["phase"]
+        if pending is not None:
+            expected = "check" if pending["phase"] == "plan" else "document_check"
             if (
-                not isinstance(plan.get(key), str)
-                or not _DIGEST.fullmatch(plan[key])
-                or not isinstance(check.get(key), str)
-                or not _DIGEST.fullmatch(check[key])
-                or (key == "request_sha256" and check[key] != plan[key])
+                phase != expected
+                or event["request_sha256"] != pending["request_sha256"]
             ):
                 raise PrivateDatasetError("private fact render audit invalid")
+            have_program_plan = have_program_plan or expected == "check"
+            pending = None
+        elif phase in {"plan", "document_plan"}:
+            pending = event
+        elif phase != "check" or not have_program_plan:
+            raise PrivateDatasetError("private fact render audit invalid")
+    if pending is not None:
+        raise PrivateDatasetError("private fact render audit incomplete")
 
 
 def _read(

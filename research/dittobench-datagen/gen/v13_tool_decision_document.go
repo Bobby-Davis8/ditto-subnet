@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ditto-assistant/dittobench-datagen/internal/assistantvoice"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 	"github.com/ditto-assistant/dittobench-datagen/universe"
 )
@@ -146,7 +147,11 @@ func renderToolDecisionFacts(ctx context.Context, tools []protocol.ToolCase, ren
 		}
 		pair := &out[item.tool].PrerequisitePairs[item.pair]
 		pair.Prompt = p.Records[0]
-		pair.Response = "Noted."
+		// A single fixed acknowledgement exhausts the artifact's bounded
+		// duplicate-coda pool on some full seeds. Use the generic, fact-free
+		// voice bank, keyed only by this already opaque record identity. Empty
+		// prompt/session prevent adding domain-specific state assertions.
+		pair.Response = assistantvoice.Render(0, pair.PairID, "", "", "", "Noted.")
 		if item.kind == "record_accountant" {
 			// Keep the contact in the response: fetching the full memory, not
 			// merely reading its searchable user-text snippet, is the task.
