@@ -17,6 +17,7 @@ import (
 type V13FactRenderRequest struct {
 	Revision        string               `json:"revision"`
 	Subject         string               `json:"subject"`
+	SubjectEntity   string               `json:"subject_entity"`
 	SubjectMode     string               `json:"subject_mode"`
 	Facts           []V13RenderAssertion `json:"facts"`
 	Query           []V13RenderQuery     `json:"query"`
@@ -63,7 +64,7 @@ func V13FactRenderDigest(value any) (string, error) {
 }
 
 func v13FactRenderRequest(w v13FactWorld, s v13Schema, business bool) (V13FactRenderRequest, error) {
-	r := V13FactRenderRequest{Revision: "v13-structured-fact-render-v1", Bindings: map[string]string{}, SubjectMode: "named entity"}
+	r := V13FactRenderRequest{Revision: "v13-structured-fact-render-v2", Bindings: map[string]string{}, SubjectMode: "named entity"}
 	if _, err := w.evaluate(); err != nil {
 		return r, err
 	}
@@ -131,6 +132,10 @@ func v13FactRenderRequest(w v13FactWorld, s v13Schema, business bool) (V13FactRe
 		r.Query = append(r.Query, V13RenderQuery{q.Op, fields[q.Field], m})
 		r.QuestionAllowed = append(r.QuestionAllowed, fields[q.Field])
 	}
+	// The final materialized task supplies this exact entity/remit binding
+	// separately from the authored records. Make it explicit to the checker
+	// rather than asking it to infer an opaque alias from an unrelated remit.
+	r.SubjectEntity = bind("entity", w.Entity)
 	for i := range r.Required {
 		if len(r.Required[i]) == 0 {
 			return r, fmt.Errorf("render request has an unsupported empty record")

@@ -22,6 +22,9 @@ func TestV13FactRenderRequiresOpaqueRolesNotDescriptiveFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if r.Bindings[r.SubjectEntity] != w.Entity || r.Bindings[r.Subject] != w.Purpose {
+		t.Fatal("missing explicit entity/remit binding")
+	}
 	for i, a := range r.Facts {
 		required := false
 		for _, token := range r.Required[i] {

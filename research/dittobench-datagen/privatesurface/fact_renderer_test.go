@@ -107,7 +107,7 @@ func TestFactRendererDirectFactsAndIndependentCheck(t *testing.T) {
 				t.Error("wrong independent model")
 			}
 			provider = "Google"
-			content = []byte("{\"accepted\":true}")
+			content, _ = json.Marshal(map[string]string{"verdict": `{"accepted":true,"reason":"All facts and query preserved."}`})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": model, "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": string(content)}}}, "usage": map[string]any{"cost": 0.001, "prompt_tokens": 10, "completion_tokens": 10}})
 	}))
@@ -149,7 +149,8 @@ func TestFactRendererIdentityAndSemanticFailures(t *testing.T) {
 				if mode == "identity" {
 					provider = "WrongProvider"
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": "google/gemini-2.5-flash", "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": "{\"accepted\":false}"}}}, "usage": map[string]any{"cost": 0.001}})
+				content, _ := json.Marshal(map[string]string{"verdict": `{"accepted":false,"reason":"A required assertion is missing."}`})
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": "google/gemini-2.5-flash", "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": string(content)}}}, "usage": map[string]any{"cost": 0.001}})
 			}))
 			defer server.Close()
 			p := Profile{RewriteModel: "openai/gpt-4.1", RewriteProvider: "azure", ValidatorModel: "google/gemini-2.5-flash", ValidatorProvider: "google-vertex"}
@@ -169,5 +170,22 @@ func TestFactRendererIdentityAndSemanticFailures(t *testing.T) {
 				t.Fatal("rejected completion receipt was not retained")
 			}
 		})
+	}
+}
+
+func TestFactVerdictStrict(t *testing.T) {
+	for _, inner := range []string{`{"reason":"missing decision"}`, `{"accepted":null,"reason":"null"}`, `{"accepted":true,"reason":""}`, `{"accepted":true,"reason":"ok","extra":1}`, `{"accepted":true,"reason":"ok"} {}`} {
+		raw, _ := json.Marshal(map[string]string{"verdict": inner})
+		if _, _, err := decodeFactVerdict(raw); err == nil {
+			t.Fatalf("malformed verdict accepted: %s", inner)
+		}
+	}
+	for _, accepted := range []bool{true, false} {
+		inner, _ := json.Marshal(map[string]any{"accepted": accepted, "reason": "Explicit explanation."})
+		raw, _ := json.Marshal(map[string]string{"verdict": string(inner)})
+		got, reason, err := decodeFactVerdict(raw)
+		if err != nil || got != accepted || reason == "" {
+			t.Fatal("valid verdict lost")
+		}
 	}
 }
