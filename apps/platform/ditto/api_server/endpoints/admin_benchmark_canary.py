@@ -278,6 +278,13 @@ async def issue_benchmark_canary(
             or not capabilities.scorer_benchmarks.private_datasets
         ):
             raise HTTPException(409, "validator lacks private dataset capability")
+        if (
+            payload.bench_version == 13
+            and request.app.state.config.private_preparation.generation_mode
+            == "fact-world-v1"
+            and not capabilities.scorer_benchmarks.fact_world_datasets
+        ):
+            raise HTTPException(409, "validator lacks fact-world dataset capability")
         held = await _held_lease_slots(
             session, validator_hotkey=payload.validator_hotkey, now=now
         )

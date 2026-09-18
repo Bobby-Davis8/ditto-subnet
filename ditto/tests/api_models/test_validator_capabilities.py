@@ -182,6 +182,38 @@ def test_scorer_benchmark_capability_fails_closed_without_verified_identity() ->
         )
 
 
+def test_fact_capability_is_strict_and_preserves_legacy_signing_shape() -> None:
+    legacy = dict(
+        status="fresh_verified",
+        supported_bench_versions=(13,),
+        observed_at=1,
+        software_version="1.2.3",
+        source_revision=_REVISION,
+        private_datasets=True,
+    )
+    baseline = ScorerBenchmarkCapability(**legacy)
+    assert "fact_world_datasets" not in baseline.model_dump(mode="json")
+    assert (
+        baseline.model_dump_json()
+        == ScorerBenchmarkCapability(
+            **legacy, fact_world_datasets=False
+        ).model_dump_json()
+    )
+    assert (
+        ScorerBenchmarkCapability(**legacy, fact_world_datasets=True).model_dump(
+            mode="json"
+        )["fact_world_datasets"]
+        is True
+    )
+    for invalid in ("true", 1, None):
+        with pytest.raises(ValidationError):
+            ScorerBenchmarkCapability(**legacy, fact_world_datasets=invalid)
+    with pytest.raises(ValidationError, match="require private dataset support"):
+        ScorerBenchmarkCapability(
+            **(legacy | {"private_datasets": False}), fact_world_datasets=True
+        )
+
+
 def test_heartbeat_protocol_v7_requires_both_typed_identity_sections() -> None:
     payload = json.loads(_V7_VECTOR.read_text())["request"]
     payload["signature"] = "ab" * 64

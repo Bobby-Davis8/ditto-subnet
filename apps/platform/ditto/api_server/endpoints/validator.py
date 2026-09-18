@@ -381,21 +381,27 @@ async def _private_dataset_mode(
     session: AsyncSession,
     dataset_sha256: str | None,
     heartbeat: ValidatorHeartbeat | None,
-) -> Literal["platform-private-v1"] | None:
+) -> Literal["platform-private-v1", "platform-fact-world-v1"] | None:
     if dataset_sha256 is None:
         return None
-    dataset_id = await session.scalar(
-        select(PrivateBenchmarkDataset.dataset_id)
+    generation_mode = await session.scalar(
+        select(PrivateBenchmarkDataset.generation_mode)
         .where(PrivateBenchmarkDataset.dataset_sha256 == dataset_sha256)
         .limit(1)
     )
-    if dataset_id is None:
+    if generation_mode is None:
         return None
-    _assert_private_dataset_capability(heartbeat)
-    return "platform-private-v1"
+    _assert_private_dataset_capability(heartbeat, generation_mode)
+    return (
+        "platform-fact-world-v1"
+        if generation_mode == "fact-world-v1"
+        else "platform-private-v1"
+    )
 
 
-def _assert_private_dataset_capability(heartbeat: ValidatorHeartbeat | None) -> None:
+def _assert_private_dataset_capability(
+    heartbeat: ValidatorHeartbeat | None, generation_mode: str = "legacy-rewrite"
+) -> None:
     capabilities = heartbeat.capabilities if heartbeat is not None else None
     scorer = (
         capabilities.get("scorer_benchmarks")
@@ -403,9 +409,14 @@ def _assert_private_dataset_capability(heartbeat: ValidatorHeartbeat | None) -> 
         else None
     )
     if (
-        not isinstance(scorer, dict)
+        generation_mode not in {"legacy-rewrite", "fact-world-v1"}
+        or not isinstance(scorer, dict)
         or scorer.get("private_datasets") is not True
         or scorer.get("status") != "fresh_verified"
+        or (
+            generation_mode == "fact-world-v1"
+            and scorer.get("fact_world_datasets") is not True
+        )
     ):
         raise HTTPException(503, "validator cannot execute private datasets")
 
@@ -4103,7 +4114,10 @@ async def request_job(
             # the validator hotkey makes it distinct and publicly reproducible.
             # Persist the pin on the ticket so retries cannot rotate datasets.
             if ticket.bench_version == 13 and ticket.seed is None:
-                _assert_private_dataset_capability(heartbeat)
+                _assert_private_dataset_capability(
+                    heartbeat,
+                    request.app.state.config.private_preparation.generation_mode,
+                )
                 if seed_block_hash is None or generator.run_size is None:
                     raise HTTPException(503, "private V13 seed binding is unavailable")
             if seed_block_hash is not None and generator.run_size is not None:
@@ -5648,7 +5662,10 @@ async def request_top5_confirmation_job(
         )
         if canonical_version >= 3:
             if canonical_version == 13:
-                _assert_private_dataset_capability(heartbeat)
+                _assert_private_dataset_capability(
+                    heartbeat,
+                    request.app.state.config.private_preparation.generation_mode,
+                )
             if generator.run_size is None:
                 raise HTTPException(
                     status_code=503,

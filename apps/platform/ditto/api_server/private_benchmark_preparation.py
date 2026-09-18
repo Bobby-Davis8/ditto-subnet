@@ -24,9 +24,12 @@ class PrivatePreparationConfig:
     profile_sha256: str | None = None
     max_pending: int = 8
     max_daily: int = 8
+    generation_mode: str = "legacy-rewrite"
 
 
 def check_private_preparation_config(config: PrivatePreparationConfig) -> None:
+    if config.generation_mode not in {"legacy-rewrite", "fact-world-v1"}:
+        raise ApiServerConfigError("private preparation generation mode invalid")
     if (
         config.profile_sha256 is not None
         and not re.fullmatch(r"[0-9a-f]{64}", config.profile_sha256)
@@ -41,6 +44,9 @@ def parse_private_preparation_config() -> PrivatePreparationConfig:
             or None,
             max_pending=int(os.environ.get("DITTO_PRIVATE_DATASET_MAX_PENDING", "8")),
             max_daily=int(os.environ.get("DITTO_PRIVATE_DATASET_MAX_DAILY", "8")),
+            generation_mode=os.environ.get(
+                "DITTO_PRIVATE_DATASET_GENERATION_MODE", "legacy-rewrite"
+            ),
         )
     except ValueError:
         raise ApiServerConfigError("private preparation limits invalid") from None
@@ -48,10 +54,14 @@ def parse_private_preparation_config() -> PrivatePreparationConfig:
     return config
 
 
-def private_identity(seed: int, run_size: str, profile: str) -> PrivateDatasetIdentity:
+def private_identity(
+    seed: int, run_size: str, profile: str, generation_mode: str = "legacy-rewrite"
+) -> PrivateDatasetIdentity:
     # Deliberately no agent or validator identity: CRN comparisons using the
     # same seed/profile must use one object, not independently paraphrased sides.
-    return PrivateDatasetIdentity("bench-v13", seed, run_size, profile)
+    return PrivateDatasetIdentity(
+        "bench-v13", seed, run_size, profile, generation_mode=generation_mode
+    )
 
 
 async def resolve_private_dataset(
@@ -73,7 +83,9 @@ async def resolve_private_dataset(
         raise HTTPException(503, "private V13 production is not configured")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("private preparation requires an aware clock")
-    identity = private_identity(seed, run_size, config.profile_sha256)
+    identity = private_identity(
+        seed, run_size, config.profile_sha256, config.generation_mode
+    )
     identity_hash = identity.digest()
     status = "pending"
     async with sessions() as session, session.begin():

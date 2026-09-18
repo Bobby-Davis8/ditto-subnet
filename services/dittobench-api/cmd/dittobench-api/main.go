@@ -1436,6 +1436,9 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var privateArtifact *gen.DatasetArtifact
 	if req.PrivateDatasetMode != "" {
 		loaded, err := gen.DecodePrivateArtifact(req.PrivateDatasetBytes, req.ExpectedDatasetSHA256, seed, req.RunSize)
+		if err == nil {
+			err = validatePrivateArtifactMode(loaded, req.PrivateDatasetMode)
+		}
 		if err != nil {
 			s.store.Fail(runID, "private dataset integrity verification failed")
 			return

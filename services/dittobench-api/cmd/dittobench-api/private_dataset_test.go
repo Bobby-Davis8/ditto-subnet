@@ -110,6 +110,11 @@ func TestPrivateDatasetAdmission(t *testing.T) {
 	if err := validatePrivateDatasetRequest(valid, true); err != nil {
 		t.Fatal(err)
 	}
+	fact := valid
+	fact.PrivateDatasetMode = factWorldDatasetMode
+	if err := validatePrivateDatasetRequest(fact, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := validatePrivateDatasetRequest(submitRequest{BenchVersion: 12}, false); err != nil {
 		t.Fatal("public compatibility changed")
 	}
@@ -134,8 +139,22 @@ func TestPrivateDatasetAdmission(t *testing.T) {
 		t.Fatal("disabled capability advertised")
 	}
 	s.allowPrivateDatasets = true
-	if !reflect.DeepEqual(s.datasetFeatures(), []string{"git_subdir", privateDatasetMode}) {
+	if !reflect.DeepEqual(s.datasetFeatures(), []string{"git_subdir", privateDatasetMode, factWorldDatasetMode}) {
 		t.Fatal("enabled capability missing")
+	}
+}
+
+func TestPrivateArtifactModeCannotBeDowngraded(t *testing.T) {
+	legacy := gen.DatasetArtifact{}
+	fact := gen.DatasetArtifact{FactGeneration: &gen.V13FactGeneration{}}
+	if validatePrivateArtifactMode(legacy, privateDatasetMode) != nil ||
+		validatePrivateArtifactMode(fact, factWorldDatasetMode) != nil {
+		t.Fatal("matching modes rejected")
+	}
+	if validatePrivateArtifactMode(fact, privateDatasetMode) == nil ||
+		validatePrivateArtifactMode(legacy, factWorldDatasetMode) == nil ||
+		validatePrivateArtifactMode(fact, "unknown") == nil {
+		t.Fatal("generation mode mismatch accepted")
 	}
 }
 

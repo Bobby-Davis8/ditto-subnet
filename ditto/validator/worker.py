@@ -3822,7 +3822,8 @@ class ValidatorWorker:
         private_dataset_bytes = None
         if private_dataset_mode is not None:
             if (
-                private_dataset_mode != "platform-private-v1"
+                private_dataset_mode
+                not in {"platform-private-v1", "platform-fact-world-v1"}
                 or bench_version != 13
                 or not dataset_sha256
                 or ticket_deadline is None

@@ -595,7 +595,10 @@
       "private_dataset_mode": {
         "anyOf": [
           {
-            "const": "platform-private-v1",
+            "enum": [
+              "platform-private-v1",
+              "platform-fact-world-v1"
+            ],
             "type": "string"
           },
           {
@@ -796,7 +799,10 @@
           "private_dataset_mode": {
             "anyOf": [
               {
-                "const": "platform-private-v1",
+                "enum": [
+                  "platform-private-v1",
+                  "platform-fact-world-v1"
+                ],
                 "type": "string"
               },
               {
@@ -1028,7 +1034,10 @@
       "private_dataset_mode": {
         "anyOf": [
           {
-            "const": "platform-private-v1",
+            "enum": [
+              "platform-private-v1",
+              "platform-fact-world-v1"
+            ],
             "type": "string"
           },
           {
@@ -7364,6 +7373,10 @@
       },
       "ScorerBenchmarkCapability": {
         "properties": {
+          "fact_world_datasets": {
+            "default": false,
+            "type": "boolean"
+          },
           "observed_at": {
             "anyOf": [
               {

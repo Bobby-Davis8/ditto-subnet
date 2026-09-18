@@ -83,6 +83,7 @@ async def download_private_dataset(
                 run_size=row.run_size,
                 transform_profile_sha256=row.transform_profile_sha256,
                 bench_version=row.bench_version,
+                generation_mode=row.generation_mode,
             ),
         )
         if artifact is None:

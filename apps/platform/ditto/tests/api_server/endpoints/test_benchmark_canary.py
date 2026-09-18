@@ -126,6 +126,32 @@ async def issue(client, payload):
     return response.json()
 
 
+async def test_fact_canary_rejects_legacy_scorer_before_preparation(
+    client, ready, app, session_maker
+):
+    app.state.config = replace(
+        app.state.config,
+        private_preparation=replace(
+            app.state.config.private_preparation, generation_mode="fact-world-v1"
+        ),
+    )
+    response = await client.post(
+        "/api/v1/admin/benchmark-canaries", headers=_HEADERS, json=ready
+    )
+    assert response.status_code == 409, response.text
+    assert "fact-world dataset capability" in response.text
+    async with session_maker() as session:
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(PrivateBenchmarkPreparation)
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(select(func.count()).select_from(BenchmarkCanary)) == 0
+        )
+
+
 async def test_concurrent_issue_is_one_lease(client, ready, session_maker):
     responses = await asyncio.gather(
         *[

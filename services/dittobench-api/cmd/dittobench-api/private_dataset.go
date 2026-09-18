@@ -9,6 +9,7 @@ import (
 )
 
 const privateDatasetMode = "platform-private-v1"
+const factWorldDatasetMode = "platform-fact-world-v1"
 
 func executionToolFixtures(a gen.DatasetArtifact) map[string]toolexec.Fixture {
 	fixtures := make(map[string]toolexec.Fixture, len(a.ToolCases))
@@ -21,7 +22,7 @@ func executionToolFixtures(a gen.DatasetArtifact) map[string]toolexec.Fixture {
 func (s *server) datasetFeatures() []string {
 	features := []string{"git_subdir"}
 	if s.allowPrivateDatasets {
-		features = append(features, privateDatasetMode)
+		features = append(features, privateDatasetMode, factWorldDatasetMode)
 	}
 	return features
 }
@@ -30,13 +31,21 @@ func validatePrivateDatasetRequest(req submitRequest, enabled bool) error {
 	if req.PrivateDatasetMode == "" && len(req.PrivateDatasetBytes) == 0 {
 		return nil // Existing public contracts are unchanged.
 	}
-	if !enabled || req.PrivateDatasetMode != privateDatasetMode || req.BenchVersion != 13 {
+	if !enabled || (req.PrivateDatasetMode != privateDatasetMode && req.PrivateDatasetMode != factWorldDatasetMode) || req.BenchVersion != 13 {
 		return errors.New("private dataset mode unavailable")
 	}
 	if len(req.PrivateDatasetBytes) == 0 || len(req.PrivateDatasetBytes) > gen.MaxPrivateArtifactBytes || !canonicalSHA256(req.ExpectedDatasetSHA256) {
 		return errors.New("private dataset bytes and canonical digest required")
 	}
 	return nil
+}
+
+func validatePrivateArtifactMode(a gen.DatasetArtifact, mode string) error {
+	if (mode == factWorldDatasetMode && a.FactGeneration != nil) ||
+		(mode == privateDatasetMode && a.FactGeneration == nil) {
+		return nil
+	}
+	return errors.New("private dataset generation mode mismatch")
 }
 
 // privateExecutionSurfaces feeds the VERIFIED stored artifact into projection

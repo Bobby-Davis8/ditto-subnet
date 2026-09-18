@@ -1066,6 +1066,12 @@ class DittobenchClient:
                     and isinstance(payload.get("features"), list)
                     and "platform-private-v1" in payload["features"]
                 ),
+                fact_world_datasets=(
+                    13 in observed_versions
+                    and isinstance(payload.get("features"), list)
+                    and "platform-private-v1" in payload["features"]
+                    and "platform-fact-world-v1" in payload["features"]
+                ),
                 supported_bench_versions=observed_versions,
                 observed_at=observed_at,
                 software_version=software_version,
@@ -1377,7 +1383,8 @@ class DittobenchClient:
         body["dataset_sha256"] = dataset_sha256
         if private_dataset_mode is not None or private_dataset_bytes is not None:
             if (
-                private_dataset_mode != "platform-private-v1"
+                private_dataset_mode
+                not in {"platform-private-v1", "platform-fact-world-v1"}
                 or bench_version != 13
                 or not private_dataset_bytes
                 or len(private_dataset_bytes) > 32 << 20

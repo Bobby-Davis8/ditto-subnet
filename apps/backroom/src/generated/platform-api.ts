@@ -15569,7 +15569,7 @@ export interface components {
             /** Dataset Sha256 */
             dataset_sha256: string;
             /** Private Dataset Mode */
-            private_dataset_mode?: "platform-private-v1" | null;
+            private_dataset_mode?: ("platform-private-v1" | "platform-fact-world-v1") | null;
             /** Run Size */
             run_size: string;
             /** Seed */
@@ -18399,7 +18399,7 @@ export interface components {
             /** Minimum Screening Policy Version */
             minimum_screening_policy_version?: number | null;
             /** Private Dataset Mode */
-            private_dataset_mode?: "platform-private-v1" | null;
+            private_dataset_mode?: ("platform-private-v1" | "platform-fact-world-v1") | null;
             /** Requires Screened Image */
             requires_screened_image?: boolean | null;
             /**
@@ -25223,6 +25223,11 @@ export interface components {
          * @description Identity-bound benchmark support observed from the scorer sidecar.
          */
         ScorerBenchmarkCapability: {
+            /**
+             * Fact World Datasets
+             * @default false
+             */
+            fact_world_datasets: boolean;
             /** Observed At */
             observed_at?: number | null;
             /**
