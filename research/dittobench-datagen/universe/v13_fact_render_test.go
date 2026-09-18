@@ -13,6 +13,26 @@ type factRenderFixture struct {
 	reject        bool
 }
 
+func TestV13FactRenderRequiresOpaqueRolesNotDescriptiveFields(t *testing.T) {
+	w := v13FactWorld{Entity: "project", Purpose: "data room", Query: []v13FactQuery{{Op: "read", Field: "opaqueowner"}}}
+	for i, field := range []string{"opaqueowner", "planned milestone review date", "neutral note"} {
+		w.Facts = append(w.Facts, v13Fact{Entity: w.Entity, Field: field, Value: factValue("value", "text"), Mode: "static", Record: i})
+	}
+	r, err := v13FactRenderRequest(w, v13Schema{Owner: "opaqueowner"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, a := range r.Facts {
+		required := false
+		for _, token := range r.Required[i] {
+			required = required || token == a.Field
+		}
+		if required != (i == 0) {
+			t.Fatal("opaque and descriptive field requirements conflated")
+		}
+	}
+}
+
 func (f *factRenderFixture) Plan(_ context.Context, r V13FactRenderRequest) (V13FactRenderPlan, error) {
 	f.plans++
 	var p V13FactRenderPlan
