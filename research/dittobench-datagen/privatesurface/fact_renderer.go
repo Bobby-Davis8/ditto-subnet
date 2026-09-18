@@ -83,7 +83,7 @@ func (r *FactRenderer) Plan(ctx context.Context, request universe.V13FactRenderR
 		auditPlan := plan
 		a := FactRenderAudit{Phase: "author", RequestSHA256: requestSHA, PlanSHA256: planSHA, Accepted: resultErr == nil, Receipt: receipt, Plan: &auditPlan}
 		if resultErr != nil {
-			a.Failure = "author rejected"
+			a.Failure = resultErr.Error()
 		}
 		resultErr = errors.Join(resultErr, r.audit(a))
 	}()
@@ -127,7 +127,7 @@ func (r *FactRenderer) Check(ctx context.Context, request universe.V13FactRender
 		planSHA, _ := universe.V13FactRenderDigest(bound)
 		a := FactRenderAudit{Phase: "semantic", RequestSHA256: requestSHA, PlanSHA256: planSHA, Accepted: resultErr == nil, Receipt: receipt}
 		if resultErr != nil {
-			a.Failure = "semantic check rejected"
+			a.Failure = resultErr.Error()
 		}
 		resultErr = errors.Join(resultErr, r.audit(a))
 	}()

@@ -108,7 +108,10 @@ func v13FactRenderRequest(w v13FactWorld, s v13Schema, business bool) (V13FactRe
 			tokens = append(tokens, a.Date)
 		}
 		r.Required[f.Record] = append(r.Required[f.Record], a.Entity, a.Value)
-		if business && f.Mode != "independent" {
+		// Only opaque schema roles require literal field tokens. Ordinary
+		// descriptive fields (e.g. a neutral planned milestone date) may be
+		// expressed naturally and remain subject to independent checking.
+		if business && meaning[f.Field] != "" && f.Mode != "independent" {
 			r.Required[f.Record] = append(r.Required[f.Record], a.Field)
 		}
 		if a.Date != "" {
