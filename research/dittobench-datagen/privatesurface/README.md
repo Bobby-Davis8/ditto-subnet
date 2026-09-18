@@ -52,6 +52,12 @@ receipt, or a high fraction of changed surfaces, is not adversarial qualificatio
 and does not permit production activation. The separate worker can select it
 only with a matching approved executable and profile digest.
 
+The experimental literal mode now supplies exact counts and retry feedback for
+source-visible literals only. It never sends the rejected proposal or names an
+absent grading value. This prompt revision changes the literal-mode digest;
+earlier diagnostic artifacts do not qualify the revised profile. Legacy mode
+and its digest are unchanged. These hints do not relax any acceptance check.
+
 The CLI makes a new 0700 output directory, draws a nonzero cryptographic salt,
 and writes 0600 files with exclusive creation. Credentials come only from the
 trusted process's `OPENROUTER_API_KEY` environment. Never put that key, base

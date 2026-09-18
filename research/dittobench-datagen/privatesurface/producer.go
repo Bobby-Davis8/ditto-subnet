@@ -75,6 +75,9 @@ func (p Profile) Digest() (string, error) {
 		}
 	}
 	raw, _ := json.Marshal([]any{"private-surface-producer-v1", "typo-provenance-and-masking-v2-word-boundaries", "per-candidate-global-protection-v2-word-boundaries", "five-total-candidates-including-transient-and-truncation-retries-backoff-1s", "exact-byte-identity-validation-v1", "schema-bound-final-preservation-v1", p, rewritePrompt, contextPrompt, validatePrompt, retryPrompt, preservationPrompt, maxSurfaceAttempts, "zdr;data_collection=deny;no-fallback;strict-json", 0.7, 0.0, 4096})
+	if p.RewriteMode == "literal-text-v1" {
+		raw, _ = json.Marshal([]any{json.RawMessage(raw), literalCountPrompt})
+	}
 	return digest(raw), nil
 }
 
@@ -277,7 +280,35 @@ func (c *Client) ProbeChecked(ctx context.Context, req gen.PrivateSurfaceRequest
 	return c.probeOne(ctx, req, 0, check)
 }
 
-func (c *Client) probeOne(ctx context.Context, req gen.PrivateSurfaceRequest, attempt int, check func(string, string) error) (string, SurfaceReceipt, error) {
+const literalCountPrompt = ` protected_counts gives the required exact occurrence count of literals already visible in the source. Keep those counts, including ordinary words. retry_count_mismatches, when present, describes only visible literals changed by your previous proposal; correct them while rephrasing. No hidden grading values are supplied. Do not infer or add hidden answers.`
+
+type literalCount struct {
+	Literal  string `json:"literal"`
+	Required int    `json:"required"`
+	Observed *int   `json:"observed,omitempty"`
+}
+
+func visibleLiteralCounts(req gen.PrivateSurfaceRequest, previous string) ([]literalCount, []literalCount) {
+	var counts, mismatches []literalCount
+	seen := map[string]bool{}
+	for _, v := range req.Protected {
+		n := protectedtext.Count(req.Text, v)
+		if v == "" || seen[v] || n == 0 {
+			continue
+		}
+		seen[v] = true
+		counts = append(counts, literalCount{Literal: v, Required: n})
+		if previous != "" {
+			actual := protectedtext.Count(previous, v)
+			if actual != n {
+				mismatches = append(mismatches, literalCount{Literal: v, Required: n, Observed: &actual})
+			}
+		}
+	}
+	return counts, mismatches
+}
+
+func (c *Client) probeOne(ctx context.Context, req gen.PrivateSurfaceRequest, attempt int, check func(string, string) error, previous ...string) (string, SurfaceReceipt, error) {
 	masked, markers, restore, err := maskProtected(req.Text, req.Protected)
 	if err != nil {
 		return "", SurfaceReceipt{}, err
@@ -314,7 +345,20 @@ func (c *Client) probeOne(ctx context.Context, req gen.PrivateSurfaceRequest, at
 		prompt += preservationPrompt
 		rewriteKind = "null"
 	}
-	content, rewrite, err := c.complete(ctx, c.profile.RewriteModel, c.profile.RewriteProvider, prompt, map[string]any{"text": masked, "reference_text": req.Text, "protected": markers}, "text", rewriteKind, 0.7)
+	input := map[string]any{"text": masked, "reference_text": req.Text, "protected": markers}
+	if c.profile.RewriteMode == "literal-text-v1" {
+		prior := ""
+		if len(previous) > 0 {
+			prior = previous[0]
+		}
+		counts, mismatches := visibleLiteralCounts(req, prior)
+		input["protected_counts"] = counts
+		if len(mismatches) > 0 {
+			input["retry_count_mismatches"] = mismatches
+		}
+		prompt += literalCountPrompt
+	}
+	content, rewrite, err := c.complete(ctx, c.profile.RewriteModel, c.profile.RewriteProvider, prompt, input, "text", rewriteKind, 0.7)
 	if err != nil {
 		return "", SurfaceReceipt{}, err
 	}
@@ -434,8 +478,13 @@ func (c *Client) ProduceWithDiagnostics(ctx context.Context, base gen.DatasetArt
 				var err error
 				var rejected []SurfaceReceipt
 				var reasons []string
+				previous := ""
 				for attempt := 0; attempt < maxSurfaceAttempts; attempt++ {
-					after, receipt, err = c.probeOne(ctx, req, attempt, check)
+					after, receipt, err = c.probeOne(ctx, req, attempt, check, previous)
+					previous = ""
+					if errors.Is(err, errProtected) {
+						previous = after
+					}
 					if !errors.Is(err, errSemantic) && !errors.Is(err, errProtected) && !errors.Is(err, errTransient) && !errors.Is(err, errTruncated) {
 						break
 					}
