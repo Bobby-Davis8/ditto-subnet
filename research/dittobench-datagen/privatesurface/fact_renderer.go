@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -21,6 +22,7 @@ History 0 is initial and 1 is final superseding, not concurrent values. Dated ev
 Reject missing evidence, invented motives/background facts, assumed gender, reversed negation/chronology, role swaps, extra updates, and leading questions revealing graded answers. A business glossary binds opaque role names to field_meaning separately; do not require repetition. Stylistic freedom is allowed. When uncertain reject. Return only the accepted boolean.`
 
 type FactRenderAudit struct {
+	Attempt       int
 	Phase         string
 	RequestSHA256 string
 	PlanSHA256    string
@@ -58,7 +60,7 @@ func FactProfileDigest(profile Profile) (string, error) {
 	if _, err := profile.Digest(); err != nil {
 		return "", err
 	}
-	return universe.V13FactRenderDigest([]any{"fact-renderer-v2", profile, factAuthorPrompt, factCheckPrompt, "author-bindings-withheld", "exact-model-provider-identity", "three-record-token-plan", "no-retries", 0.8, 0.0})
+	return universe.V13FactRenderDigest([]any{"fact-renderer-v3", profile, factAuthorPrompt, factCheckPrompt, "author-bindings-withheld", "exact-model-provider-identity", "three-record-token-plan", "max-two-author-structural-attempts", "no-semantic-or-transport-retry", 0.8, 0.0})
 }
 
 func exactFactIdentity(receipt CompletionReceipt, model string) bool {
@@ -66,7 +68,22 @@ func exactFactIdentity(receipt CompletionReceipt, model string) bool {
 	return receipt.Model == model && providers[model] != "" && receipt.Provider == providers[model]
 }
 
-func (r *FactRenderer) Plan(ctx context.Context, request universe.V13FactRenderRequest) (plan universe.V13FactRenderPlan, resultErr error) {
+var errFactStructure = errors.New("fact renderer: structural rejection")
+var errFactAudit = errors.New("fact renderer: audit persistence failed")
+
+func (r *FactRenderer) Plan(ctx context.Context, request universe.V13FactRenderRequest) (universe.V13FactRenderPlan, error) {
+	feedback := ""
+	for attempt := 1; attempt <= 2; attempt++ {
+		plan, err := r.planAttempt(ctx, request, attempt, feedback)
+		if err == nil || !errors.Is(err, errFactStructure) || errors.Is(err, errFactAudit) || attempt == 2 {
+			return plan, err
+		}
+		feedback = err.Error()
+	}
+	panic("unreachable bounded author loop")
+}
+
+func (r *FactRenderer) planAttempt(ctx context.Context, request universe.V13FactRenderRequest, attempt int, feedback string) (plan universe.V13FactRenderPlan, resultErr error) {
 	requestSHA, err := universe.V13FactRenderDigest(request)
 	if err != nil {
 		return plan, err
@@ -77,15 +94,21 @@ func (r *FactRenderer) Plan(ctx context.Context, request universe.V13FactRenderR
 	// remain rebindable across counterfactual members of the same group.
 	authorRequest := request
 	authorRequest.Bindings = nil
-	raw, receipt, err := r.client.complete(ctx, p.RewriteModel, p.RewriteProvider, factAuthorPrompt, authorRequest, "text", "string", 0.8)
+	input := any(authorRequest)
+	if feedback != "" {
+		input = map[string]any{"facts": authorRequest, "structural_feedback": feedback, "instruction": "Compose a new plan from these same facts. Include every required token and every assertion. No earlier prose is supplied. Do not omit tuple components."}
+	}
+	raw, receipt, err := r.client.complete(ctx, p.RewriteModel, p.RewriteProvider, factAuthorPrompt, input, "text", "string", 0.8)
 	defer func() {
 		planSHA, _ := universe.V13FactRenderDigest(plan)
 		auditPlan := plan
-		a := FactRenderAudit{Phase: "author", RequestSHA256: requestSHA, PlanSHA256: planSHA, Accepted: resultErr == nil, Receipt: receipt, Plan: &auditPlan}
+		a := FactRenderAudit{Attempt: attempt, Phase: "author", RequestSHA256: requestSHA, PlanSHA256: planSHA, Accepted: resultErr == nil, Receipt: receipt, Plan: &auditPlan}
 		if resultErr != nil {
 			a.Failure = resultErr.Error()
 		}
-		resultErr = errors.Join(resultErr, r.audit(a))
+		if auditErr := r.audit(a); auditErr != nil {
+			resultErr = errors.Join(errFactAudit, resultErr, auditErr)
+		}
 	}()
 	if err != nil {
 		return plan, err
@@ -95,7 +118,7 @@ func (r *FactRenderer) Plan(ctx context.Context, request universe.V13FactRenderR
 	}
 	var text string
 	if err := decodeSingleField(raw, "text", &text); err != nil {
-		return plan, errors.New("fact renderer: invalid author response")
+		return plan, fmt.Errorf("%w: invalid author response", errFactStructure)
 	}
 	var wire struct {
 		Records  []string
@@ -104,17 +127,17 @@ func (r *FactRenderer) Plan(ctx context.Context, request universe.V13FactRenderR
 	dec := json.NewDecoder(strings.NewReader(text))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&wire) != nil || len(wire.Records) != 3 {
-		return plan, errors.New("fact renderer: invalid plan shape")
+		return plan, fmt.Errorf("%w: invalid plan shape", errFactStructure)
 	}
 	var extra any
 	if dec.Decode(&extra) != io.EOF {
-		return plan, errors.New("fact renderer: trailing plan data")
+		return plan, fmt.Errorf("%w: trailing plan data", errFactStructure)
 	}
 	copy(plan.Records[:], wire.Records)
 	plan.Question = wire.Question
 	_, err = universe.BindV13FactRenderPlan(request, plan)
 	if err != nil {
-		return plan, err
+		return plan, fmt.Errorf("%w: %v", errFactStructure, err)
 	}
 	return plan, nil
 }

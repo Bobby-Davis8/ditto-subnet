@@ -162,7 +162,7 @@ func BindV13FactRenderPlan(r V13FactRenderRequest, p V13FactRenderPlan) (V13Fact
 		}
 		for _, token := range required {
 			if seen[token] == 0 {
-				return "", fmt.Errorf("render omitted a required fact binding")
+				return "", fmt.Errorf("render omitted required token %s", token)
 			}
 		}
 		for _, n := range seen {
