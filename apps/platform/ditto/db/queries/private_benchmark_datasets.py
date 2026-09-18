@@ -46,10 +46,12 @@ class PrivateDatasetIdentity:
     run_size: str
     transform_profile_sha256: str
     bench_version: int = 13
+    generation_mode: str = "legacy-rewrite"
 
     def digest(self) -> str:
         if (
             self.bench_version != 13
+            or self.generation_mode not in {"legacy-rewrite", "fact-world-v1"}
             or type(self.seed) is not int
             or not 0 <= self.seed < 2**63
             or self.run_size not in {"small", "medium", "full"}
@@ -58,16 +60,20 @@ class PrivateDatasetIdentity:
             or not _DIGEST.fullmatch(self.transform_profile_sha256)
         ):
             raise PrivateDatasetError("invalid private dataset identity")
+        parts = [
+            "private-benchmark-dataset-v1",
+            self.scope,
+            self.bench_version,
+            self.seed,
+            self.run_size,
+            self.transform_profile_sha256,
+        ]
+        if self.generation_mode != "legacy-rewrite":
+            parts[0] = "private-benchmark-dataset-v2"
+            parts.append(self.generation_mode)
         return _sha(
             json.dumps(
-                [
-                    "private-benchmark-dataset-v1",
-                    self.scope,
-                    self.bench_version,
-                    self.seed,
-                    self.run_size,
-                    self.transform_profile_sha256,
-                ],
+                parts,
                 separators=(",", ":"),
                 ensure_ascii=True,
             ).encode()
@@ -112,6 +118,8 @@ def _object(body: bytes, maximum: int) -> dict:
 
 def _validate(identity, base_bytes, dataset_bytes, receipt_bytes) -> None:
     identity.digest()
+    if identity.generation_mode != "legacy-rewrite":
+        raise PrivateDatasetError("fact-world validation receipt is not supported yet")
     base = _object(base_bytes, MAX_ARTIFACT_BYTES)
     dataset = _object(dataset_bytes, MAX_ARTIFACT_BYTES)
     for obj in (base, dataset):
@@ -141,6 +149,7 @@ def _read(
 ) -> PrivateDatasetBytes:
     if (
         row.identity_sha256 != identity.digest()
+        or row.generation_mode != identity.generation_mode
         or row.scope != identity.scope
         or row.seed != identity.seed
         or row.bench_version != identity.bench_version
@@ -195,6 +204,7 @@ async def pin_private_dataset(
         insert(PrivateBenchmarkDataset)
         .values(
             dataset_id=uuid4(),
+            generation_mode=identity.generation_mode,
             identity_sha256=identity.digest(),
             scope=identity.scope,
             bench_version=identity.bench_version,

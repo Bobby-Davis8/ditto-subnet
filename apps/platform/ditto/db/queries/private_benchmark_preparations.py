@@ -50,6 +50,7 @@ def _identity(row: PrivateBenchmarkPreparation) -> PrivateDatasetIdentity:
         run_size=row.run_size,
         transform_profile_sha256=row.transform_profile_sha256,
         bench_version=row.bench_version,
+        generation_mode=row.generation_mode,
     )
     if row.identity_sha256 != identity.digest():
         raise PrivateDatasetError("private preparation identity mismatch")
@@ -66,18 +67,20 @@ async def request_private_preparation(
 ) -> UUID:
     """Idempotently reserve entropy once. Caller must commit before returning."""
     digest = identity.digest()
-    salt = bytes(8)
+    width = 16 if identity.generation_mode == "fact-world-v1" else 8
+    salt = bytes(width)
     for _ in range(2):
-        salt = secrets.token_bytes(8)
-        if salt != bytes(8):
+        salt = secrets.token_bytes(width)
+        if _valid_entropy(identity, salt):
             break
-    if salt == bytes(8):
+    if not _valid_entropy(identity, salt):
         raise PrivateDatasetError("private preparation entropy unavailable")
     try:
         await session.execute(
             insert(PrivateBenchmarkPreparation)
             .values(
                 preparation_id=uuid4(),
+                generation_mode=identity.generation_mode,
                 identity_sha256=digest,
                 scope=identity.scope,
                 bench_version=identity.bench_version,
@@ -100,6 +103,18 @@ async def request_private_preparation(
     if preparation_id is None:
         raise PrivateDatasetError("private preparation reservation unavailable")
     return preparation_id
+
+
+def _valid_entropy(identity: PrivateDatasetIdentity, raw: bytes) -> bool:
+    if identity.generation_mode == "legacy-rewrite":
+        return len(raw) == 8 and raw != bytes(8)
+    return (
+        identity.generation_mode == "fact-world-v1"
+        and len(raw) == 16
+        and raw[:8] not in {bytes(8), identity.seed.to_bytes(8, "big")}
+        and raw[8:] != bytes(8)
+        and raw[:8] != raw[8:]
+    )
 
 
 async def claim_private_preparation(

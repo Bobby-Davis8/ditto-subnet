@@ -78,6 +78,10 @@ class PrivateBenchmarkDataset(Base):
     __tablename__ = "private_benchmark_datasets"
     __table_args__ = (
         UniqueConstraint("identity_sha256"),
+        CheckConstraint(
+            "generation_mode IN ('legacy-rewrite', 'fact-world-v1')",
+            name="generation_mode",
+        ),
         CheckConstraint("bench_version = 13 AND seed >= 0", name="version_seed"),
         CheckConstraint("run_size IN ('small', 'medium', 'full')", name="run_size"),
         CheckConstraint("length(scope) BETWEEN 1 AND 256", name="scope"),
@@ -103,6 +107,9 @@ class PrivateBenchmarkDataset(Base):
     )
 
     dataset_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), primary_key=True)
+    generation_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="legacy-rewrite"
+    )
     identity_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     bench_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -136,8 +143,13 @@ class PrivateBenchmarkPreparation(Base):
             name="digest_format",
         ),
         CheckConstraint(
-            "octet_length(surface_salt) = 8 AND "
-            "surface_salt <> decode('0000000000000000', 'hex')",
+            "(generation_mode = 'legacy-rewrite' AND octet_length(surface_salt) = 8 AND "
+            "surface_salt <> decode('0000000000000000', 'hex')) OR "
+            "(generation_mode = 'fact-world-v1' AND octet_length(surface_salt) = 16 AND "
+            "substring(surface_salt from 1 for 8) <> decode('0000000000000000', 'hex') AND "
+            "substring(surface_salt from 9 for 8) <> decode('0000000000000000', 'hex') AND "
+            "substring(surface_salt from 1 for 8) <> substring(surface_salt from 9 for 8) AND "
+            "substring(surface_salt from 1 for 8) <> int8send(seed))",
             name="salt",
         ),
         CheckConstraint(
@@ -160,6 +172,9 @@ class PrivateBenchmarkPreparation(Base):
     )
 
     preparation_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), primary_key=True)
+    generation_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="legacy-rewrite"
+    )
     identity_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     bench_version: Mapped[int] = mapped_column(Integer, nullable=False)
