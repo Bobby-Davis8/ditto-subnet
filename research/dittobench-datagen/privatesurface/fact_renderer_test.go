@@ -189,3 +189,17 @@ func TestFactVerdictStrict(t *testing.T) {
 		}
 	}
 }
+
+func TestFactCheckerReceivesResolvedAssertions(t *testing.T) {
+	r := factRequestFixture()
+	r.SubjectEntity = "{{value0}}"
+	r.Facts = []universe.V13RenderAssertion{{Entity: "{{value0}}", Field: "{{subject0}}", Value: "{{value1}}", Date: "{{value2}}"}}
+	r.Query = []universe.V13RenderQuery{{Op: "read", Field: "{{subject0}}"}}
+	raw, err := json.Marshal(resolvedFactCheckTruth(r))
+	if err != nil || strings.Contains(string(raw), "{{") || !strings.Contains(string(raw), "Ada") || !strings.Contains(string(raw), "Bea") {
+		t.Fatal("unresolved or missing facts")
+	}
+	if r.Facts[0].Entity != "{{value0}}" {
+		t.Fatal("checker input mutated author authority")
+	}
+}
