@@ -65,7 +65,7 @@ func FactProfileDigest(profile Profile) (string, error) {
 }
 
 func exactFactIdentity(receipt CompletionReceipt, model string) bool {
-	providers := map[string]string{"openai/gpt-4.1": "Azure", "google/gemini-2.5-flash": "Google"}
+	providers := map[string]string{"openai/gpt-4.1": "Azure", "google/gemini-2.5-flash": "Google", "openai/gpt-5.4-mini": "Azure"}
 	return receipt.Model == model && providers[model] != "" && receipt.Provider == providers[model]
 }
 
