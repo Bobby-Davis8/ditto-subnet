@@ -21,7 +21,7 @@ from ditto.tests import pgharness
 from ditto.tests.db.queries import test_coding_certification_canary_safety as canary
 
 _REVISION = "c7a2e5d19b43"
-_PARENT = "b63d4c1f820a"
+_PARENT = "4b7f09043317"
 
 
 def _alembic(target: pgharness.Dsn, action: str, revision: str) -> None:
