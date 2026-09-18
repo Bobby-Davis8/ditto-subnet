@@ -3,6 +3,7 @@ package universe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,38 @@ import (
 type factRenderFixture struct {
 	plans, checks int
 	reject        bool
+}
+
+func TestV13DatedPlanCannotInferRecordChronology(t *testing.T) {
+	w := v13FactWorld{Entity: "project", Purpose: "work", Query: []v13FactQuery{{Op: "read", Field: "role"}}}
+	for i := 0; i < 3; i++ {
+		w.Facts = append(w.Facts, v13Fact{Entity: w.Entity, Field: fmt.Sprintf("role%d", i), Value: factValue("value", "text"), Mode: "static", Record: i})
+	}
+	w.Query[0].Field = "role0"
+	r, err := v13FactRenderRequest(w, v13Schema{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := (&factRenderFixture{}).Plan(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Facts[0].Mode = "dated"
+	for _, word := range []string{"Later", "earlier", "then", "subsequently", "afterward"} {
+		bad := p
+		bad.Records[0] = word + " " + bad.Records[0]
+		if _, err := BindV13FactRenderPlan(r, bad); err == nil {
+			t.Fatal("date chronology inferred from record order")
+		}
+	}
+	if _, err := BindV13FactRenderPlan(r, p); err != nil {
+		t.Fatal(err)
+	}
+	r.Facts[0].Mode = "history"
+	p.Records[0] = "Later " + p.Records[0]
+	if _, err := BindV13FactRenderPlan(r, p); err != nil {
+		t.Fatal("explicit history chronology rejected")
+	}
 }
 
 func TestV13FactRenderRequiresOpaqueRolesNotDescriptiveFields(t *testing.T) {
