@@ -45,6 +45,13 @@ func (w v13FactWorld) evaluate() ([]v13FactValue, error) {
 		if f.Entity == "" || f.Field == "" || f.Value.Canonical == "" || f.Value.Surface == "" || f.Value.Kind == "" || f.Record < 0 || f.Record > 2 {
 			return nil, fmt.Errorf("incomplete fact")
 		}
+		aliasBound := f.Value.Surface == f.Value.Canonical
+		for _, alias := range f.Value.Accept {
+			aliasBound = aliasBound || f.Value.Surface == alias
+		}
+		if !aliasBound {
+			return nil, fmt.Errorf("surface alias is not bound to canonical fact")
+		}
 		switch f.Mode {
 		case "static", "independent":
 		case "history":
@@ -77,6 +84,9 @@ func (w v13FactWorld) evaluate() ([]v13FactValue, error) {
 		for _, f := range matched {
 			if f.Mode != mode {
 				return nil, fmt.Errorf("mixed evidence semantics")
+			}
+			if f.Value.Kind != matched[0].Value.Kind {
+				return nil, fmt.Errorf("mixed value types for one field")
 			}
 		}
 		switch q.Op {
@@ -332,6 +342,7 @@ func v13FactDistractor(d *v13Draws, s v13Schema, g v13Group, counter bool) ([]v1
 		c := V13StatusClasses[g.Classes[3]]
 		v := factValue(c.Canonical, protocol.ClaimKindStatus, c.Accept...)
 		v.Surface = d.statusAlias(g.Classes[3])
+		v.Accept = append(v.Accept, v.Surface)
 		return []v13Fact{makeFact(s.Status, v)}, []string{v.Canonical, v.Surface}
 	case V13FamilyCurrentChannel:
 		c := V13ChannelClasses[g.Classes[3]]

@@ -166,3 +166,19 @@ func TestV13FactProgramsInputAndPresentation(t *testing.T) {
 		}
 	}
 }
+
+func TestV13FactWorldRejectsUnboundAliasAndTypeDrift(t *testing.T) {
+	w := v13FactWorld{Entity: "target", Purpose: "shipping", Query: []v13FactQuery{{"latest", "owner"}}, Facts: []v13Fact{
+		{Entity: "target", Field: "owner", Value: factValue("Ada", protocol.ClaimKindPerson), Mode: "history", Order: 0, Record: 0},
+		{Entity: "target", Field: "owner", Value: factValue("Bea", protocol.ClaimKindPerson), Mode: "history", Order: 1, Record: 1},
+	}}
+	w.Facts[1].Value.Surface = "Cy"
+	if _, err := w.evaluate(); err == nil {
+		t.Fatal("accepted prose/answer drift")
+	}
+	w.Facts[1].Value.Surface = "Bea"
+	w.Facts[1].Value.Kind = protocol.ClaimKindStatus
+	if _, err := w.evaluate(); err == nil {
+		t.Fatal("accepted field type drift")
+	}
+}
