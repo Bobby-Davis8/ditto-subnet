@@ -51,7 +51,14 @@ func NewFactRenderer(profile Profile, key string, limit float64, checkpoint func
 }
 
 func (r *FactRenderer) ProfileDigest() (string, error) {
-	return universe.V13FactRenderDigest([]any{"fact-renderer-v2", r.client.profile, factAuthorPrompt, factCheckPrompt, "author-bindings-withheld", "exact-model-provider-identity", "three-record-token-plan", "no-retries", 0.8, 0.0})
+	return FactProfileDigest(r.client.profile)
+}
+
+func FactProfileDigest(profile Profile) (string, error) {
+	if _, err := profile.Digest(); err != nil {
+		return "", err
+	}
+	return universe.V13FactRenderDigest([]any{"fact-renderer-v2", profile, factAuthorPrompt, factCheckPrompt, "author-bindings-withheld", "exact-model-provider-identity", "three-record-token-plan", "no-retries", 0.8, 0.0})
 }
 
 func exactFactIdentity(receipt CompletionReceipt, model string) bool {
