@@ -13,12 +13,20 @@ import (
 )
 
 func TestFactDocumentTransportBoundaries(t *testing.T) {
-	for _, mode := range []string{"success", "retry", "exhaust", "identity", "semantic", "checker-identity", "audit", "invalid-source"} {
+	for _, mode := range []string{"success", "retry", "exhaust", "identity", "semantic", "checker-identity", "audit", "invalid-source", "long", "long-semantic"} {
 		t.Run(mode, func(t *testing.T) {
 			request := universe.V13FactDocumentRequest{Revision: universe.V13FactDocumentRevision, Domain: "story", Bindings: map[string]string{"{{owner0}}": "Ada", "{{owner1}}": "Bea"}, Records: []universe.V13FactDocumentRecord{
 				{MinBytes: 1, MaxBytes: 200, Assertions: []universe.V13DocumentAssertion{{Kind: "owner", Relation: "initial", Arguments: map[string]string{"person": "{{owner0}}"}}}},
 				{MinBytes: 1, MaxBytes: 200, Assertions: []universe.V13DocumentAssertion{{Kind: "owner", Relation: "supersedes initial", Arguments: map[string]string{"person": "{{owner1}}"}}}},
 			}}
+			long := strings.HasPrefix(mode, "long")
+			if long {
+				for i := range request.Records {
+					request.Records[i].MinBytes = 1800
+					request.Records[i].MaxBytes = 4600
+					request.Records[i].InteriorFacts = true
+				}
+			}
 			calls, authors, checks := 0, 0, 0
 			var audits []FactRenderAudit
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -38,9 +46,24 @@ func TestFactDocumentTransportBoundaries(t *testing.T) {
 						t.Error("author received private bindings or prose")
 					}
 					schema := body["response_format"].(map[string]any)["json_schema"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)["plan"].(map[string]any)
-					recs := schema["properties"].(map[string]any)["records"].(map[string]any)
-					if recs["minItems"] != float64(1) || recs["maxItems"] != float64(1) || schema["additionalProperties"] != false {
-						t.Error("document schema not exact")
+					if long {
+						system := body["messages"].([]any)[0].(map[string]any)["content"].(string)
+						if !strings.Contains(system, factDocumentLayoutPrompt) || strings.Contains(system, factDocumentCompactPrompt) {
+							t.Error("long author instructions mixed with compact mode")
+						}
+						props := schema["properties"].(map[string]any)
+						if len(props) != 3 || props["opening"] == nil || props["evidence"] == nil || props["closing"] == nil {
+							t.Error("missing long-record section schema")
+						}
+					} else {
+						system := body["messages"].([]any)[0].(map[string]any)["content"].(string)
+						if !strings.Contains(system, factDocumentCompactPrompt) || strings.Contains(system, factDocumentLayoutPrompt) || strings.Contains(system, "450-550") {
+							t.Error("compact author received long-record instructions")
+						}
+						recs := schema["properties"].(map[string]any)["records"].(map[string]any)
+						if recs["minItems"] != float64(1) || recs["maxItems"] != float64(1) || schema["additionalProperties"] != false {
+							t.Error("document schema not exact")
+						}
 					}
 					plan := universe.V13FactDocumentPlan{Records: []string{"Initial owner: {{owner0}}."}}
 					if strings.Contains(user, "{{owner1}}") {
@@ -56,6 +79,9 @@ func TestFactDocumentTransportBoundaries(t *testing.T) {
 						t.Error("missing retry feedback")
 					}
 					content, _ = json.Marshal(map[string]any{"plan": plan})
+					if long {
+						content, _ = json.Marshal(map[string]any{"plan": map[string]string{"opening": strings.Repeat("a", 1000), "evidence": plan.Records[0], "closing": strings.Repeat("b", 1000)}})
+					}
 					if mode == "identity" {
 						provider = "wrong"
 					}
@@ -71,7 +97,7 @@ func TestFactDocumentTransportBoundaries(t *testing.T) {
 					if mode == "checker-identity" {
 						provider = "wrong"
 					}
-					content, _ = json.Marshal(map[string]any{"verdict": map[string]any{"accepted": mode != "semantic", "reason": "fixture verdict"}})
+					content, _ = json.Marshal(map[string]any{"verdict": map[string]any{"accepted": mode != "semantic" && mode != "long-semantic", "reason": "fixture verdict"}})
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "model": model, "provider": provider, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"content": string(content)}}}, "usage": map[string]any{"cost": 0.001}})
 			}))
@@ -91,17 +117,21 @@ func TestFactDocumentTransportBoundaries(t *testing.T) {
 				request.Bindings = nil
 			}
 			got, err := universe.RenderV13FactDocument(context.Background(), request, r)
-			wantSuccess := mode == "success" || mode == "retry"
+			wantSuccess := mode == "success" || mode == "retry" || mode == "long"
 			if (err == nil) != wantSuccess {
 				t.Fatalf("unexpected outcome: %v", err)
 			}
-			if wantSuccess && (got.Records[0] != "Initial owner: Ada." || checks != 1) {
+			wantFirst := "Initial owner: Ada."
+			if long {
+				wantFirst = strings.Repeat("a", 1000) + "\n\n" + wantFirst + "\n\n" + strings.Repeat("b", 1000)
+			}
+			if wantSuccess && (got.Records[0] != wantFirst || checks != 1) {
 				t.Fatal("unchecked or incorrectly bound output")
 			}
 			if !wantSuccess && len(got.Records) != 0 {
 				t.Fatal("partial output escaped")
 			}
-			wantCalls := map[string]int{"success": 3, "retry": 4, "exhaust": 2, "identity": 1, "semantic": 3, "checker-identity": 3, "audit": 1, "invalid-source": 0}[mode]
+			wantCalls := map[string]int{"success": 3, "retry": 4, "exhaust": 2, "identity": 1, "semantic": 3, "checker-identity": 3, "audit": 1, "invalid-source": 0, "long": 3, "long-semantic": 3}[mode]
 			if calls != wantCalls || len(audits) != calls {
 				t.Fatalf("unexpected calls/audits: %d/%d want %d", calls, len(audits), wantCalls)
 			}
