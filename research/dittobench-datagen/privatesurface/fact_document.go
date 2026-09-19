@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/ditto-assistant/dittobench-datagen/universe"
@@ -120,6 +121,16 @@ func (r *FactRenderer) documentAttempt(ctx context.Context, request universe.V13
 		}
 	}
 	if _, err := universe.BindV13FactDocument(request, plan); err != nil {
+		var missing []string
+		for token := range request.Bindings {
+			if !strings.Contains(strings.Join(plan.Records, "\n"), token) {
+				missing = append(missing, token)
+			}
+		}
+		sort.Strings(missing)
+		if len(missing) > 0 {
+			return plan, fmt.Errorf("%w: %v; missing opaque tokens: %s", errFactStructure, err, strings.Join(missing, ", "))
+		}
 		return plan, fmt.Errorf("%w: %v", errFactStructure, err)
 	}
 	return plan, nil

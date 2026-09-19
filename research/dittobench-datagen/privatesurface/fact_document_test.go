@@ -78,6 +78,9 @@ func TestFactDocumentTransportBoundaries(t *testing.T) {
 					if mode == "retry" && authors == 2 && (!strings.Contains(user, "structural_feedback") || !strings.Contains(user, "missing an assigned argument token")) {
 						t.Error("missing retry feedback")
 					}
+					if mode == "retry" && authors == 2 && !strings.Contains(user, "missing opaque tokens: {{owner0}}") {
+						t.Error("retry feedback does not identify missing opaque token")
+					}
 					content, _ = json.Marshal(map[string]any{"plan": plan})
 					if long {
 						content, _ = json.Marshal(map[string]any{"plan": map[string]string{"opening": strings.Repeat("a", 1000), "evidence": plan.Records[0], "closing": strings.Repeat("b", 1000)}})
