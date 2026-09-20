@@ -159,7 +159,10 @@ _SYSTEM_CA_BUNDLE_CANDIDATES = (
     "/etc/ssl/cert.pem",
 )
 _VALIDATOR_SANDBOX_USER = "65532:65532"
-_VALIDATOR_SANDBOX_TMPFS = "/tmp:rw,noexec,nosuid,nodev,size=512m"
+_VALIDATOR_SANDBOX_TMPFS_SIZE = "512m"
+_VALIDATOR_SANDBOX_TMPFS = (
+    f"/tmp:rw,noexec,nosuid,nodev,size={_VALIDATOR_SANDBOX_TMPFS_SIZE}"
+)
 _VALIDATOR_SANDBOX_MEMORY = "3g"
 _VALIDATOR_SANDBOX_CPUS = "2"
 _VALIDATOR_SANDBOX_PIDS = "512"
@@ -213,12 +216,37 @@ _DOCKER_INFRASTRUCTURE_MARKERS = (
 
 
 @dataclass(frozen=True)
+class _SandboxUsage:
+    """What one smoke container actually consumed of the sandbox envelope."""
+
+    memory_peak_bytes: int | None = None
+    tmpfs_used_bytes: int | None = None
+    tmpfs_capacity_bytes: int | None = None
+
+    @property
+    def known(self) -> bool:
+        return self.memory_peak_bytes is not None or self.tmpfs_used_bytes is not None
+
+    def summary(self, memory_limit: str, tmpfs_limit: str) -> str:
+        parts = []
+        if self.memory_peak_bytes is not None:
+            parts.append(
+                f"memory peak {_mib(self.memory_peak_bytes)} of the {memory_limit} cap"
+            )
+        if self.tmpfs_used_bytes is not None:
+            parts.append(f"/tmp {_mib(self.tmpfs_used_bytes)} of {tmpfs_limit}")
+        return "; ".join(parts)
+
+
+@dataclass(frozen=True)
 class _SeedProbe:
     """Outcome of the bounded post-health ``POST /seed`` contract probe."""
 
     passed: bool
     code: str
     detail: str
+    usage: _SandboxUsage = _SandboxUsage()
+    """What the container consumed of the envelope while it served the probe."""
 
 
 @dataclass(frozen=True)
@@ -500,24 +528,65 @@ def _with_image_binding_advisory(
     )
 
 
+def _parse_sandbox_usage(output: str) -> _SandboxUsage:
+    """Parse the cgroup sample; mirrors the validator's parseRuntimeMetrics."""
+    section = ""
+    memory_peak: int | None = None
+    tmpfs_used: int | None = None
+    tmpfs_capacity: int | None = None
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line in {"__memory_peak__", "__tmpfs__"}:
+            section = line
+            continue
+        if not line:
+            continue
+        if section == "__memory_peak__":
+            if line.isdigit():
+                memory_peak = int(line)
+        elif section == "__tmpfs__":
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            capacity, used = fields[-5], fields[-4]
+            if capacity.isdigit() and used.isdigit():
+                tmpfs_capacity = int(capacity) * 1024
+                tmpfs_used = int(used) * 1024
+    return _SandboxUsage(memory_peak, tmpfs_used, tmpfs_capacity)
+
+
+def _mib(value: int) -> str:
+    """Render a byte count in MiB for a bounded, public-safe evidence summary."""
+    return f"{value / (1024 * 1024):.0f} MiB"
+
+
 def _with_seed_probe_evidence(
     decision: ScreeningDecision, probe: _SeedProbe | None
 ) -> ScreeningDecision:
-    """Record a shadow ``/seed`` observation without changing the outcome.
+    """Record the ``/seed`` observation without changing the outcome.
 
-    The probe is additive while it runs in shadow: operators can see how many
-    images would fail the seeding contract, and on which failure class, before
-    any deployment promotes it to ``enforce``.
+    Two additive records. The failure class is what shadow mode exists for:
+    operators can see how many images would fail the seeding contract, and on
+    which class, before any deployment promotes the probe to ``enforce``. The
+    envelope sample is recorded for passing images too, because the question a
+    cap raises -- whether the fleet's images are anywhere near it -- cannot be
+    answered from rejections alone.
     """
-    if probe is None or probe.passed:
+    if probe is None:
         return decision
-    return replace(
-        decision,
-        evidence=(
-            *decision.evidence[:15],
-            PolicyEvidence("stable-core", probe.code, probe.detail[:240]),
-        ),
+    records = []
+    if not probe.passed:
+        records.append(PolicyEvidence("stable-core", probe.code, probe.detail[:240]))
+    summary = probe.usage.summary(
+        _VALIDATOR_SANDBOX_MEMORY, _VALIDATOR_SANDBOX_TMPFS_SIZE
     )
+    if summary:
+        records.append(
+            PolicyEvidence("stable-core", "seed-envelope-usage", summary[:240])
+        )
+    if not records:
+        return decision
+    return replace(decision, evidence=(*decision.evidence[:15], *records))
 
 
 def _gateway_call_count(path: str) -> int:
@@ -2674,12 +2743,15 @@ class BuildGate:
                     self._config.run_timeout_seconds,
                 ),
             )
+            usage = await self._sandbox_usage(container)
+            if usage.known:
+                seed_probe = replace(seed_probe, usage=usage)
             if not seed_probe.passed and self._config.seed_probe_mode == "enforce":
                 return (
                     _StageResult(
                         False,
                         await self._with_container_logs(
-                            seed_probe.detail,
+                            self._seed_detail_with_usage(seed_probe),
                             harness_container=container,
                             gateway_container=gateway_container,
                         ),
@@ -3002,6 +3074,42 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
             "seed-unreachable",
             f"{seed_path} returned no response within {timeout:.0f}s ({tail}).",
         )
+
+    def _seed_detail_with_usage(self, probe: _SeedProbe) -> str:
+        """The miner-facing reason, with what the container was using."""
+        summary = probe.usage.summary(
+            _VALIDATOR_SANDBOX_MEMORY, _VALIDATOR_SANDBOX_TMPFS_SIZE
+        )
+        if not summary:
+            return probe.detail
+        return f"{probe.detail} Observed at that point: {summary}."
+
+    async def _sandbox_usage(self, container: str) -> _SandboxUsage:
+        """Sample what the smoke container consumed of the sandbox envelope.
+
+        The screener runs the validator's exact resource envelope but has never
+        recorded what a submission actually uses inside it, so the only
+        published signal is the binary one: an image that crossed a cap. The
+        same cgroup files the validator already reads after a scored run
+        (``memory.peak``, ``df /tmp``) answer the operator question the caps
+        raise -- how much headroom a passing image has left -- for every
+        screened image rather than only the failures.
+
+        Best effort by construction: an image without a shell, or a runtime
+        without cgroup v2, simply reports nothing and screening is unchanged.
+        """
+        script = (
+            "printf '%s\n' __memory_peak__\n"
+            "cat /sys/fs/cgroup/memory.peak 2>/dev/null || true\n"
+            "printf '%s\n' __tmpfs__\n"
+            "df -Pk /tmp 2>/dev/null | tail -n 1 || true\n"
+        )
+        code, out = await self._run(
+            ["exec", container, "/bin/sh", "-c", script], timeout=10.0
+        )
+        if code != 0:
+            return _SandboxUsage()
+        return _parse_sandbox_usage(out)
 
     async def _container_liveness(self, container: str) -> tuple[str, bool]:
         """Return ``(lifecycle, oom_killed)`` for a smoke container."""

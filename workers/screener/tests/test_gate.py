@@ -2355,6 +2355,27 @@ def test_with_tool_endpoint_fills_only_tool_declaring_requests() -> None:
     assert "tool_endpoint" not in original
 
 
+_USAGE_SAMPLE = (
+    "__memory_peak__\n412000000\n__tmpfs__\ntmpfs 524288 12345 511943 3% /tmp\n"
+)
+
+
+def _usage_run(
+    calls: list[list[str]], *, sample: str = _USAGE_SAMPLE, exit_code: int = 0
+) -> Callable[..., Any]:
+    """`_ok_run` that answers the cgroup sample the usage probe reads."""
+    ok = _ok_run(calls)
+
+    async def run(
+        args: list[str], *, stdin: Any = None, **kwargs: Any
+    ) -> tuple[int, str]:
+        if args[0] == "exec" and "/bin/sh" in args:
+            return exit_code, sample
+        return await ok(args, stdin=stdin, **kwargs)
+
+    return run
+
+
 def _seed_probe_run(
     calls: list[list[str]],
     *,
@@ -2504,3 +2525,54 @@ async def test_seed_probe_reports_a_harness_exit_before_any_response(
 
     assert result.outcome == ScreeningOutcome.DETERMINISTIC_REJECT
     assert any(item.code == "seed-exit" for item in result.evidence)
+
+
+async def test_envelope_usage_is_recorded_for_a_passing_image(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(make_config(), _usage_run(calls), tarball=tarball)
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.PASS
+    usage = next(i for i in result.evidence if i.code == "seed-envelope-usage")
+    # A passing image is exactly the case rejections cannot answer: how much of
+    # the envelope the fleet actually uses.
+    assert "393 MiB" in usage.summary
+    assert "3g" in usage.summary
+    assert "12 MiB" in usage.summary
+
+
+async def test_envelope_usage_is_skipped_when_the_image_has_no_shell(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(),
+        _usage_run(calls, sample="exec failed: no /bin/sh", exit_code=126),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.PASS
+    assert not any(i.code == "seed-envelope-usage" for i in result.evidence)
+
+
+def test_sandbox_usage_parses_the_cgroup_sample() -> None:
+    usage = gate_module._parse_sandbox_usage(_USAGE_SAMPLE)
+
+    assert usage.memory_peak_bytes == 412000000
+    assert usage.tmpfs_used_bytes == 12345 * 1024
+    assert usage.tmpfs_capacity_bytes == 524288 * 1024
+    assert usage.known
+
+
+def test_sandbox_usage_is_unknown_on_an_unreadable_sample() -> None:
+    usage = gate_module._parse_sandbox_usage("cat: can't open: No such file")
+
+    assert not usage.known
+    assert usage.summary("3g", "512m") == ""
