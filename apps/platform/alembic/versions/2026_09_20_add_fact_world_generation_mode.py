@@ -1,7 +1,7 @@
 """Version private generation identity and reserve both fact-world draws.
 
 Revision ID: c2198f0a6e43
-Revises: b2af680e139d
+Revises: e804a171db92
 """
 
 import sqlalchemy as sa
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "c2198f0a6e43"
-down_revision = "b2af680e139d"
+down_revision = "e804a171db92"
 branch_labels = None
 depends_on = None
 
