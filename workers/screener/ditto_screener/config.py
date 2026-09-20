@@ -110,6 +110,23 @@ class ScreenerConfig:
     container_port: int
     """Port the harness serves on inside the container (contract: ``8080``)."""
 
+    seed_path: str
+    """Harness seeding path to probe after health (contract: ``/seed``)."""
+
+    seed_probe_mode: str
+    """How the post-health ``/seed`` probe participates: ``off``, ``shadow``,
+    or ``enforce``.
+
+    Screening proves the image builds and answers ``/health``; scoring starts at
+    ``/seed``. An image that boots but cannot persist state passes screening
+    today, fails on every validator's first seeding wave, and lands on an
+    operator as a deferred ticket. ``shadow`` records that signal without
+    changing any outcome; ``enforce`` turns it into a deterministic contract
+    failure with an actionable reason."""
+
+    seed_probe_timeout_seconds: float
+    """Deadline for the single post-health ``/seed`` probe."""
+
     smoke_env: tuple[tuple[str, str], ...]
     """Env vars injected (``docker run -e K=V``) into the serve-smoke container.
 
@@ -227,6 +244,13 @@ def _require(name: str, value: str) -> str:
     return value
 
 
+def _parse_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    value = os.environ.get(name, default).strip().lower()
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(allowed)}")
+    return value
+
+
 def _parse_float(name: str, default: str) -> float:
     raw = os.environ.get(name, default)
     try:
@@ -332,6 +356,16 @@ def parse_screener_config_from_env() -> ScreenerConfig:
         pids_limit=_parse_int("SCREENER_PIDS_LIMIT", "512"),
         health_path=os.environ.get("SCREENER_HEALTH_PATH", "/health"),
         container_port=_parse_int("SCREENER_CONTAINER_PORT", "8080"),
+        seed_path=os.environ.get("SCREENER_SEED_PATH", "/seed"),
+        # Additive rollout: the probe observes and records by default. A
+        # deployment promotes it to ``enforce`` only after its shadow record
+        # shows the signal is stable.
+        seed_probe_mode=_parse_choice(
+            "SCREENER_SEED_PROBE_MODE", "shadow", ("off", "shadow", "enforce")
+        ),
+        seed_probe_timeout_seconds=_parse_float(
+            "SCREENER_SEED_PROBE_TIMEOUT_SECONDS", "60"
+        ),
         smoke_env=_parse_env_pairs(
             # Compatibility key for older harness startup. The isolated fake
             # gateway separately locks provider traffic away from the internet.

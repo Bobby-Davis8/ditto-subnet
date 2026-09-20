@@ -2353,3 +2353,154 @@ def test_with_tool_endpoint_fills_only_tool_declaring_requests() -> None:
     original = {"case_id": "c", "tools": [{"name": "x"}]}
     _with_tool_endpoint(original)
     assert "tool_endpoint" not in original
+
+
+def _seed_probe_run(
+    calls: list[list[str]],
+    *,
+    exit_code: int,
+    output: str,
+    oom: bool = False,
+    status: str = "running",
+) -> Callable[..., Any]:
+    """`_ok_run` whose sidecar `/seed` request fails the way a real one would."""
+    ok = _ok_run(calls)
+
+    async def run(
+        args: list[str], *, stdin: Any = None, **kwargs: Any
+    ) -> tuple[int, str]:
+        if args[0] == "exec" and any("/seed" in arg for arg in args):
+            return exit_code, output
+        if args[:3] == ["container", "inspect", "--format"]:
+            return 0, f"{status} {'true' if oom else 'false'}\n"
+        return await ok(args, stdin=stdin, **kwargs)
+
+    return run
+
+
+async def test_seed_probe_runs_after_health_and_costs_no_provider_call(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(make_config(), _ok_run(calls), tarball=tarball)
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.PASS
+    seed_calls = [call for call in calls if any("/seed" in arg for arg in call)]
+    assert len(seed_calls) == 1
+    assert seed_calls[0][0] == "exec"
+    assert "http://harness:8080/seed" in seed_calls[0]
+    # The probe is a POST carrying one pair, and it never leaves the isolated
+    # network: it is issued from the gateway sidecar, like every other probe.
+    assert "POST" in seed_calls[0]
+
+
+async def test_seed_probe_off_issues_no_request(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(seed_probe_mode="off"), _ok_run(calls), tarball=tarball
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.PASS
+    assert not any("/seed" in arg for call in calls for arg in call)
+
+
+async def test_seed_probe_shadow_records_failure_without_changing_outcome(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(),
+        _seed_probe_run(
+            calls,
+            exit_code=22,
+            output='HTTP 500: {"error":"Read-only file system (os error 30)"}',
+        ),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.PASS
+    codes = [item.code for item in result.evidence]
+    assert "seed-readonly-write" in codes
+    summary = next(
+        item.summary for item in result.evidence if item.code == "seed-readonly-write"
+    )
+    assert "/tmp" in summary
+
+
+async def test_seed_probe_enforce_rejects_with_an_actionable_reason(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(seed_probe_mode="enforce"),
+        _seed_probe_run(
+            calls,
+            exit_code=22,
+            output='HTTP 500: {"error":"Read-only file system (os error 30)"}',
+        ),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.DETERMINISTIC_REJECT
+    assert "/tmp" in result.detail
+    assert any(item.code == "seed-readonly-write" for item in result.evidence)
+
+
+async def test_seed_probe_reports_the_memory_cap_when_the_container_is_oom_killed(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(seed_probe_mode="enforce"),
+        _seed_probe_run(
+            calls,
+            exit_code=24,
+            output="transport request failed",
+            oom=True,
+            status="exited",
+        ),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.DETERMINISTIC_REJECT
+    assert "memory cap" in result.detail
+    assert any(item.code == "seed-memory-cap" for item in result.evidence)
+
+
+async def test_seed_probe_reports_a_harness_exit_before_any_response(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(seed_probe_mode="enforce"),
+        _seed_probe_run(
+            calls,
+            exit_code=24,
+            output="transport request failed",
+            status="dead",
+        ),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.DETERMINISTIC_REJECT
+    assert any(item.code == "seed-exit" for item in result.evidence)
