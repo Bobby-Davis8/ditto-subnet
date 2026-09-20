@@ -2376,6 +2376,20 @@ def _usage_run(
     return run
 
 
+def _seed_ack_run(calls: list[list[str]], *, body: str) -> Callable[..., Any]:
+    """`_ok_run` whose harness answers `/seed` with `body` and HTTP 2xx."""
+    ok = _ok_run(calls)
+
+    async def run(
+        args: list[str], *, stdin: Any = None, **kwargs: Any
+    ) -> tuple[int, str]:
+        if args[0] == "exec" and any("/seed" in arg for arg in args):
+            return 0, body
+        return await ok(args, stdin=stdin, **kwargs)
+
+    return run
+
+
 def _seed_probe_run(
     calls: list[list[str]],
     *,
@@ -2576,3 +2590,108 @@ def test_sandbox_usage_is_unknown_on_an_unreadable_sample() -> None:
 
     assert not usage.known
     assert usage.summary("3g", "512m") == ""
+
+
+@pytest.mark.parametrize(
+    "body,reason",
+    [
+        ("", "no body"),
+        ("not json", "not JSON"),
+        ("[]", "not a JSON object"),
+        ('{"subjects": 0, "links": 0}', "omitted"),
+        ('{"pairs": "1"}', "non-integer"),
+        ('{"pairs": 0, "subjects": 0, "links": 0}', "0 loaded pairs"),
+    ],
+)
+async def test_seed_probe_rejects_an_acknowledgement_that_loaded_nothing(
+    make_config: Callable[..., ScreenerConfig], body: str, reason: str
+) -> None:
+    # A 2xx alone proves the route exists, not that the wave was ingested.
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(seed_probe_mode="enforce"),
+        _seed_ack_run(calls, body=body),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.DETERMINISTIC_REJECT
+    assert any(item.code == "seed-ack-invalid" for item in result.evidence)
+    assert reason in result.detail
+
+
+async def test_seed_probe_accepts_the_contract_acknowledgement(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(
+        make_config(seed_probe_mode="enforce"),
+        _seed_ack_run(calls, body='{"pairs": 1, "subjects": 0, "links": 0}'),
+        tarball=tarball,
+    )
+    async with gate._client:
+        result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    assert result.outcome == ScreeningOutcome.PASS
+    assert not any(i.code == "seed-ack-invalid" for i in result.evidence)
+
+
+def test_seed_evidence_never_exceeds_the_decision_bound() -> None:
+    # A saturated decision plus a failure class plus an envelope sample would
+    # otherwise build 17 records and raise before any verdict is submitted.
+    saturated = ScreeningDecision(
+        outcome=ScreeningOutcome.PASS,
+        detail="",
+        manifest_digest=CORE_ONLY_MANIFEST.digest,
+        evidence=tuple(
+            PolicyEvidence("stable-core", f"filler-{index}", "x") for index in range(16)
+        ),
+    )
+    probe = gate_module._SeedProbe(
+        False,
+        "seed-memory-cap",
+        "the harness exceeded the sandbox memory cap",
+        usage=gate_module._SandboxUsage(412_000_000, 12_345, 536_870_912),
+    )
+
+    result = gate_module._with_seed_probe_evidence(saturated, probe)
+
+    assert len(result.evidence) == 16
+    codes = [item.code for item in result.evidence]
+    assert codes[-2:] == ["seed-memory-cap", "seed-envelope-usage"]
+
+
+def test_screening_locks_the_same_persistence_paths_as_scoring() -> None:
+    # The scorer pins DITTOBENCH_DB and DITTOBENCH_MEMORY_PATH into the miner
+    # sandbox. Screening runs the same envelope, so a harness honouring either
+    # variable has to land in the same tmpfs here, or an image can pass one
+    # runtime and fail the other for a reason neither reports.
+    env = _gateway_runtime_env(
+        provider="platform",
+        chat_gateway="http://gateway:11435",
+        embed_gateway="http://gateway:11434",
+    )
+
+    assert env["DITTOBENCH_DB"] == "/tmp/dittobench.db"
+    assert env["DITTOBENCH_MEMORY_PATH"] == "/tmp/dittobench-memory.json"
+
+
+async def test_the_locked_persistence_paths_reach_the_smoke_container(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    calls: list[list[str]] = []
+    gate = _gate_with(make_config(), _ok_run(calls), tarball=tarball)
+    async with gate._client:
+        await _screen(gate, hashlib.sha256(tarball).hexdigest())
+
+    run_call = next(
+        call
+        for call in calls
+        if call[0] == "run" and any(a.startswith("DITTOBENCH_DB=") for a in call)
+    )
+    assert "DITTOBENCH_MEMORY_PATH=/tmp/dittobench-memory.json" in run_call
+    assert "DITTOBENCH_DB=/tmp/dittobench.db" in run_call

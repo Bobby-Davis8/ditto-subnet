@@ -35,7 +35,7 @@ import logging
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -5478,6 +5478,46 @@ _CONTAINER_CONTRACT_PUBLIC_REASONS = {
 }
 
 
+# Seeding-probe rejections. Screening proves an image builds and answers
+# /health; a scored run opens with POST /seed, so an image that cannot persist
+# state used to pass screening and fail on every validator. These map the
+# screener's bounded reason codes to guidance the submission owner can act on
+# without exposing a container log, a path outside the contract, or any
+# private challenge payload.
+_SEED_PROBE_PUBLIC_REASONS: Final[dict[str, str]] = {
+    "seed-readonly-write": (
+        "The application attempted to write outside the sandbox's writable /tmp "
+        "filesystem during /seed. The sandbox root is read-only; configure "
+        "runtime state under /tmp."
+    ),
+    "seed-memory-cap": (
+        "The application exceeded the sandbox memory cap during /seed. "
+        "Validators run the same cap; keep the memory store's working set "
+        "inside it."
+    ),
+    "seed-exit": (
+        "The application exited while serving /seed. The sandbox runs an "
+        "unprivileged user with a read-only root and one bounded /tmp tmpfs."
+    ),
+    "seed-ack-invalid": (
+        "POST /seed answered without acknowledging the wave it was given. The "
+        "2xx response is the ingest acknowledgement and carries the loaded "
+        "counts; return it only once every pair is embedded and queryable."
+    ),
+    "seed-http-error": (
+        "POST /seed did not return 2xx. Scoring begins with a seeding wave, so "
+        "an image that cannot ingest cannot be scored."
+    ),
+    "seed-oversized-response": (
+        "POST /seed answered with a body past the screening safety cap. The "
+        "contract's response is the loaded counts."
+    ),
+    "seed-unreachable": (
+        "POST /seed returned no response before the screening deadline."
+    ),
+}
+
+
 def _public_screening_reason(detail: str, reason_code: str | None = None) -> str:
     """Map untrusted screener detail to a stable, public-safe failure category.
 
@@ -5485,6 +5525,8 @@ def _public_screening_reason(detail: str, reason_code: str | None = None) -> str
     code. Never persist or return it verbatim: a malicious Dockerfile could print
     the BuildKit secret mounted for private dependency access.
     """
+    if reason_code is not None and reason_code in _SEED_PROBE_PUBLIC_REASONS:
+        return _SEED_PROBE_PUBLIC_REASONS[reason_code]
     if reason_code == "exact-cross-miner-duplicate":
         return "Artifact is an exact duplicate of another miner submission"
     if reason_code == "container-harness-contract":

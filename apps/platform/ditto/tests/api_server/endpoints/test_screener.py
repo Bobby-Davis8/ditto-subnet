@@ -216,6 +216,32 @@ def test_public_rust_contract_reason_is_actionable() -> None:
     )
 
 
+def test_seed_probe_rejections_tell_the_miner_what_to_fix() -> None:
+    # Screening proves /health; scoring opens with /seed. Without these the
+    # owner of the submission only ever sees the generic category and cannot
+    # tell a read-only path from a memory cap.
+    detail = "serve check failed: /seed failed writing outside the sandbox"
+
+    assert _public_screening_reason(detail, "seed-readonly-write") == (
+        "The application attempted to write outside the sandbox's writable /tmp "
+        "filesystem during /seed. The sandbox root is read-only; configure "
+        "runtime state under /tmp."
+    )
+    assert "memory cap" in _public_screening_reason(detail, "seed-memory-cap")
+    assert "acknowledgement" in _public_screening_reason(detail, "seed-ack-invalid")
+
+
+def test_seed_probe_reason_never_echoes_the_untrusted_detail() -> None:
+    reason = _public_screening_reason(
+        "serve check failed: SECRET_FROM_CONTAINER_LOG /app/state.db",
+        "seed-readonly-write",
+    )
+
+    assert "SECRET_FROM_CONTAINER_LOG" not in reason
+    assert "/app/state.db" not in reason
+    assert "/tmp" in reason
+
+
 def test_unknown_rust_contract_detail_stays_public_safe() -> None:
     reason = _public_screening_reason(
         "error[SCR-RUST-999]: SECRET_FROM_UNTRUSTED_DETAIL",

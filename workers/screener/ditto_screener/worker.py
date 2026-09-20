@@ -741,10 +741,19 @@ class ScreenerWorker:
             )
             private_failure_detail: str | None = None
             private_failure_log_tail: str | None = None
-            if typed_outcome in {
-                ScreenResultOutcome.RETRYABLE_INFRA,
-                ScreenResultOutcome.INCONCLUSIVE,
-            } or reason_code in {"docker-build", "docker-build-infrastructure"}:
+            if (
+                typed_outcome
+                in {
+                    ScreenResultOutcome.RETRYABLE_INFRA,
+                    ScreenResultOutcome.INCONCLUSIVE,
+                }
+                or reason_code
+                in {
+                    "docker-build",
+                    "docker-build-infrastructure",
+                }
+                or (reason_code or "").startswith("seed-")
+            ):
                 # The public reason stays generic. Preserve the exact bounded
                 # diagnostic for the submission owner, with the same sanitizer
                 # Platform applies before durable storage. This includes an

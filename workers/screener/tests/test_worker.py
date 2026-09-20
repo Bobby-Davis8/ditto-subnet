@@ -894,6 +894,35 @@ async def test_local_build_failure_forwards_signed_private_miner_feedback(
     assert "[REDACTED]" in verdict["private_failure_log_tail"]
 
 
+async def test_seed_probe_rejection_forwards_private_miner_feedback(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    # The public reason is a fixed category, so the actionable part has to
+    # reach the submission owner through the private channel or #411's point
+    # is lost: the miner is told screening failed and nothing more.
+    platform = _FakePlatform([])
+    gate = _FakeGate(
+        core_decision(
+            ScreeningOutcome.DETERMINISTIC_REJECT,
+            code="seed-readonly-write",
+            summary="container did not satisfy the seeding contract",
+            detail=(
+                "serve check failed: /seed failed writing outside the sandbox's "
+                "writable filesystem. token=secret-value"
+            ),
+        )
+    )
+    worker = _worker(make_config(), platform, gate)
+
+    await worker._screen_one(_item(uuid4()), policy_version=SCREENING_POLICY_VERSION)
+
+    verdict = platform.verdicts[0]
+    assert verdict["reason_code"] == "seed-readonly-write"
+    assert verdict["private_failure_detail"] is not None
+    assert "/seed" in verdict["private_failure_detail"]
+    assert "secret-value" not in verdict["private_failure_detail"]
+
+
 async def test_exact_cross_miner_duplicate_skips_artifact_and_private_gate(
     make_config: Callable[..., ScreenerConfig],
 ) -> None:

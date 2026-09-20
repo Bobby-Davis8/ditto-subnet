@@ -88,6 +88,7 @@ from ditto_screener.platform import (
     RemoteSubmissionBuildRejected,
 )
 from ditto_screener.policy import (
+    _MAX_EVIDENCE,
     ChallengeObservation,
     PolicyContext,
     PolicyEngine,
@@ -167,6 +168,12 @@ _VALIDATOR_SANDBOX_MEMORY = "3g"
 _VALIDATOR_SANDBOX_CPUS = "2"
 _VALIDATOR_SANDBOX_PIDS = "512"
 _VALIDATOR_SANDBOX_DB = "/tmp/dittobench.db"
+# Known harness persistence variables, locked to the one writable filesystem the
+# runtime contract offers. A harness that honours either variable then persists
+# inside the tmpfs in screening and in scoring alike; an image that writes
+# somewhere else still fails the seeding probe, which is the general case this
+# shim does not try to cover.
+_VALIDATOR_SANDBOX_MEMORY_PATH = "/tmp/dittobench-memory.json"
 _PRIMARY_HARNESS_PROVIDER: Literal["platform"] = "platform"
 _COMPAT_HARNESS_PROVIDER: Literal["chutes"] = "chutes"
 _BROKER_PLACEHOLDER_KEY = "ticket"
@@ -406,6 +413,7 @@ def _gateway_runtime_env(
         "CURL_CA_BUNDLE": _OPENROUTER_SHIM_CA_BUNDLE_PATH,
         "NODE_EXTRA_CA_CERTS": _OPENROUTER_SHIM_CA_BUNDLE_PATH,
         "DITTOBENCH_DB": _VALIDATOR_SANDBOX_DB,
+        "DITTOBENCH_MEMORY_PATH": _VALIDATOR_SANDBOX_MEMORY_PATH,
     }
 
 
@@ -528,6 +536,33 @@ def _with_image_binding_advisory(
     )
 
 
+def _seed_ack_mismatch(body: str, *, expected_pairs: int) -> str | None:
+    """Return why a seeding acknowledgement is unusable, or ``None`` if it is.
+
+    ``POST /seed`` answers with the counts it loaded (``pairs``, ``subjects``,
+    ``links``). Treating any 2xx as success would pass an image that replies
+    ``204``, ``{}``, or ``{"pairs": 0}`` while persisting nothing -- exactly the
+    class the probe exists to catch.
+    """
+    text = body.strip()
+    if not text:
+        return "the response carried no body"
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return "the response body was not JSON"
+    if not isinstance(parsed, dict):
+        return "the response body was not a JSON object"
+    raw = parsed.get("pairs")
+    if raw is None:
+        return "the response omitted the loaded pair count"
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return "the response reported a non-integer pair count"
+    if raw != expected_pairs:
+        return f"it reported {raw} loaded pairs for a wave of {expected_pairs}"
+    return None
+
+
 def _parse_sandbox_usage(output: str) -> _SandboxUsage:
     """Parse the cgroup sample; mirrors the validator's parseRuntimeMetrics."""
     section = ""
@@ -586,7 +621,12 @@ def _with_seed_probe_evidence(
         )
     if not records:
         return decision
-    return replace(decision, evidence=(*decision.evidence[:15], *records))
+    # ScreeningDecision rejects more than _MAX_EVIDENCE records, so reserve the
+    # room these take instead of assuming one free slot: a saturated decision
+    # plus a failure class plus an envelope sample would otherwise raise before
+    # the worker could submit any verdict at all.
+    keep = max(0, _MAX_EVIDENCE - len(records))
+    return replace(decision, evidence=(*decision.evidence[:keep], *records))
 
 
 def _gateway_call_count(path: str) -> int:
@@ -3028,7 +3068,18 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
             probe_container, url, payload=payload, timeout=timeout
         )
         if code == 0:
-            return _SeedProbe(True, "seed-ok", "")
+            mismatch = _seed_ack_mismatch(out, expected_pairs=len(payload["pairs"]))  # type: ignore[arg-type]
+            if mismatch is None:
+                return _SeedProbe(True, "seed-ok", "")
+            return _SeedProbe(
+                False,
+                "seed-ack-invalid",
+                f"{self._config.seed_path} answered without acknowledging the "
+                f"wave it was given: {mismatch}. The contract's 2xx is the "
+                f"ingest acknowledgement and carries the loaded counts, so a "
+                f"reply that omits or understates them cannot be distinguished "
+                f"from a harness that stored nothing.",
+            )
 
         tail = _log_tail(out) or "no detail"
         lifecycle, oom = await self._container_liveness(harness_container)
