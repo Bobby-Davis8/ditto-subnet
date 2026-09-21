@@ -102,6 +102,58 @@ export const QUEUE_GATES: Record<string, QueueGate> = {
   },
 };
 
+export interface ParkedReading {
+  label: string;
+  title: string;
+  /** Chip styling class suffix: a hold is a warning, a terminal row is final. */
+  tone: "hold" | "terminal";
+}
+
+/** Plain language for each allowlisted agent-attributable code.
+ *
+ * Only codes the API is willing to publish appear here. An unknown code keeps
+ * the terminal sentence without inventing a cause for it. */
+const TERMINAL_CAUSES: Record<string, string> = {
+  inference_allowance_exhausted:
+    "The agent used its whole inference allowance before finishing its run.",
+  inference_request_rejected:
+    "The platform rejected the agent's inference requests, so no run could complete.",
+  model_inference_required:
+    "The agent answered without the model inference the benchmark requires.",
+};
+
+/** How to present a parked submission, or null while it is still advancing.
+ *
+ * The verdict comes from the API's retry_disposition. The dashboard never
+ * re-derives it from the failure code, so a row the platform declined to
+ * attribute is never presented as the miner's fault here either. */
+export function parkedReading(entry: PipelineEntryExt): ParkedReading | null {
+  if (entry.retry_disposition === "terminal_artifact_failure") {
+    const code = String(entry.terminal_failure_code || "");
+    const cause = TERMINAL_CAUSES[code];
+    return {
+      label: "Cannot finish scoring" + (code ? " · " + code : ""),
+      title:
+        "This artifact cannot finish scoring. " +
+        (cause ? cause + " " : "") +
+        "Fix the artifact and submit a new version; this submission will not " +
+        "resume on its own.",
+      tone: "terminal",
+    };
+  }
+  if (entry.retry_disposition === "operator_hold" || entry.retry_state === "exhausted") {
+    return {
+      label: "On hold · Ditto-side failure",
+      title:
+        "The remaining validator attempts ended on a failure Ditto owns, not " +
+        "on anything in this submission. It is waiting for an operator to " +
+        "authorize the next attempt.",
+      tone: "hold",
+    };
+  }
+  return null;
+}
+
 export function queueGateLabel(entry: PipelineEntryExt): QueueGate | null {
   const gate = entry.validator_queue_gate;
   return (gate != null && QUEUE_GATES[gate]) || null;

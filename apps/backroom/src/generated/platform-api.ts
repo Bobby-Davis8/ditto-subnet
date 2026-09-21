@@ -20071,6 +20071,11 @@ export interface components {
              */
             retry_after?: string | null;
             /**
+             * Retry Disposition
+             * @description How to read a parked submission: 'operator_hold' means the remaining validator slots died on a Ditto-owned failure and only an operator can restart them, 'terminal_artifact_failure' means every remaining slot died on a named agent-attributable code, so no further lease of this artifact can finish scoring. Null while the submission is still advancing. Fail-closed: a mixed, unnamed or unactionable cause always reads as 'operator_hold', never as the miner's fault.
+             */
+            retry_disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
+            /**
              * Retry State
              * @description Why a below-quorum submission is or isn't advancing: running, retry_available, cooling_down, exhausted (needs operator recovery), or queued. Null once finalized or not yet evaluating.
              */
@@ -20146,6 +20151,11 @@ export interface components {
              * @description When the platform accepted the upload (UTC).
              */
             submitted_at: string;
+            /**
+             * Terminal Failure Code
+             * @description The agreed machine cause behind a 'terminal_artifact_failure', drawn from the same allowlist as a validation attempt's failure_code. Null for every other disposition. Raw validator diagnostics are never published here.
+             */
+            terminal_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /**
              * Validator Queue Gate
              * @description Why this submission cannot be leased on the next poll despite its rank, or null when nothing holds it. 'previous_generation' is retired-era work the fleet serves only once the current era drains; 'owner_serialized' means another submission from the same paid owner is using the owner's validator slot, so this one waits while any other owner has eligible work -- rotating hotkeys does not buy a second slot, though a validator that finds nothing else eligible anywhere may still lease it rather than idle, up to the operator's per-owner limit; 'similarity_serialized' means a near-identical submission is already using this one's share of fleet capacity, whichever key paid for it -- a queue-fairness wait and nothing more, carrying no claim that either submission is illegitimate, and it clears on its own when the other lease ends; 'not_leasable' means the allocator's candidate filter excludes it (no versioned dataset, no eligible screened image, withdrawn, not admitted to this era, or every quorum slot already occupied).
@@ -23196,6 +23206,8 @@ export interface components {
             quorum: number;
             /** Retry After */
             retry_after?: string | null;
+            /** Retry Disposition */
+            retry_disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
             /** Retry State */
             retry_state?: ("running" | "retry_available" | "cooling_down" | "exhausted" | "queued") | null;
             /** Score Count */
@@ -23210,6 +23222,8 @@ export interface components {
              * Format: date-time
              */
             submitted_at: string;
+            /** Terminal Failure Code */
+            terminal_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /** Version */
             version?: number | null;
         };
@@ -23722,6 +23736,8 @@ export interface components {
             submission_family?: components["schemas"]["PublicSubmissionFamily"] | null;
             /** Validation Attempts */
             validation_attempts?: components["schemas"]["PublicValidationAttempt"][];
+            /** @description Live validator-retry state while the submission is below quorum; null once it finalizes, and before any validator work exists. */
+            validator_retry?: components["schemas"]["PublicValidatorRetry"] | null;
         };
         /**
          * PublicSubmissionScores
@@ -24122,7 +24138,7 @@ export interface components {
             /** Failed At */
             failed_at?: string | null;
             /** Failure Code */
-            failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent") | null;
+            failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /** Failure Reason */
             failure_reason?: ("infrastructure" | "scoring_error" | "sandbox_oom") | null;
             /**
@@ -24329,6 +24345,39 @@ export interface components {
             status: "disabled" | "fresh" | "stale" | "unavailable";
             /** Validators */
             validators?: components["schemas"]["PublicValidatorName"][];
+        };
+        /**
+         * PublicValidatorRetry
+         * @description Why a below-quorum submission is or is not advancing through scoring.
+         *
+         *     The validator-side counterpart to :class:`PublicAdmissionRetry`. Admission
+         *     already tells a miner when a screening failure was Ditto's; without this a
+         *     submission loses that distinction the moment it reaches the validator queue,
+         *     where the platform's confidence in the classification is higher rather than
+         *     lower.
+         */
+        PublicValidatorRetry: {
+            /**
+             * Disposition
+             * @description 'operator_hold' when the fleet owes this submission another attempt, 'terminal_artifact_failure' when no further lease of this artifact can finish scoring. Null while it is advancing. Fail-closed: a mixed, unnamed or unactionable cause always reads as 'operator_hold'.
+             */
+            disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
+            /**
+             * Retry After
+             * @description Earliest UTC time an expired ticket may be re-leased.
+             */
+            retry_after?: string | null;
+            /**
+             * State
+             * @description running, retry_available, cooling_down, exhausted, or queued. Read ``disposition`` before showing an exhausted row to a miner: the state alone does not say whose failure it was.
+             * @enum {string}
+             */
+            state: "running" | "retry_available" | "cooling_down" | "exhausted" | "queued";
+            /**
+             * Terminal Failure Code
+             * @description Allowlisted machine cause behind a terminal disposition, from the same set as a validation attempt's ``failure_code``.
+             */
+            terminal_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
         };
         /**
          * PublicValidatorScore
