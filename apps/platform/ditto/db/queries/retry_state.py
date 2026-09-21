@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from ditto.api_models.agent_status import AgentStatus
-from ditto.api_models.retry_state import RecommendedRetryAction, RetryState
+from ditto.api_models.retry_state import (
+    RecommendedRetryAction,
+    RetryDisposition,
+    RetryState,
+)
 from ditto.api_models.ticket_status import TicketPurpose, TicketStatus
 from ditto.db.models import (
     Agent,
@@ -206,6 +210,33 @@ def recommended_retry_action(
     if recovery_allowed:
         return "retry"
     return None
+
+
+def retry_disposition(
+    *,
+    state: RetryState,
+    scores: list[Score],
+    tickets: list[ValidatorTicket],
+    recovery_allowed: bool,
+) -> RetryDisposition | None:
+    """The miner-facing reading of a parked row, or ``None`` while it advances.
+
+    Only an ``exhausted`` row has a disposition: every other state is still
+    moving on its own, and naming a failure there would be wrong even when a
+    single past lease failed. Exhausted rows split exactly where
+    :func:`recommended_retry_action` already splits them, so the public surface
+    can never disagree with the operator triage it was derived from.
+
+    Fail-closed. ``withdraw`` is the only verdict that blames the submission;
+    anything else, including an exhausted row whose next step cannot be named,
+    reads as a hold on the fleet.
+    """
+    if state != "exhausted":
+        return None
+    action = recommended_retry_action(
+        scores=scores, tickets=tickets, recovery_allowed=recovery_allowed
+    )
+    return "terminal_artifact_failure" if action == "withdraw" else "operator_hold"
 
 
 def recovery_gate(
@@ -505,6 +536,15 @@ class AgentRetryState:
     automatic_retry_available: bool
     recovery_allowed: bool
     blocking_reason: str | None
+    disposition: RetryDisposition | None
+    """Whether a parked row is waiting on Ditto or has terminally failed."""
+    terminal_failure_code: str | None
+    """The agreed agent-attributable code behind a terminal disposition.
+
+    Set only when :attr:`disposition` is ``terminal_artifact_failure``, and only
+    from :data:`AGENT_ATTRIBUTABLE_FAILURE_DETAILS`, so no free-form validator
+    diagnostic can reach a caller through this field.
+    """
     earliest_retry_after: datetime | None
     scores: list[Score]
     tickets: list[ValidatorTicket]
@@ -658,6 +698,12 @@ async def classify_agent_retry_states(
         if state is None:
             continue
         scored_hotkeys = {s.validator_hotkey for s in v_scores}
+        disposition = retry_disposition(
+            state=state,
+            scores=v_scores,
+            tickets=v_tickets,
+            recovery_allowed=allowed,
+        )
         result[agent_id] = AgentRetryState(
             state=state,
             bench_version=bench_version,
@@ -665,6 +711,12 @@ async def classify_agent_retry_states(
             automatic_retry_available=automatic,
             recovery_allowed=allowed,
             blocking_reason=reason,
+            disposition=disposition,
+            terminal_failure_code=(
+                dominant_agent_failure_detail(scores=v_scores, tickets=v_tickets)
+                if disposition == "terminal_artifact_failure"
+                else None
+            ),
             # Only a ticket that can still retry has a meaningful "retry at"
             # time; an exhausted ticket's stale cooldown must not read as
             # "coming back soon".
