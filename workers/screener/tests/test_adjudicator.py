@@ -300,6 +300,111 @@ async def test_object_tool_arguments_stay_fail_closed_without_their_text(
     assert secret not in diagnostic.model_dump_json()
 
 
+async def test_the_serving_upstream_is_recorded_on_a_failed_court_run(
+    tmp_path: Path,
+) -> None:
+    """One model is routed across many upstreams; the trace has to name one.
+
+    The gateway reports the upstream that served each call and may fail over
+    between them per request, so without this a burst of court failures cannot
+    be attributed to a fleet route rather than to the artifacts.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "provider": "Sail Research",
+                "usage": {"prompt_tokens": 11, "completion_tokens": 4},
+                "choices": [{"message": {"content": "not a tool call"}}],
+            },
+        )
+
+    result = await _adjudicator(
+        _key(tmp_path), httpx.MockTransport(handler)
+    ).adjudicate(_archive(tmp_path), notes=[_CONCERN])
+
+    assert result.decision == "escalate"
+    diagnostic = result.run_diagnostic
+    assert diagnostic is not None
+    # Normalized to the same bounded slug every other identifier here uses.
+    assert diagnostic.upstream == "sail-research"
+    # The gateway stays its own field; one is the route, the other is the door.
+    assert diagnostic.provider == "openrouter"
+
+
+async def test_a_provider_fault_inside_a_200_still_names_its_upstream(
+    tmp_path: Path,
+) -> None:
+    """The body is rejected, but the upstream that sent it is the point.
+
+    A relayed ``provider_error`` is a fault of the upstream that served the
+    call, so the trace has to keep the name even though the body itself is
+    thrown away.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "provider": "Io Net",
+                "error": {"code": "provider_error", "message": "upstream failed"},
+            },
+        )
+
+    result = await _adjudicator(
+        _key(tmp_path), httpx.MockTransport(handler)
+    ).adjudicate(_archive(tmp_path), notes=[_CONCERN])
+
+    assert result.decision == "escalate"
+    diagnostic = result.run_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.upstream == "io-net"
+    assert "upstream failed" not in diagnostic.model_dump_json()
+
+
+async def test_an_unusable_upstream_name_is_dropped_rather_than_stored(
+    tmp_path: Path,
+) -> None:
+    """The name arrives in a provider response, so it is never free text."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "provider": "Sail Research <script>alert(1)</script>",
+                "choices": [{"message": {"content": "not a tool call"}}],
+            },
+        )
+
+    result = await _adjudicator(
+        _key(tmp_path), httpx.MockTransport(handler)
+    ).adjudicate(_archive(tmp_path), notes=[_CONCERN])
+
+    diagnostic = result.run_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.upstream is None
+    assert "script" not in diagnostic.model_dump_json()
+
+
+async def test_a_failure_with_no_response_leaves_the_upstream_unknown(
+    tmp_path: Path,
+) -> None:
+    """A request that never produced a body cannot name an upstream."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "upstream down"}})
+
+    result = await _adjudicator(
+        _key(tmp_path), httpx.MockTransport(handler)
+    ).adjudicate(_archive(tmp_path), notes=[_CONCERN])
+
+    diagnostic = result.run_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.http_status == 503
+    assert diagnostic.upstream is None
+
+
 async def test_provider_status_is_recorded_without_the_response_body(
     tmp_path: Path,
 ) -> None:

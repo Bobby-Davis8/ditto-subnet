@@ -6884,6 +6884,7 @@ class TestQuarantineAdmin:
             "final_tool_call_returned": False,
             "model": "z-ai/glm-5.3-flash",
             "provider": "openrouter",
+            "upstream": "near-ai",
             "exception": "prompt text that must not be stored",
         }
         async with session_maker() as session, session.begin():
@@ -6956,6 +6957,9 @@ class TestQuarantineAdmin:
             "final_tool_call_returned": False,
             "model": "z-ai/glm-5.3-flash",
             "provider": "openrouter",
+            # Reaches the operator surface, which is the only reason to record
+            # it: a burst on one upstream is a fleet fact, not a miner fact.
+            "upstream": "near-ai",
         }
         assert "prompt text" not in diagnostic.text
         assert rejected.status_code == 200, rejected.text

@@ -4334,6 +4334,12 @@ export const adjudicationRunDiagnosticSchema = z.object({
     .string()
     .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
     .nullish(),
+  /** Which upstream behind that gateway served the call; the gateway may fail
+   * over between upstreams per request, so this is what attributes a burst. */
+  upstream: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
+    .nullish(),
 })
 
 export const screeningFailureDiagnosticSchema = z.object({

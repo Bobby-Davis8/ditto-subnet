@@ -400,6 +400,9 @@ async def test_adjudicator_failure_diagnostic_is_retained_on_the_hold(
         "final_tool_call_returned": True,
         "model": "z-ai/glm-5.3-flash",
         "provider": "openrouter",
+        # The gateway is one value for every call; the upstream behind it is
+        # what tells two bursts apart, so it has to survive the round trip.
+        "upstream": "sail-research",
     }
     attempt_id = await _seed_held_screen(
         session_maker,

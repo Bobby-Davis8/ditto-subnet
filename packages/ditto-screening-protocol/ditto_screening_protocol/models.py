@@ -1233,6 +1233,18 @@ class AdjudicationRunDiagnostic(BaseModel):
     provider: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")] | None = (
         None
     )
+    """The inference gateway the court called, which is one configured value."""
+    upstream: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")] | None = (
+        None
+    )
+    """Which upstream behind that gateway actually served the call.
+
+    The gateway routes one model across many upstreams and may fail over
+    between them per request, so ``provider`` alone cannot attribute a burst of
+    failures. Normalized from the response body to a lowercase slug and dropped
+    when it does not fit, so an upstream name is never free text. Null on a
+    failure that produced no response to read it from.
+    """
 
 
 class SourceReviewAdjudication(BaseModel):
