@@ -22599,7 +22599,7 @@ export interface components {
         PublicLeaderboardResponse: {
             /**
              * Active Bench Version
-             * @description Globally activated benchmark version.
+             * @description Globally activated benchmark version: the one whose scores the ledger pays on. Identical to ``emission_bench_version``, which is the clearer name for the same pin.
              */
             active_bench_version: number;
             /**
@@ -22625,7 +22625,7 @@ export interface components {
             count: number;
             /**
              * Current Bench Version
-             * @description The latest DittoBench benchmark version. Entries whose bench_version is below this were scored on a previous benchmark and are not directly comparable; the UI marks them as such.
+             * @description Deprecated name for ``scoring_bench_version``, kept so existing clients keep working. It is the version this board is scored and ranked on, which during a rollout is the version being collected rather than the one paying emissions. Read ``emission_bench_version`` for that.
              */
             current_bench_version: number;
             /**
@@ -22635,6 +22635,11 @@ export interface components {
             desired_bench_version: number;
             /** @description Relative token-efficiency bonus status for this board. Null below bench_version 7, while the feature is disabled, or before the first cohort snapshot is frozen. active=false means the frozen cohort has not reached its n_min activation gate and every bonus is zero. */
             efficiency?: components["schemas"]["PublicEfficiencyStatus"] | null;
+            /**
+             * Emission Bench Version
+             * @description The benchmark version that controls emissions right now, taken from the ledger pin. It changes only when a rollout activates, so during a rollout it stays behind ``scoring_bench_version`` while the new version is still being collected. Same value as ``active_bench_version``, named for what it decides.
+             */
+            emission_bench_version: number;
             /** @description Current KOTH fold over finalized, full-benchmark entries on the current benchmark. Null when no entry can receive emissions. */
             emissions?: components["schemas"]["PublicKothEmissions"] | null;
             /**
@@ -22659,6 +22664,11 @@ export interface components {
              * @description Router track measurement phase. ``shadow`` is present only when the published router ledger carries at least one measurement; the board's router surface is display-only and never changes ranking or emissions. Null means the router surface is off.
              */
             router_shadow_mode?: "shadow" | null;
+            /**
+             * Scoring Bench Version
+             * @description The benchmark version this board's ranking is computed on: the version currently being collected, or the pinned version on a historical board. Entries below it were scored on an earlier benchmark and are not directly comparable. A submission scored here is not yet earning on this version unless ``emission_bench_version`` equals it.
+             */
+            scoring_bench_version: number;
             /**
              * Selection Mode
              * @description authoritative is the pool that drives validator weights: pinned to active_bench_version while a rollout is collecting (the desired version takes over only at rollout activation); historical is a requested single version.
@@ -23650,7 +23660,7 @@ export interface components {
         PublicSubmissionPipeline: {
             /**
              * Active Bench Version
-             * @description Benchmark version currently being scored.
+             * @description The benchmark version that controls emissions: the ledger pin, not the version this submission is being scored on. During a rollout the fleet scores the version being collected while this stays on the version that still pays, so the two differ until the rollout activates. ``score_bench_version`` is the era this submission's own scores belong to.
              */
             active_bench_version: number;
             /** @description Live admission-retry state while the submission is still in build & admission; null once admission is terminal. */
@@ -23664,6 +23674,11 @@ export interface components {
             /** Confirmation Scores */
             confirmation_scores?: components["schemas"]["PublicConfirmationScore"][];
             dispute?: components["schemas"]["PublicScreeningDispute"] | null;
+            /**
+             * Emission Bench Version
+             * @description Same pin as ``active_bench_version``, named for what it decides. A submission finalized at a different ``score_bench_version`` is not earning on this version's ledger.
+             */
+            emission_bench_version: number;
             /**
              * Final Composite
              * @description Canonical median over the ``score_bench_version`` scores once quorum is reached; null while scores are still provisional.
