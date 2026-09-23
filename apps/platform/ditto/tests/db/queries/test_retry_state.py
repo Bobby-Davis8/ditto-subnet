@@ -10,6 +10,7 @@ from ditto.api_models.ticket_status import TicketStatus
 from ditto.db.models import Agent, ValidatorTicket
 from ditto.db.queries.retry_state import (
     AGENT_ATTRIBUTABLE_WITHDRAW_REASON,
+    agreed_failure_detail,
     dominant_agent_failure_detail,
     is_agent_attributable_exhaustion,
     recommended_retry_action,
@@ -262,6 +263,71 @@ def test_an_unnameable_next_step_still_reads_as_an_operator_hold() -> None:
         )
         == "operator_hold"
     )
+
+
+def test_two_different_named_codes_do_not_publish_a_terminal_failure() -> None:
+    """A withdraw verdict the public surface cannot name stays a hold.
+
+    ``is_agent_attributable_exhaustion`` is satisfied by any mix of named agent
+    codes, but a terminal row has to show the code it is telling the miner to
+    fix. When the remaining slots name different ones there is nothing to show,
+    so the public reading falls back rather than asserting a failure it cannot
+    attribute. The operator verdict is unchanged.
+    """
+    tickets = [
+        _ticket(
+            validator_hotkey="validator-0", failure_detail="inference_request_rejected"
+        ),
+        _ticket(
+            validator_hotkey="validator-1",
+            failure_detail="inference_allowance_exhausted",
+        ),
+        _ticket(
+            validator_hotkey="validator-2", failure_detail="model_inference_required"
+        ),
+    ]
+    assert is_agent_attributable_exhaustion(scores=[], tickets=tickets) is True
+    assert (
+        recommended_retry_action(scores=[], tickets=tickets, recovery_allowed=False)
+        == "withdraw"
+    )
+    assert dominant_agent_failure_detail(scores=[], tickets=tickets) is None
+    assert _disposition(tickets) == "operator_hold"
+
+
+def test_an_agreed_cause_is_reported_for_a_hold() -> None:
+    """A hold every slot agrees on can be attributed; a mixed one cannot."""
+    agreed = [
+        _ticket(
+            validator_hotkey=f"validator-{index}",
+            failure_detail="provider_outage_parked",
+            failure_reason="infrastructure",
+        )
+        for index in range(3)
+    ]
+    assert agreed_failure_detail(scores=[], tickets=agreed) == "provider_outage_parked"
+
+    mixed = [
+        _ticket(
+            validator_hotkey="validator-0",
+            failure_detail="provider_outage_parked",
+            failure_reason="infrastructure",
+        ),
+        _ticket(
+            validator_hotkey="validator-1",
+            failure_detail=(
+                "DittobenchError: run deadbeef did not finish within 6600.0s"
+            ),
+            failure_reason="infrastructure",
+        ),
+        _ticket(
+            validator_hotkey="validator-2",
+            failure_detail=None,
+            failed_at=None,
+        ),
+    ]
+    assert agreed_failure_detail(scores=[], tickets=mixed) is None
+    assert _disposition(mixed) == "operator_hold"
 
 
 def test_an_advancing_row_has_no_disposition() -> None:

@@ -6417,6 +6417,7 @@ class TestPublicActivity:
                 "retry_after": None,
                 "retry_disposition": None,
                 "terminal_failure_code": None,
+                "hold_failure_code": None,
                 "active_benchmarks": [],
             }
         ]
@@ -6696,6 +6697,7 @@ class TestPublicActivity:
             "retry_after",
             "retry_disposition",
             "terminal_failure_code",
+            "hold_failure_code",
             "screening_policy_version",
             "required_screening_policy_version",
             "screening_attempt_id",
@@ -8887,6 +8889,8 @@ class TestPublicActivity:
         assert held["retry_state"] == terminal["retry_state"] == "exhausted"
         assert held["retry_disposition"] == "operator_hold"
         assert held["terminal_failure_code"] is None
+        # Every slot agreed on one no-fault code, so this hold is attributable.
+        assert held["hold_failure_code"] == "provider_outage_parked"
         assert terminal["retry_disposition"] == "terminal_artifact_failure"
         assert terminal["terminal_failure_code"] == "inference_request_rejected"
 
@@ -8953,6 +8957,11 @@ class TestPublicActivity:
         assert entry["retry_state"] == "exhausted"
         assert entry["retry_disposition"] == "operator_hold"
         assert entry["terminal_failure_code"] is None
+        # Every slot agrees here, but the cause is a free-form validator
+        # diagnostic rather than an allowlisted code. Agreement is not enough:
+        # the row still publishes no cause, so nothing downstream can describe
+        # it as the fleet's failure or as the miner's.
+        assert entry["hold_failure_code"] is None
         pipeline = (
             await client.get(f"/api/v1/public/agent/{agent_id}/pipeline")
         ).json()

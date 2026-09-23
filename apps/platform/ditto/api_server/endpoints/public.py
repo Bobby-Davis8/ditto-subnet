@@ -5773,6 +5773,14 @@ def _public_activity_response(
                     and row.agent.agent_id in retry_by_agent
                     else None
                 ),
+                hold_failure_code=(
+                    public_validation_failure_code(
+                        retry_by_agent[row.agent.agent_id].hold_failure_code
+                    )
+                    if row_status in ("waiting_validator", "below_score_floor")
+                    and row.agent.agent_id in retry_by_agent
+                    else None
+                ),
                 screening_policy_version=row.agent.screening_policy_version,
                 required_screening_policy_version=effective_screening_policy_version(),
                 screening_attempt_id=(
@@ -6528,6 +6536,11 @@ async def operations(
                         if retry is not None
                         else None
                     ),
+                    hold_failure_code=(
+                        public_validation_failure_code(retry.hold_failure_code)
+                        if retry is not None
+                        else None
+                    ),
                     active_benchmarks=progress,
                 )
             )
@@ -6999,6 +7012,9 @@ async def agent_pipeline(
             disposition=validator_retry_state.disposition,
             terminal_failure_code=public_validation_failure_code(
                 validator_retry_state.terminal_failure_code
+            ),
+            hold_failure_code=public_validation_failure_code(
+                validator_retry_state.hold_failure_code
             ),
             retry_after=validator_retry_state.earliest_retry_after,
         )

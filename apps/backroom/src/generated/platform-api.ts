@@ -20018,6 +20018,11 @@ export interface components {
              */
             duplicate_version?: number | null;
             /**
+             * Hold Failure Code
+             * @description The agreed machine cause behind an 'operator_hold', when every remaining slot reports the same one, drawn from the same allowlist as a validation attempt's failure_code. Null is the ordinary case and means the cause is mixed, unnamed or stale: the row is unattributed rather than proven to be a fleet failure, and must not be described as one.
+             */
+            hold_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
+            /**
              * Last Scored At
              * @description When the platform most recently recorded a score (UTC).
              */
@@ -20072,7 +20077,7 @@ export interface components {
             retry_after?: string | null;
             /**
              * Retry Disposition
-             * @description How to read a parked submission: 'operator_hold' means the remaining validator slots died on a Ditto-owned failure and only an operator can restart them, 'terminal_artifact_failure' means every remaining slot died on a named agent-attributable code, so no further lease of this artifact can finish scoring. Null while the submission is still advancing. Fail-closed: a mixed, unnamed or unactionable cause always reads as 'operator_hold', never as the miner's fault.
+             * @description How to read a parked submission. 'operator_hold' means the platform will not attribute this row to the submission and an operator has to act before it can advance; it is not by itself a claim that the fleet failed. 'terminal_artifact_failure' means every remaining slot died on one named agent-attributable code, so no further lease of this artifact can finish scoring. Null while the submission is still advancing. Fail-closed: a mixed, unnamed, stale or unnameable cause reads as 'operator_hold'. Read 'hold_failure_code' before describing a hold as anyone's fault.
              */
             retry_disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
             /**
@@ -23187,6 +23192,8 @@ export interface components {
             agent_id: string;
             /** Bench Version */
             bench_version: number;
+            /** Hold Failure Code */
+            hold_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /**
              * Miner Hotkey
              * @description Submitting miner's SS58 hotkey.
@@ -24359,9 +24366,14 @@ export interface components {
         PublicValidatorRetry: {
             /**
              * Disposition
-             * @description 'operator_hold' when the fleet owes this submission another attempt, 'terminal_artifact_failure' when no further lease of this artifact can finish scoring. Null while it is advancing. Fail-closed: a mixed, unnamed or unactionable cause always reads as 'operator_hold'.
+             * @description 'operator_hold' when the platform will not attribute this row to the submission and an operator has to act, 'terminal_artifact_failure' when no further lease of this artifact can finish scoring. Null while it is advancing. Fail-closed: a mixed, unnamed, stale or unnameable cause reads as 'operator_hold', which on its own asserts no fault.
              */
             disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
+            /**
+             * Hold Failure Code
+             * @description Allowlisted machine cause behind an operator hold, when every remaining slot agrees on one. Null means the hold is unattributed, not that the fleet is at fault.
+             */
+            hold_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /**
              * Retry After
              * @description Earliest UTC time an expired ticket may be re-leased.

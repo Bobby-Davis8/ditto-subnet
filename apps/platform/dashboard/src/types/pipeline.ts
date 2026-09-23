@@ -126,6 +126,9 @@ export interface PipelineEntry extends ActivityEntry {
   retry_disposition?: string | null;
   /** Allowlisted machine cause behind a terminal disposition, else null. */
   terminal_failure_code?: string | null;
+  /** Allowlisted cause behind an operator hold, when every remaining slot
+   * agrees on one. Null means unattributed, not that the fleet is at fault. */
+  hold_failure_code?: string | null;
   provisional_composite?: number | null;
   active_benchmarks?: BenchmarkProgress[];
   active_bench_version?: number | null;
@@ -280,6 +283,7 @@ export interface ValidatorRetry {
   state?: string | null;
   disposition?: string | null;
   terminal_failure_code?: string | null;
+  hold_failure_code?: string | null;
   retry_after?: string | null;
 }
 

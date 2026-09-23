@@ -3152,14 +3152,16 @@ class PublicActivityEntry(BaseModel):
         Field(
             default=None,
             description=(
-                "How to read a parked submission: 'operator_hold' means the "
-                "remaining validator slots died on a Ditto-owned failure and "
-                "only an operator can restart them, 'terminal_artifact_failure' "
-                "means every remaining slot died on a named agent-attributable "
+                "How to read a parked submission. 'operator_hold' means the "
+                "platform will not attribute this row to the submission and an "
+                "operator has to act before it can advance; it is not by itself "
+                "a claim that the fleet failed. 'terminal_artifact_failure' "
+                "means every remaining slot died on one named agent-attributable "
                 "code, so no further lease of this artifact can finish scoring. "
                 "Null while the submission is still advancing. Fail-closed: a "
-                "mixed, unnamed or unactionable cause always reads as "
-                "'operator_hold', never as the miner's fault."
+                "mixed, unnamed, stale or unnameable cause reads as "
+                "'operator_hold'. Read 'hold_failure_code' before describing a "
+                "hold as anyone's fault."
             ),
         ),
     ] = None
@@ -3172,6 +3174,20 @@ class PublicActivityEntry(BaseModel):
                 "drawn from the same allowlist as a validation attempt's "
                 "failure_code. Null for every other disposition. Raw validator "
                 "diagnostics are never published here."
+            ),
+        ),
+    ] = None
+    hold_failure_code: Annotated[
+        PublicValidationFailureCode | None,
+        Field(
+            default=None,
+            description=(
+                "The agreed machine cause behind an 'operator_hold', when every "
+                "remaining slot reports the same one, drawn from the same "
+                "allowlist as a validation attempt's failure_code. Null is the "
+                "ordinary case and means the cause is mixed, unnamed or stale: "
+                "the row is unattributed rather than proven to be a fleet "
+                "failure, and must not be described as one."
             ),
         ),
     ] = None
@@ -3773,11 +3789,12 @@ class PublicValidatorRetry(BaseModel):
         Field(
             default=None,
             description=(
-                "'operator_hold' when the fleet owes this submission another "
-                "attempt, 'terminal_artifact_failure' when no further lease of "
-                "this artifact can finish scoring. Null while it is advancing. "
-                "Fail-closed: a mixed, unnamed or unactionable cause always "
-                "reads as 'operator_hold'."
+                "'operator_hold' when the platform will not attribute this row "
+                "to the submission and an operator has to act, "
+                "'terminal_artifact_failure' when no further lease of this "
+                "artifact can finish scoring. Null while it is advancing. "
+                "Fail-closed: a mixed, unnamed, stale or unnameable cause reads "
+                "as 'operator_hold', which on its own asserts no fault."
             ),
         ),
     ] = None
@@ -3788,6 +3805,17 @@ class PublicValidatorRetry(BaseModel):
             description=(
                 "Allowlisted machine cause behind a terminal disposition, from "
                 "the same set as a validation attempt's ``failure_code``."
+            ),
+        ),
+    ] = None
+    hold_failure_code: Annotated[
+        PublicValidationFailureCode | None,
+        Field(
+            default=None,
+            description=(
+                "Allowlisted machine cause behind an operator hold, when every "
+                "remaining slot agrees on one. Null means the hold is "
+                "unattributed, not that the fleet is at fault."
             ),
         ),
     ] = None
@@ -4545,6 +4573,8 @@ class PublicRolloutQueueEntry(BaseModel):
     """Same reading as the operations feed; see ``PublicActivityEntry``."""
     terminal_failure_code: PublicValidationFailureCode | None = None
     """Allowlisted cause behind a terminal disposition, else null."""
+    hold_failure_code: PublicValidationFailureCode | None = None
+    """Allowlisted cause behind an operator hold, else null; see the feed."""
     active_benchmarks: list[PublicBenchmarkProgress] = Field(default_factory=list)
 
 

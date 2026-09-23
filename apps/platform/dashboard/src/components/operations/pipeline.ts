@@ -122,11 +122,33 @@ const TERMINAL_CAUSES: Record<string, string> = {
     "The agent answered without the model inference the benchmark requires.",
 };
 
+/** Codes that name a failure Ditto owns, with the sentence that explains it.
+ *
+ * Only a hold carrying one of these has been attributed to the fleet. Every
+ * other hold is merely unattributed, and the copy for it must not assign
+ * fault in either direction. */
+const HOLD_CAUSES: Record<string, string> = {
+  provider_outage_parked:
+    "An inference provider outage ended the remaining attempts, not anything in this submission.",
+  inference_lane_saturated: "The inference lane was saturated, not anything in this submission.",
+  provider_recovery_exhausted:
+    "Provider recovery was exhausted before the run could finish, not anything in this submission.",
+  grant_decline_evidence_mismatch:
+    "An inference grant check failed inside Ditto, not anything in this submission.",
+  budget_evidence_absent:
+    "An inference budget record was missing inside Ditto, not anything in this submission.",
+};
+
 /** How to present a parked submission, or null while it is still advancing.
  *
  * The verdict comes from the API's retry_disposition. The dashboard never
- * re-derives it from the failure code, so a row the platform declined to
- * attribute is never presented as the miner's fault here either. */
+ * re-derives it, so a row the platform declined to attribute is never
+ * presented as the miner's fault here either.
+ *
+ * A hold only names Ditto as the cause when the API published an agreed
+ * no-fault code for it. Without one the row is unattributed, and the copy says
+ * so rather than guessing: an operator has to look before anyone knows whose
+ * failure it was. */
 export function parkedReading(entry: PipelineEntryExt): ParkedReading | null {
   if (entry.retry_disposition === "terminal_artifact_failure") {
     const code = String(entry.terminal_failure_code || "");
@@ -142,12 +164,20 @@ export function parkedReading(entry: PipelineEntryExt): ParkedReading | null {
     };
   }
   if (entry.retry_disposition === "operator_hold" || entry.retry_state === "exhausted") {
+    const cause = HOLD_CAUSES[String(entry.hold_failure_code || "")];
+    if (cause) {
+      return {
+        label: "On hold · Ditto-side failure",
+        title: cause + " It is waiting for an operator to authorize the next attempt.",
+        tone: "hold",
+      };
+    }
     return {
-      label: "On hold · Ditto-side failure",
+      label: "On hold · needs operator review",
       title:
-        "The remaining validator attempts ended on a failure Ditto owns, not " +
-        "on anything in this submission. It is waiting for an operator to " +
-        "authorize the next attempt.",
+        "The remaining validator attempts ended without a cause this surface " +
+        "can name, so the platform has not attributed this to either side. An " +
+        "operator has to review it before it can continue.",
       tone: "hold",
     };
   }

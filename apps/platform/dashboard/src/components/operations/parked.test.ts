@@ -8,14 +8,34 @@ function entry(overrides: Partial<PipelineEntryExt>): PipelineEntryExt {
 }
 
 describe("parkedReading", () => {
-  it("tells a miner an operator hold is not their failure", () => {
+  it("names Ditto only when the API published an agreed no-fault cause", () => {
+    const read = parkedReading(
+      entry({
+        retry_state: "exhausted",
+        retry_disposition: "operator_hold",
+        hold_failure_code: "provider_outage_parked",
+      }),
+    );
+    expect(read?.tone).toBe("hold");
+    expect(read?.label).toBe("On hold · Ditto-side failure");
+    expect(read?.title).toContain("provider outage");
+    expect(read?.title).toContain("not anything in this submission");
+  });
+
+  it("asserts no fault at all on a hold with no agreed cause", () => {
+    // The classifier sends mixed, unnamed, stale and unactionable rows here.
+    // Those are unattributed, not proven fleet failures, and the copy has to
+    // say only that much.
     const read = parkedReading(
       entry({ retry_state: "exhausted", retry_disposition: "operator_hold" }),
     );
     expect(read?.tone).toBe("hold");
-    expect(read?.label).toBe("On hold · Ditto-side failure");
-    expect(read?.title).toContain("not");
-    expect(read?.title).toContain("operator");
+    expect(read?.label).toBe("On hold · needs operator review");
+    expect(read?.title).toContain("has not attributed this to either side");
+    for (const claim of ["Ditto-side", "not anything in this submission", "fleet failure"]) {
+      expect(read?.title).not.toContain(claim);
+    }
+    expect(read?.label).not.toContain("Ditto");
   });
 
   it("names the code and the next step on a terminal artifact failure", () => {
@@ -33,14 +53,16 @@ describe("parkedReading", () => {
   });
 
   it("never implies a refund or a payment outcome", () => {
-    for (const disposition of ["operator_hold", "terminal_artifact_failure"]) {
-      const read = parkedReading(
-        entry({
-          retry_state: "exhausted",
-          retry_disposition: disposition,
-          terminal_failure_code: "inference_allowance_exhausted",
-        }),
-      );
+    const rows = [
+      { retry_disposition: "operator_hold", hold_failure_code: "provider_outage_parked" },
+      { retry_disposition: "operator_hold" },
+      {
+        retry_disposition: "terminal_artifact_failure",
+        terminal_failure_code: "inference_allowance_exhausted",
+      },
+    ];
+    for (const row of rows) {
+      const read = parkedReading(entry({ retry_state: "exhausted", ...row }));
       const text = (read?.label || "") + " " + (read?.title || "");
       for (const word of ["refund", "fee", "TAO", "credit", "reimburse"]) {
         expect(text.toLowerCase()).not.toContain(word.toLowerCase());
@@ -48,21 +70,10 @@ describe("parkedReading", () => {
     }
   });
 
-  it("states the terminal outcome without inventing a cause it was not given", () => {
-    const read = parkedReading(
-      entry({
-        retry_state: "exhausted",
-        retry_disposition: "terminal_artifact_failure",
-        terminal_failure_code: null,
-      }),
-    );
-    expect(read?.title).toContain("cannot finish scoring");
-    expect(read?.label).toBe("Cannot finish scoring");
-  });
-
-  it("falls back to the no-fault reading when the wire carries no disposition", () => {
+  it("falls back to the unattributed reading when the wire carries no disposition", () => {
     const read = parkedReading(entry({ retry_state: "exhausted" }));
     expect(read?.tone).toBe("hold");
+    expect(read?.label).toBe("On hold · needs operator review");
   });
 
   it("says nothing about a row that is still advancing", () => {

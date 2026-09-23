@@ -97,10 +97,11 @@ describe("pipeline board from the shared snapshot", () => {
       expect(document.querySelectorAll("#pipeline-wait-validator .pipeline-item").length).toBe(3),
     );
     // Without a disposition on the wire the board still parks the row, and it
-    // parks it on the no-fault side rather than calling it the miner's failure.
+    // parks it as unattributed: it may not call the row the miner's failure,
+    // and with no agreed cause published it may not call it Ditto's either.
     const chips = document.querySelectorAll("#pipeline-wait-validator .retry-chip.hold");
     expect(chips.length).toBe(3);
-    expect(chips[0]?.textContent).toBe("On hold · Ditto-side failure");
+    expect(chips[0]?.textContent).toBe("On hold · needs operator review");
     expect(document.querySelectorAll("#pipeline-wait-validator .retry-chip.exhausted").length).toBe(
       0,
     );

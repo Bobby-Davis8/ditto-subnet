@@ -184,6 +184,25 @@ def is_agent_attributable_exhaustion(
     )
 
 
+def agreed_failure_detail(
+    *, scores: list[Score], tickets: list[ValidatorTicket]
+) -> str | None:
+    """The single current ``failure_detail`` every remaining slot reports.
+
+    ``None`` when the causes are mixed, when any is missing or stale, or when
+    there is nothing left to agree. A cause no slot disputes is the only one a
+    public surface may name.
+    """
+    remaining = remaining_exhausted_tickets(scores=scores, tickets=tickets)
+    if not remaining:
+        return None
+    details = {current_failure_detail(ticket) for ticket in remaining}
+    if len(details) != 1:
+        return None
+    detail = next(iter(details))
+    return detail if isinstance(detail, str) else None
+
+
 def dominant_agent_failure_detail(
     *, scores: list[Score], tickets: list[ValidatorTicket]
 ) -> str | None:
@@ -227,16 +246,26 @@ def retry_disposition(
     :func:`recommended_retry_action` already splits them, so the public surface
     can never disagree with the operator triage it was derived from.
 
-    Fail-closed. ``withdraw`` is the only verdict that blames the submission;
-    anything else, including an exhausted row whose next step cannot be named,
-    reads as a hold on the fleet.
+    Fail-closed, and deliberately weak: ``operator_hold`` means only that the
+    platform will not attribute this row to the submission. It is not a claim
+    that the fleet failed. A mixed, unnamed, stale or unactionable cause, and a
+    withdraw verdict with no single publishable code, all land here.
     """
     if state != "exhausted":
         return None
     action = recommended_retry_action(
         scores=scores, tickets=tickets, recovery_allowed=recovery_allowed
     )
-    return "terminal_artifact_failure" if action == "withdraw" else "operator_hold"
+    if action != "withdraw":
+        return "operator_hold"
+    # A withdraw verdict can rest on two different named codes, and a terminal
+    # row has to be able to name the one it is telling the miner to fix. When
+    # the remaining slots disagree there is no code to publish, so the public
+    # reading falls back to the hold rather than asserting a failure it cannot
+    # attribute. The operator surface still reads ``withdraw``.
+    if dominant_agent_failure_detail(scores=scores, tickets=tickets) is None:
+        return "operator_hold"
+    return "terminal_artifact_failure"
 
 
 def recovery_gate(
@@ -545,6 +574,14 @@ class AgentRetryState:
     from :data:`AGENT_ATTRIBUTABLE_FAILURE_DETAILS`, so no free-form validator
     diagnostic can reach a caller through this field.
     """
+    hold_failure_code: str | None
+    """The agreed cause behind an ``operator_hold``, when every slot names one.
+
+    This is what separates a hold the platform can attribute to its own fleet
+    from one it simply cannot attribute at all. Null is the ordinary case and
+    means the cause is mixed, unnamed or stale; a caller must not describe a
+    null-code hold as anyone's fault.
+    """
     earliest_retry_after: datetime | None
     scores: list[Score]
     tickets: list[ValidatorTicket]
@@ -715,6 +752,11 @@ async def classify_agent_retry_states(
             terminal_failure_code=(
                 dominant_agent_failure_detail(scores=v_scores, tickets=v_tickets)
                 if disposition == "terminal_artifact_failure"
+                else None
+            ),
+            hold_failure_code=(
+                agreed_failure_detail(scores=v_scores, tickets=v_tickets)
+                if disposition == "operator_hold"
                 else None
             ),
             # Only a ticket that can still retry has a meaningful "retry at"
