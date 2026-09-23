@@ -333,6 +333,56 @@ async def test_the_serving_upstream_is_recorded_on_a_failed_court_run(
     assert diagnostic.provider == "openrouter"
 
 
+async def test_an_earlier_step_does_not_own_a_later_timeout(
+    tmp_path: Path,
+) -> None:
+    """A run that answered once and then hung must not blame the first upstream.
+
+    The trace spans the whole court run, so without a per-request reset the
+    upstream that served a completed step would be named as the one that served
+    the call which actually failed. A timeout has no response body, so the
+    honest answer is that the upstream is unknown.
+    """
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "provider": "Together",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [_call("list_files", {"prefix": ""})],
+                            }
+                        }
+                    ],
+                },
+            )
+        await asyncio.sleep(0.2)
+        return httpx.Response(200, json={})
+
+    deadline = asyncio.get_running_loop().time() + 0.15
+    result = await _adjudicator(
+        _key(tmp_path), httpx.MockTransport(handler)
+    ).adjudicate(_archive(tmp_path), notes=[_CONCERN], deadline=deadline)
+
+    assert requests >= 2
+    assert result.decision == "escalate"
+    assert result.escalation_code == "adjudicator-failed"
+    diagnostic = result.run_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.error_class == "TimeoutError"
+    # The first step was served by Together; the failing one was served by
+    # nobody that answered, so the field stays unknown rather than inheriting.
+    assert diagnostic.upstream is None
+
+
 async def test_a_provider_fault_inside_a_200_still_names_its_upstream(
     tmp_path: Path,
 ) -> None:

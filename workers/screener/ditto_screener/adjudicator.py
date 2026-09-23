@@ -71,14 +71,28 @@ _ERROR_CLASS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
 _PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
+def _clear_upstream() -> None:
+    """Forget the previous request's upstream before issuing the next one.
+
+    A failure with no readable response must leave the upstream unknown rather
+    than inherit the last one that answered.
+    """
+    trace = _run_trace.get()
+    if trace is not None:
+        trace.upstream = None
+
+
 def _observe_upstream(payload: object) -> None:
     """Record which upstream served this response, if it named one.
 
     Read before anything that can reject the body, because a provider fault
     relayed inside an HTTP 200 is exactly the failure worth attributing to an
-    upstream. Last one wins: a court run makes several calls and the gateway
-    may move between upstreams, so the one that served the failing call is the
-    one an operator needs.
+    upstream.
+
+    The trace spans a whole court run, so :func:`_clear_upstream` empties this
+    at the start of every request and retry. Without that, a step that answered
+    from one upstream would still be named when a later step times out with no
+    response at all, which blames an upstream for a call it never served.
     """
     trace = _run_trace.get()
     if trace is None or not isinstance(payload, dict):
@@ -1237,6 +1251,7 @@ class SourceReviewAdjudicator:
             _MAX_COMPLETION_REQUEST_SECONDS,
         )
         for attempt in range(_MAX_COMPLETION_REQUEST_ATTEMPTS):
+            _clear_upstream()
             try:
                 async with asyncio.timeout(effective_timeout):
                     response = await client.post(
