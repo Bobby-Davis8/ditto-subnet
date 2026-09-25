@@ -187,6 +187,7 @@ from ditto.api_server.inference_concurrency_settings import resolved_proxy_confi
 from ditto.api_server.inference_routing import record_ticket_route_quality
 from ditto.api_server.koth import (
     KothEntry,
+    KothProjection,
     continual_composite,
     effective_composite,
     emission_set,
@@ -200,7 +201,9 @@ from ditto.api_server.outlier_escalation import (
     OUTLIER_ALGORITHM_VERSION,
     OUTLIER_REVIEW_KIND,
     OutlierEscalationSettings,
+    OutlierEscalationSettingsLoad,
     evaluate_score_outlier,
+    load_outlier_escalation_settings,
 )
 from ditto.api_server.private_benchmark_preparation import lease_dataset_sha
 from ditto.api_server.queue_policy_settings import (
@@ -215,6 +218,7 @@ from ditto.api_server.scoring_gate import (
     evaluate_rejected_resubmission,
 )
 from ditto.api_server.storage import S3StorageClient
+from ditto.api_server.v13_scorer_cohort import pinned_validator_allowed
 from ditto.api_server.validator_slot_settings import (
     DEFAULT_SETTINGS as SLOT_SETTINGS_DEFAULT,
 )
@@ -474,46 +478,17 @@ def _outlier_escalation_settings_from_env() -> OutlierEscalationSettings:
     """Build the escalation policy from the environment, falling back to shipped
     defaults for any variable that is unset or unparseable (fail-safe: a bad
     value degrades to the conservative default rather than crashing scoring)."""
-    defaults = OutlierEscalationSettings()
-
-    mode = (
-        os.environ.get("DITTO_OUTLIER_ESCALATION_MODE", defaults.mode).strip().lower()
-    )
-    if mode not in {"off", "observe", "enforce"}:
-        mode = defaults.mode
-
-    def _int(name: str, fallback: int) -> int:
-        try:
-            return int(os.environ[name])
-        except (KeyError, ValueError):
-            return fallback
-
-    def _float(name: str, fallback: float) -> float:
-        try:
-            return float(os.environ[name])
-        except (KeyError, ValueError):
-            return fallback
-
-    return OutlierEscalationSettings(
-        mode=mode,
-        min_bench_version=_int(
-            "DITTO_OUTLIER_ESCALATION_MIN_BENCH_VERSION", defaults.min_bench_version
-        ),
-        min_cohort_size=_int(
-            "DITTO_OUTLIER_ESCALATION_MIN_COHORT_SIZE", defaults.min_cohort_size
-        ),
-        modified_z_threshold=_float(
-            "DITTO_OUTLIER_ESCALATION_MODIFIED_Z_THRESHOLD",
-            defaults.modified_z_threshold,
-        ),
-        min_composite_floor=_float(
-            "DITTO_OUTLIER_ESCALATION_MIN_COMPOSITE_FLOOR",
-            defaults.min_composite_floor,
-        ),
-    )
+    return load_outlier_escalation_settings(os.environ).settings
 
 
-OUTLIER_ESCALATION_SETTINGS = _outlier_escalation_settings_from_env()
+# Loaded once per process at import, like the transform-audit toggle. The load
+# record keeps each field's source (env / default / default_invalid_env) so the
+# admin posture read can show a silently-rejected variable; scoring only ever
+# consumes ``OUTLIER_ESCALATION_SETTINGS``.
+OUTLIER_ESCALATION_SETTINGS_LOAD: OutlierEscalationSettingsLoad = (
+    load_outlier_escalation_settings(os.environ)
+)
+OUTLIER_ESCALATION_SETTINGS = OUTLIER_ESCALATION_SETTINGS_LOAD.settings
 
 
 def _binomial_tail(k: int, n: int, p: float = 0.5) -> float:
@@ -3476,6 +3451,15 @@ async def request_job(
         target_version = (
             rollout.desired_version if rollout is not None else canonical_version
         )
+        if target_version == 13 and not await pinned_validator_allowed(
+            session, hotkey=payload.validator_hotkey, now=now
+        ):
+            _record_dispatch_decline(
+                "v13_scorer_cohort_pin",
+                validator_hotkey=payload.validator_hotkey,
+                slot_id=payload.slot_id or "slot-0",
+            )
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
         inference_required = (
             request.app.state.config.inference_proxy.required or target_version >= 7
         )
@@ -4271,6 +4255,14 @@ class _KothLaneSnapshot:
 
     folded_entries: list[KothEntry]
     raw_emission: tuple[KothEntry, ...]
+    all_entries: tuple[KothEntry, ...]
+    official_scores: dict[UUID, float]
+    canonical_scores: dict[UUID, float]
+    owner_representatives: dict[str, UUID]
+    owner_by_agent: dict[UUID, str]
+    folded_seeds_by_agent: dict[UUID, tuple[int, ...]]
+    # (official owner representative, newer canonical-best generation).
+    owner_challengers: tuple[tuple[UUID, KothEntry], ...]
 
 
 async def _current_koth_entries(
@@ -4488,9 +4480,44 @@ async def _current_koth_entries(
         for entry in entries
         if entry.agent_id in selected_by_id
     ]
+    raw_entries_by_id = {entry.agent_id: entry for entry in raw_entries}
+    raw_rows_by_owner = {
+        row.emission_owner_root or f"agent:{row.agent_id}": row for row in raw_rows
+    }
+    owner_challengers = tuple(
+        (row.agent_id, raw_entries_by_id[raw_row.agent_id])
+        for row in selected_rows
+        if (
+            (
+                raw_row := raw_rows_by_owner.get(
+                    row.emission_owner_root or f"agent:{row.agent_id}"
+                )
+            )
+            is not None
+            and raw_row.agent_id != row.agent_id
+            and raw_row.first_seen > row.first_seen
+            and raw_scores[raw_row.agent_id] > raw_scores[row.agent_id]
+        )
+    )
     return _KothLaneSnapshot(
         folded_entries=folded_entries,
         raw_emission=raw_members,
+        all_entries=tuple(entries),
+        official_scores=entry_scores,
+        canonical_scores=raw_scores,
+        owner_representatives={
+            row.emission_owner_root or f"agent:{row.agent_id}": row.agent_id
+            for row in selected_rows
+        },
+        owner_by_agent={
+            row.agent_id: row.emission_owner_root or f"agent:{row.agent_id}"
+            for row in rows
+        },
+        folded_seeds_by_agent={
+            row.agent_id: tuple(sorted(eligible_seeds.get(row.agent_id, ())))
+            for row in rows
+        },
+        owner_challengers=owner_challengers,
     )
 
 
@@ -4514,6 +4541,42 @@ async def _current_emission_set(
     return emission_set(project_koth(snapshot.folded_entries))
 
 
+def _configured_retest_cohort(
+    entries: Sequence[KothEntry],
+    projection: KothProjection | None,
+    *,
+    settings: ContinualRetestSettings,
+) -> tuple[KothEntry, ...]:
+    """The operator-configured folded cohort, before any widening.
+
+    Split out so the read-only admission diagnostic resolves the cutoff with
+    the same call the lane admits on. An operator shown a separately derived
+    cutoff could be shown a cutoff that was never applied.
+    """
+    statistical = settings.retest_eligibility_mode == "statistical"
+    return retest_cohort(
+        entries,
+        projection,
+        size=settings.retest_cohort_size,
+        max_size=settings.retest_cohort_max_size if statistical else None,
+        tolerance_z=settings.retest_eligibility_z if statistical else 0.0,
+    )
+
+
+def _retest_cohort_cutoff(
+    configured_cohort: Sequence[KothEntry], *, settings: ContinualRetestSettings
+) -> KothEntry | None:
+    """The last member the FIXED rank admitted -- the tie band's anchor.
+
+    ``None`` when the cohort never reached the configured size, which is also
+    exactly when :func:`retest_cohort` never opened a band to measure against.
+    """
+    base_size = max(1, settings.retest_cohort_size)
+    if len(configured_cohort) < base_size:
+        return None
+    return configured_cohort[base_size - 1]
+
+
 async def _current_retest_cohort(
     session: AsyncSession,
     *,
@@ -4521,8 +4584,14 @@ async def _current_retest_cohort(
     settings: ContinualRetestSettings,
     efficiency_config: EfficiencyBonusConfig | None = None,
     now: datetime | None = None,
-) -> tuple[tuple[KothEntry, ...], tuple[KothEntry, ...], tuple[KothEntry, ...]]:
-    """Return ``(emission_set, wave_members, retest_cohort)`` from one read.
+    snapshot: _KothLaneSnapshot | None = None,
+) -> tuple[
+    tuple[KothEntry, ...],
+    tuple[KothEntry, ...],
+    tuple[KothEntry, ...],
+    frozenset[UUID],
+]:
+    """Return emission, wave, cohort, and same-owner challenger IDs from one read.
 
     Both are returned because the lane needs them for different jobs: the
     public-board ``wave_members`` are the seed-family anchor, the folded
@@ -4547,38 +4616,52 @@ async def _current_retest_cohort(
     retesting the folded top five while the fold waits for somebody it will
     never schedule.
 
-    The returned retest cohort is therefore the configured folded cohort plus
-    every raw wave member, in that order. This may add at most five gate
-    catch-up members; it changes neither emissions nor score arithmetic.
+    The returned retest cohort is the configured folded cohort, every raw wave
+    member, and at most one stronger canonical successor for each folded
+    emission owner. The successor can earn comparable evidence without taking
+    a second emission slot or changing the seed-family completion gate.
     """
-    snapshot = await _current_koth_entries(
-        session,
-        canonical_version=canonical_version,
-        wave_membership=settings.wave_membership,
-        efficiency_config=efficiency_config,
-        now=now,
-    )
+    if snapshot is None:
+        snapshot = await _current_koth_entries(
+            session,
+            canonical_version=canonical_version,
+            wave_membership=settings.wave_membership,
+            efficiency_config=efficiency_config,
+            now=now,
+        )
     entries = snapshot.folded_entries
     projection = project_koth(entries)
     # Public-board top five, owner-deduped on canonical scores. Stripping
     # confirmation off the *folded* list cannot recover a newer UUID that
     # confirmation-enriched owner-dedupe already dropped (aceron_v23 vs v20).
     wave_members = snapshot.raw_emission
-    statistical = settings.retest_eligibility_mode == "statistical"
     emission_members = emission_set(projection)
-    configured_cohort = retest_cohort(
-        entries,
-        projection,
-        size=settings.retest_cohort_size,
-        max_size=settings.retest_cohort_max_size if statistical else None,
-        tolerance_z=settings.retest_eligibility_z if statistical else 0.0,
+    configured_cohort = _configured_retest_cohort(
+        entries, projection, settings=settings
     )
     seen = {member.agent_id for member in configured_cohort}
+    emission_ids = {member.agent_id for member in emission_members}
+    wave_ids = {member.agent_id for member in wave_members}
+    challengers = tuple(
+        challenger
+        for incumbent_id, challenger in snapshot.owner_challengers
+        if incumbent_id in emission_ids
+    )
     combined_cohort = (
         *configured_cohort,
         *(member for member in wave_members if member.agent_id not in seen),
+        *(
+            member
+            for member in challengers
+            if member.agent_id not in seen and member.agent_id not in wave_ids
+        ),
     )
-    return emission_members, wave_members, combined_cohort
+    return (
+        emission_members,
+        wave_members,
+        combined_cohort,
+        frozenset(member.agent_id for member in challengers),
+    )
 
 
 def _revealed_weighted_hotkeys(app_state: Any) -> set[str] | None:
@@ -4894,18 +4977,24 @@ async def _unserved_catchup_members(
     session: AsyncSession,
     *,
     champion_agent_id: UUID,
+    wave_member_ids: Sequence[UUID] = (),
     emission_member_ids: Sequence[UUID],
+    challenger_member_ids: Sequence[UUID] = (),
     canonical_version: int,
     now: datetime,
 ) -> frozenset[UUID]:
-    """Emission members owing backlog seeds that no live lease is covering.
+    """Emission members and bounded owner challengers with unserved backlog.
 
     "Unserved" rather than merely "behind": a member whose whole backlog is
     already leased out is converging as fast as it can, and letting it keep
     blocking extended-cohort work would idle capacity for nothing.
     """
-    members = tuple(dict.fromkeys(emission_member_ids))
-    if len(members) < 2:
+    wave_members = tuple(dict.fromkeys(wave_member_ids or emission_member_ids))
+    catchup_members = tuple(
+        dict.fromkeys((*emission_member_ids, *challenger_member_ids))
+    )
+    members = tuple(dict.fromkeys((*wave_members, *catchup_members)))
+    if len(wave_members) < 2:
         return frozenset()
     history = await confirmation_composites_by_seed(
         session, agent_ids=members, bench_version=canonical_version
@@ -4916,7 +5005,9 @@ async def _unserved_catchup_members(
     target_seeds = bounded_continual_seed_set(
         champion_agent_id,
         version=canonical_version,
-        composites_by_agent=history,
+        composites_by_agent={
+            member_id: history.get(member_id, {}) for member_id in wave_members
+        },
         block_hash=block_hash,
         allow_fresh_seeds=allow_fresh_seeds,
     )
@@ -4928,10 +5019,10 @@ async def _unserved_catchup_members(
         now=now,
     )
     unserved: list[UUID] = []
-    for member_id in members:
+    for member_id in catchup_members:
         catchup = confirmation_catchup_seeds(
             member_id=member_id,
-            peer_ids=members,
+            peer_ids=catchup_members,
             anchored_seeds=target_seeds,
             seeds_by_agent=seeds_by_agent,
         )
@@ -5362,7 +5453,12 @@ async def request_top5_confirmation_job(
                         "is required"
                     ),
                 )
-        emission_members, wave_members, members = await _current_retest_cohort(
+        (
+            emission_members,
+            wave_members,
+            members,
+            challenger_member_ids,
+        ) = await _current_retest_cohort(
             session,
             canonical_version=canonical_version,
             settings=continual_settings,
@@ -5518,7 +5614,9 @@ async def request_top5_confirmation_job(
         catchup_member_ids = await _unserved_catchup_members(
             session,
             champion_agent_id=champion_agent_id,
+            wave_member_ids=wave_member_ids,
             emission_member_ids=tuple(member.agent_id for member in emission_members),
+            challenger_member_ids=tuple(challenger_member_ids),
             canonical_version=canonical_version,
             now=now,
         )
@@ -6631,6 +6729,16 @@ async def submit_score(
             (agent_id, report_version, payload.validator_hotkey),
             with_for_update=True,
         )
+        # Exact retries below remain idempotent; no new V13 score or canary
+        # completion may enter from outside the immutable scorer cohort.
+        if (
+            report_version == 13
+            and (prior_ticket is None or prior_ticket.status != TicketStatus.SCORED)
+            and not await pinned_validator_allowed(
+                session, hotkey=payload.validator_hotkey, now=datetime.now(UTC)
+            )
+        ):
+            raise HTTPException(409, "V13 scorer cohort pin excludes this validator")
         canary = await canary_for_lease(
             session,
             agent_id=agent_id,

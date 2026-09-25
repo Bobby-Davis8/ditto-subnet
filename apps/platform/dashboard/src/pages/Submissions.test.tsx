@@ -136,7 +136,7 @@ describe("server-backed quick filters (row 10)", () => {
     expect(buttons).toEqual([
       ["all", "All 927", "true"],
       ["rejected", "Rejected 164", "false"],
-      ["under_review", "Integrity review 53", "false"],
+      ["under_review", "Deferred review 53", "false"],
       ["waiting_validator", "Waiting for validators 3", "false"],
       ["queued", "Queued work 3", "false"],
       ["downloadable", "Source releases 0", "false"],
@@ -906,7 +906,7 @@ describe("async agent evidence", () => {
     ["rejected", 2, "rejected this submission"],
     ["rejected", 3, "rejected this submission"],
     ["screening_failed", 3, "not a submission rejection"],
-    ["under_review", 3, "held for integrity review"],
+    ["under_review", 3, "held for deferred source review"],
     ["screening", 3, "currently checking"],
   ])("shows %s ahead of %i historical scores", async (status, score_count, expected) => {
     render(() => (
@@ -1187,6 +1187,80 @@ describe("async agent evidence", () => {
   });
 });
 
+// ── #562: a review-budget hold must not read as a finding ────────────────────
+describe("deferred source review chip (#562)", () => {
+  async function renderHeld(fields: Record<string, unknown>): Promise<HTMLElement> {
+    const base = (activity.entries ?? [])[0] as Record<string, unknown>;
+    stubActivityFetch(() => ({
+      entries: [{ ...base, status: "under_review", ...fields }],
+      status_counts: { under_review: 1 },
+      page: 1,
+      total_pages: 1,
+      total: 1,
+    }));
+    render(() => <SubmissionsPage />);
+    await waitFor(() => expect(document.querySelector(".stage-cell .stage")).toBeTruthy());
+    return document.querySelector(".stage-cell") as HTMLElement;
+  }
+
+  it("shows a recorded budget hold as neutral with its trigger and the budget copy", async () => {
+    const cell = await renderHeld({
+      screening_reason: "Deferred source review requires operator adjudication",
+      deferred_review_triggers: ["top_five"],
+      review_conclusion: "budget_exhausted",
+    });
+    const chip = cell.querySelector(".stage") as HTMLElement;
+    expect(chip.textContent).toBe("Deferred source review");
+    expect(chip.classList.contains("warn")).toBe(false);
+    expect(cell.querySelector(".deferred-review-summary")?.textContent).toBe(
+      "Score qualified (top 5) \u00b7 automated review ran out of budget \u2014 no finding",
+    );
+  });
+
+  it("claims neither a review nor a budget for a preflight or auditless hold", async () => {
+    const cell = await renderHeld({
+      screening_reason: "Deferred source review requires operator adjudication",
+      deferred_review_triggers: ["top_five"],
+      review_conclusion: "not_completed",
+    });
+    const chip = cell.querySelector(".stage") as HTMLElement;
+    expect(chip.classList.contains("warn")).toBe(false);
+    const summary = cell.querySelector(".deferred-review-summary")?.textContent ?? "";
+    expect(summary).toBe(
+      "Score qualified (top 5) \u00b7 automated review did not complete \u2014 no finding recorded",
+    );
+    expect(cell.textContent).not.toContain("budget");
+  });
+
+  it("uses inconclusive copy for an audited review that exhausted nothing", async () => {
+    const cell = await renderHeld({
+      screening_reason: "Deferred source review requires operator adjudication",
+      deferred_review_triggers: ["top_five"],
+      review_conclusion: "no_finding",
+    });
+    expect(cell.querySelector(".stage")?.classList.contains("warn")).toBe(false);
+    expect(cell.querySelector(".deferred-review-summary")?.textContent).toBe(
+      "Score qualified (top 5) \u00b7 automated review inconclusive \u2014 no finding",
+    );
+    expect(cell.textContent).not.toContain("budget");
+  });
+
+  it("keeps the warn chip for an adverse signal and names the anomaly trigger", async () => {
+    const cell = await renderHeld({
+      screening_reason: "Deferred source review requires operator adjudication",
+      deferred_review_triggers: ["anomaly"],
+      review_conclusion: "adverse_signal",
+    });
+    const chip = cell.querySelector(".stage") as HTMLElement;
+    expect(chip.textContent).toBe("Deferred source review");
+    expect(chip.classList.contains("warn")).toBe(true);
+    expect(cell.querySelector(".deferred-review-summary")?.textContent).toBe(
+      "Anomaly hold \u00b7 automated review raised a concern",
+    );
+    expect(cell.textContent).not.toContain("no finding");
+  });
+});
+
 // ── Weekend drift #622/#636 in the activity table ────────────────────────────
 // #622: the stage cell leads with the CURRENT review reason under its event
 // label, keeping the initial hold as labeled history. #636: past the
@@ -1216,7 +1290,7 @@ describe("review-event evidence in the table (#622/#636)", () => {
     render(() => <SubmissionsPage />);
     await waitFor(() => expect(document.querySelector(".stage-cell .stage")).toBeTruthy());
     const cell = document.querySelector(".stage-cell") as HTMLElement;
-    expect(cell.querySelector(".stage")?.textContent).toBe("Source integrity review");
+    expect(cell.querySelector(".stage")?.textContent).toBe("Deferred source review");
     const notes = Array.from(cell.querySelectorAll(".stage-note"), (note) => note.textContent);
     expect(notes[0]).toBe("Review reopened: manual re-check of tool-call provenance");
     expect(notes[1]).toBe("Initial hold: content near-duplicate of agent abc");

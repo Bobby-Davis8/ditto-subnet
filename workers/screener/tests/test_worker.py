@@ -110,6 +110,8 @@ class _FakeGate:
         agent_id: UUID,
         deadline: float | None = None,
         publish_image: Any = None,
+        publish_held_image: Any = None,
+        record_archive_verification: Any = None,
         build_only: bool = False,
         policy_only: bool = False,
         deferred_source_review: bool = False,
@@ -128,6 +130,8 @@ class _FakeGate:
             self.policy_versions.append(policy_version)
         if bench_version is not None:
             self.bench_versions.append(bench_version)
+        if record_archive_verification is not None:
+            await record_archive_verification()
         if (
             self.result.outcome
             in {
@@ -140,6 +144,23 @@ class _FakeGate:
             await publish_image(
                 BuiltImageArtifact(
                     path="/tmp/fake-screened-image.tar",
+                    sha256="12" * 32,
+                    size_bytes=123,
+                    image_id="sha256:" + "34" * 32,
+                    image_ref=f"ditto-screen/{agent_id}:latest",
+                )
+            )
+        if (
+            self.result.outcome == ScreeningOutcome.QUARANTINE
+            and publish_held_image is not None
+            and any(
+                item.code == "adjudicated-source-review-escalate"
+                for item in self.result.evidence
+            )
+        ):
+            await publish_held_image(
+                BuiltImageArtifact(
+                    path="/tmp/fake-held-image.tar",
                     sha256="12" * 32,
                     size_bytes=123,
                     image_id="sha256:" + "34" * 32,
@@ -166,6 +187,7 @@ class _FakePlatform:
         self.heartbeat_lease_deadline: datetime | None = None
         self.artifact_calls: list[tuple[UUID, UUID | None]] = []
         self.image_uploads: list[dict[str, Any]] = []
+        self.verification_receipts: list[dict[str, Any]] = []
         self.review_settings_source = "bootstrap"
         self.review_settings: Any = None
         self.review_settings_revisions: dict[int, Any] = {}
@@ -174,6 +196,9 @@ class _FakePlatform:
     async def upload_screened_image(self, agent_id: UUID, **metadata: Any) -> UUID:
         self.image_uploads.append({"agent_id": agent_id, **metadata})
         return UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+    async def record_verification_receipt(self, agent_id: UUID, **receipt: Any) -> None:
+        self.verification_receipts.append({"agent_id": agent_id, **receipt})
 
     async def submit_heartbeat(self, request: Any) -> Any:
         if self.heartbeat_error is not None:
@@ -367,6 +392,35 @@ async def test_healthy_rootless_executor_can_claim(
     assert readiness.ready
 
 
+async def test_report_only_canary_emits_active_progress_and_clears_heartbeat(
+    make_config: Callable[..., ScreenerConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ditto_screener import l2_report_canary
+
+    agent_id = uuid4()
+    platform = _FakePlatform([[]])
+    worker = _worker(
+        make_config(), platform, _FakeGate(_decision(ScreeningOutcome.PASS))
+    )
+
+    async def consume(**kwargs: Any) -> bool:
+        kwargs["on_claim"](type("Claim", (), {"agent_id": agent_id})())
+        kwargs["progress"]("source_review_0")
+        await asyncio.sleep(0)
+        return True
+
+    monkeypatch.setattr(l2_report_canary, "consume", consume)
+    assert await worker._sweep(asyncio.Event()) == 1
+    assert any(
+        beat.state == "screening"
+        and beat.active_agent_id == agent_id
+        and beat.progress is not None
+        for beat in platform.heartbeats
+    )
+    assert platform.heartbeats[-1].state == "polling"
+    assert platform.heartbeats[-1].active_agent_id is None
+
+
 async def test_screen_one_pass_posts_signed_pass_verdict(
     make_config: Callable[..., ScreenerConfig],
 ) -> None:
@@ -388,6 +442,10 @@ async def test_screen_one_pass_posts_signed_pass_verdict(
     assert v["image_id"] == "sha256:" + "34" * 32
     assert v["image_upload_id"] == UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
     assert len(platform.image_uploads) == 1
+    assert {row["check_code"] for row in platform.verification_receipts} == {
+        "archive_sha",
+        "build_image_digest",
+    }
     assert platform.heartbeats[0].state == "screening"
     assert platform.heartbeats[0].progress.stage == "preparing"
     assert platform.heartbeats[-1].state == "polling"
@@ -568,6 +626,38 @@ async def test_default_item_screens_full_pipeline(
     await worker._screen_one(_item(agent), policy_version=SCREENING_POLICY_VERSION)
     assert gate.build_only_calls == [False]
     assert platform.verdicts[0]["build_only"] is False
+
+
+async def test_v13_source_hold_uploads_image_evidence_without_passing(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    agent = uuid4()
+    platform = _FakePlatform([])
+    decision = ScreeningDecision(
+        outcome=ScreeningOutcome.QUARANTINE,
+        detail="source review incomplete",
+        manifest_digest="ab" * 32,
+        evidence=(
+            PolicyEvidence(
+                "adjudication", "adjudicated-source-review-escalate", "held"
+            ),
+        ),
+        policy_version=13,
+    )
+    worker = _worker(make_config(), platform, _FakeGate(decision))
+
+    await worker._screen_one(_item(agent), policy_version=13)
+
+    assert len(platform.image_uploads) == 1
+    assert [r["check_code"] for r in platform.verification_receipts] == [
+        "archive_sha",
+        "build_image_digest",
+    ]
+    verdict = platform.verdicts[0]
+    assert verdict["outcome"] == ScreenResultOutcome.QUARANTINE
+    assert verdict["passed"] is False
+    assert verdict["image_sha256"] is None
+    assert verdict["image_upload_id"] is None
 
 
 async def test_policy_only_item_reuses_image_without_upload(
@@ -892,6 +982,7 @@ async def test_local_build_failure_forwards_signed_private_miner_feedback(
     assert verdict["private_failure_log_tail"] is not None
     assert "secret-value" not in verdict["private_failure_detail"]
     assert "[REDACTED]" in verdict["private_failure_log_tail"]
+    _signed_request(verdict)
 
 
 async def test_seed_probe_rejection_forwards_private_miner_feedback(
@@ -921,6 +1012,100 @@ async def test_seed_probe_rejection_forwards_private_miner_feedback(
     assert verdict["private_failure_detail"] is not None
     assert "/seed" in verdict["private_failure_detail"]
     assert "secret-value" not in verdict["private_failure_detail"]
+    _signed_request(verdict)
+
+
+def _shadow_seed_evidence(decision: ScreeningDecision) -> ScreeningDecision:
+    """Append the records shadow mode adds without changing the outcome."""
+    return replace(
+        decision,
+        evidence=(
+            *decision.evidence,
+            PolicyEvidence(
+                "stable-core",
+                "seed-readonly-write",
+                "shadow seed probe observed a read-only filesystem write",
+            ),
+            PolicyEvidence(
+                "stable-core",
+                "seed-envelope-usage",
+                "memory peak 120 MiB of 3072 MiB",
+            ),
+        ),
+    )
+
+
+def _signed_request(verdict: dict[str, Any]) -> ScreenResultRequest:
+    return ScreenResultRequest(
+        screener_hotkey=_MINER,
+        **{key: value for key, value in verdict.items() if key != "agent_id"},
+    )
+
+
+async def test_shadow_seed_observation_keeps_quarantine_verdict_signed(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    # Shadow /seed evidence is appended after the deciding code. Signing it as
+    # private failure feedback makes ScreenResultRequest reject a quarantine
+    # with "private failure feedback requires a failure outcome", and the
+    # worker then parks the attempt as worker-result-processing-failed.
+    platform = _FakePlatform([])
+    gate = _FakeGate(
+        _shadow_seed_evidence(
+            core_decision(
+                ScreeningOutcome.QUARANTINE,
+                code="benchmark-emulation",
+                summary="source review held the submission for operator review",
+                detail="private policy quarantine pending operator review",
+            )
+        )
+    )
+    worker = _worker(make_config(), platform, gate)
+
+    await worker._screen_one(_item(uuid4()), policy_version=SCREENING_POLICY_VERSION)
+
+    assert len(platform.verdicts) == 1
+    verdict = platform.verdicts[0]
+    request = _signed_request(verdict)
+    assert request.outcome == ScreenResultOutcome.QUARANTINE
+    assert request.passed is False
+    assert request.reason_code == "benchmark-emulation"
+    assert request.private_failure_detail is None
+    assert request.private_failure_log_tail is None
+    assert [item.code for item in request.evidence or []] == [
+        "benchmark-emulation",
+        "seed-readonly-write",
+        "seed-envelope-usage",
+    ]
+
+
+async def test_shadow_seed_observation_keeps_pass_verdict_signed(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    platform = _FakePlatform([])
+    gate = _FakeGate(
+        _shadow_seed_evidence(
+            core_decision(
+                ScreeningOutcome.PASS,
+                code="health-ok",
+                summary="container satisfied the health gate",
+                detail="",
+            )
+        )
+    )
+    worker = _worker(make_config(), platform, gate)
+
+    await worker._screen_one(_item(uuid4()), policy_version=SCREENING_POLICY_VERSION)
+
+    assert len(platform.verdicts) == 1
+    verdict = platform.verdicts[0]
+    request = _signed_request(verdict)
+    assert request.outcome == ScreenResultOutcome.PASS
+    assert request.passed is True
+    assert request.reason_code == "health-ok"
+    assert request.private_failure_detail is None
+    assert request.private_failure_log_tail is None
+    assert request.evidence is None
 
 
 async def test_exact_cross_miner_duplicate_skips_artifact_and_private_gate(

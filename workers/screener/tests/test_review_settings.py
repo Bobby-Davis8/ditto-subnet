@@ -18,11 +18,23 @@ from ditto_screener.review_settings import (
     _POST_CHECKSUM_FIELDS,
     CachedReviewSettings,
     EffectiveReviewSettings,
+    ReviewSettings,
     ReviewSettingsCache,
     ShadowReviewObservationRequest,
     ShadowReviewUsage,
     bootstrap_review_settings,
 )
+
+
+def test_gpt6_sol_l2_setting_is_valid_with_existing_critic(make_config) -> None:
+    settings = bootstrap_review_settings(make_config()).settings.model_dump(mode="json")
+    settings["l2_model"] = "openai/gpt-6-sol"
+    settings["source_review_model"] = "openai/gpt-6-luna"
+    settings["l3_model"] = "openai/gpt-6-sol"
+    parsed = ReviewSettings.model_validate(settings)
+    assert parsed.l2_model == "openai/gpt-6-sol"
+    assert parsed.source_review_model == "openai/gpt-6-luna"
+    assert parsed.l3_model == "openai/gpt-6-sol"
 
 
 def _shadow_observation(*, stages: int) -> ShadowReviewObservationRequest:
@@ -163,8 +175,9 @@ def _legacy_payload(config, dropped: tuple[str, ...]) -> dict:
     baseline = bootstrap_review_settings(config)
     payload = baseline.model_dump()
     legacy = baseline.settings.model_dump(mode="json")
+    legacy.pop("adjudicator_max_completion_tokens", None)
     for name in dropped:
-        legacy.pop(name)
+        legacy.pop(name, None)
     payload["checksum"] = hashlib.sha256(
         json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -246,6 +259,8 @@ def _platform_shaped_payload(config, **updates: object) -> dict:
     payload = baseline.model_dump(mode="json")
     payload["settings"].update(updates)
     hashed = dict(payload["settings"])
+    if hashed["adjudicator_max_completion_tokens"] is None:
+        hashed.pop("adjudicator_max_completion_tokens")
     if hashed["fanout_shadow_mode"] == "off":
         for name in _POST_CHECKSUM_FIELDS[
             _POST_CHECKSUM_FIELDS.index(

@@ -31,6 +31,7 @@ const defaults: ScreenerReviewSettings = {
   adjudicator_model: 'z-ai/glm-5.3-flash' as const,
   adjudicator_max_steps: 128,
   adjudicator_timeout_seconds: 600,
+  adjudicator_max_completion_tokens: null,
   fanout_shadow_mode: 'off',
   fanout_shadow_image_source_sha: '0'.repeat(40),
   fanout_shadow_model: 'z-ai/glm-5.3-flash',
@@ -617,6 +618,7 @@ export function ScreenerReviewControlPanel({
                   className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3 text-sm text-white"
                 >
                   <option value="openai/gpt-5.6-terra">GPT-5.6 Terra</option>
+                  <option value="openai/gpt-6-sol">GPT-6 Sol</option>
                   <option value="moonshotai/kimi-k3">Kimi K3</option>
                   <option value="z-ai/glm-5.2">GLM 5.2</option>
                   <option value="openai/gpt-5.6-sol">GPT-5.6 SOL</option>
@@ -635,6 +637,7 @@ export function ScreenerReviewControlPanel({
                     className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3 text-sm text-white"
                   >
                     <option value="openai/gpt-5.6-terra">GPT-5.6 Terra</option>
+                    <option value="openai/gpt-6-sol">GPT-6 Sol</option>
                     <option value="moonshotai/kimi-k3">Kimi K3</option>
                     <option value="z-ai/glm-5.2">GLM 5.2</option>
                     <option value="openai/gpt-5.6-sol">GPT-5.6 SOL</option>
@@ -656,6 +659,7 @@ export function ScreenerReviewControlPanel({
                   className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3 text-sm text-white"
                 >
                   <option value="openai/gpt-5.6-luna">GPT-5.6 Luna</option>
+                  <option value="openai/gpt-6-luna">GPT-6 Luna</option>
                 </select>
               </label>
               <NumericField label="L1 timeout seconds" value={settings.source_review_timeout_seconds} onChange={(value) => setSettings((current) => ({ ...current, source_review_timeout_seconds: value }))} />
@@ -684,6 +688,23 @@ export function ScreenerReviewControlPanel({
               <NumericField label="Adjudicator steps" value={settings.adjudicator_max_steps} onChange={(value) => setSettings((current) => ({ ...current, adjudicator_max_steps: value }))} />
               <NumericField label="Adjudicator timeout (s)" value={settings.adjudicator_timeout_seconds} onChange={(value) => setSettings((current) => ({ ...current, adjudicator_timeout_seconds: value }))} />
               <label className="block text-xs text-[var(--muted)]">
+                Adjudicator completion budget (L4)
+                <select
+                  value={settings.adjudicator_max_completion_tokens === null ? 'inherit' : 'custom'}
+                  onChange={(event) => setSettings((current) => ({
+                    ...current,
+                    adjudicator_max_completion_tokens: event.target.value === 'inherit' ? null : current.max_completion_tokens,
+                  }))}
+                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3 text-sm text-white"
+                >
+                  <option value="inherit">Inherit L2 cap ({settings.max_completion_tokens.toLocaleString()} tokens)</option>
+                  <option value="custom">Set L4 cap separately</option>
+                </select>
+              </label>
+              {settings.adjudicator_max_completion_tokens !== null && (
+                <NumericField label="L4 completion tokens" value={settings.adjudicator_max_completion_tokens} onChange={(value) => setSettings((current) => ({ ...current, adjudicator_max_completion_tokens: value }))} />
+              )}
+              <label className="block text-xs text-[var(--muted)]">
                 L1 Luna reasoning
                 <select
                   value={settings.source_review_reasoning_effort}
@@ -695,7 +716,7 @@ export function ScreenerReviewControlPanel({
                   <option value="high">High</option>
                 </select>
               </label>
-              <NumericField label="Max input tokens" value={settings.max_input_tokens} onChange={(value) => setSettings((current) => ({ ...current, max_input_tokens: value }))} />
+              <NumericField label="Max effective input tokens (cached counts 10%)" value={settings.max_input_tokens} onChange={(value) => setSettings((current) => ({ ...current, max_input_tokens: value }))} />
               <NumericField label="Max output tokens" value={settings.max_output_tokens} onChange={(value) => setSettings((current) => ({ ...current, max_output_tokens: value }))} />
               <NumericField label="Completion cap" value={settings.max_completion_tokens} onChange={(value) => setSettings((current) => ({ ...current, max_completion_tokens: value }))} />
               <NumericField label="Max cost (USD)" value={settings.max_cost_usd} step={0.05} onChange={(value) => setSettings((current) => ({ ...current, max_cost_usd: value }))} />
@@ -720,10 +741,25 @@ export function ScreenerReviewControlPanel({
                 <p className="text-xs font-semibold">Independent L3 verification</p>
                 <p className="mt-1 max-w-[70ch] text-xs leading-5 text-[var(--muted)]">
                   {settings.l3_enabled
-                    ? 'GPT-5.6 SOL independently critiques or adjudicates the Terra result. This adds paid model calls when L2 escalates.'
+                    ? 'The selected L3 model independently critiques or adjudicates the L2 result. This adds paid model calls when L2 escalates.'
                     : 'L3 is disabled. The L2 analyst becomes the final paid reviewer; L1 routing, L2 budgets, caching, and audit evidence stay active.'}
                 </p>
               </div>
+              <label className="block text-xs text-[var(--muted)]">
+                L3 model
+                <select
+                  value={settings.l3_model}
+                  onChange={(event) => setSettings((current) => ({
+                    ...current,
+                    l3_model: event.target.value as ScreenerReviewSettings['l3_model'],
+                  }))}
+                  disabled={readOnly || loading || settings.mode === 'inherit'}
+                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3 text-sm text-white disabled:opacity-40"
+                >
+                  <option value="openai/gpt-5.6-sol">GPT-5.6 Sol</option>
+                  <option value="openai/gpt-6-sol">GPT-6 Sol</option>
+                </select>
+              </label>
               <button
                 type="button"
                 role="switch"

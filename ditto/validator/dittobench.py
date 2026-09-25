@@ -36,6 +36,7 @@ from ditto.api_models.validator import (
     ScoreReport,
 )
 from ditto.api_models.validator_capabilities import (
+    ScoredRuntimeEnvEvidence,
     ScorerBenchmarkCapability,
     ScorerLivenessProbe,
     ScorerProbeOutcome,
@@ -1058,6 +1059,18 @@ class DittobenchClient:
             origin=payload.get("source_revision_origin"),
         )
         self.full_run_capacity = full_run_capacity
+        scored_runtime_env = None
+        if 13 in observed_versions and payload.get("scored_runtime_env") is not None:
+            try:
+                candidate = ScoredRuntimeEnvEvidence.model_validate(
+                    payload["scored_runtime_env"]
+                )
+                if candidate.source_revision == source_revision:
+                    scored_runtime_env = candidate
+            except ValueError:
+                # An invalid optional packet cannot upgrade the verified
+                # scorer identity or authorize a source review clearance.
+                pass
         try:
             return ScorerBenchmarkCapability(
                 status="fresh_verified",
@@ -1075,6 +1088,7 @@ class DittobenchClient:
                 observed_at=observed_at,
                 software_version=software_version,
                 source_revision=source_revision,
+                scored_runtime_env=scored_runtime_env,
                 probe=self._record_scorer_probe(
                     "served",
                     observed_at=observed_at,
@@ -1465,12 +1479,21 @@ class DittobenchClient:
         try:
             while time.monotonic() - started <= budget:
                 resp = await self._client.get(url)
+                # A poll that cannot be read says nothing about the run itself,
+                # which is still live in the sandbox. Cancel it like every other
+                # non-terminal exit so it cannot keep the sandbox after the
+                # ticket has been handed back.
                 if resp.status_code != 200:
+                    await self._cancel(run_id)
                     raise DittobenchError(
                         f"poll rejected ({resp.status_code}): {resp.text[:200]}"
                     )
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = None
                 if not isinstance(data, dict):
+                    await self._cancel(run_id)
                     raise DittobenchError("poll response was not a JSON object")
                 snapshot = safe_progress_snapshot(data)
                 if snapshot is not None:
@@ -1654,6 +1677,7 @@ class DittobenchClient:
                     min(self._config.dittobench_poll_seconds, remaining)
                 )
         except httpx.HTTPError as e:
+            await self._cancel(run_id)
             raise DittobenchError(f"poll failed: {e}") from e
         except asyncio.CancelledError:
             await self._cancel(run_id)

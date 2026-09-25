@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -99,7 +100,13 @@ def _source_review_layer_env(
     settings: ScreenerReviewSettings,
 ) -> tuple[tuple[str, str], ...]:
     """Pin L1/L2/L3 knobs on the one-shot rental so GCE is not required."""
-    return (
+    require_signed_lease = (
+        os.environ.get("SCREENER_REQUIRE_SIGNED_RUNTIME_LEASE", "false").strip().lower()
+    )
+    if require_signed_lease not in {"true", "false"}:
+        raise ValueError("SCREENER_REQUIRE_SIGNED_RUNTIME_LEASE must be true or false")
+    base_env = (
+        ("SCREENER_REQUIRE_SIGNED_RUNTIME_LEASE", require_signed_lease),
         (
             "SCREENER_L2_REVIEW_MODE",
             settings.mode if settings.mode != "inherit" else "off",
@@ -151,6 +158,14 @@ def _source_review_layer_env(
         (
             "SCREENER_ADJUDICATOR_TIMEOUT_SECONDS",
             str(int(settings.adjudicator_timeout_seconds)),
+        ),
+    )
+    if settings.adjudicator_max_completion_tokens is None:
+        return base_env
+    return base_env + (
+        (
+            "SCREENER_ADJUDICATOR_MAX_COMPLETION_TOKENS",
+            str(settings.adjudicator_max_completion_tokens),
         ),
     )
 

@@ -11,7 +11,11 @@ import { entityHref } from "../../lib/router";
 import { pushEntityRoute } from "../../stores/routeStore";
 import { HandleBadge } from "../ui/HandleBadge";
 import { MinerAvatar } from "../ui/MinerAvatar";
-import { policyScreeningLabel } from "../pipeline/status";
+import {
+  deferredReviewSummary,
+  policyScreeningLabel,
+  SCREENING_INCOMPLETE_LABEL,
+} from "../pipeline/status";
 import type { FleetReport } from "../../types/fleet";
 import type { CodingShadowScore } from "../../types/leaderboard";
 import type { BenchmarkProgress } from "../../types/pipeline";
@@ -236,6 +240,7 @@ function PipelineCard(props: {
   const admissionLabel = () => {
     if (props.column !== "admission") return "";
     if (entry().status === "waiting_screening") return "Waiting for admission";
+    if (entry().status === "screening_failed") return SCREENING_INCOMPLETE_LABEL;
     return screeningLabel() || "Building image & admission";
   };
   const policyLabel = () => (props.column === "admission" ? policyScreeningLabel(entry()) : "");
@@ -266,7 +271,7 @@ function PipelineCard(props: {
   // attribute drives the muted queued treatment and the active gold rail.
   const admissionState = () =>
     props.column === "admission"
-      ? entry().status === "waiting_screening"
+      ? entry().status !== "screening"
         ? "waiting"
         : "active"
       : undefined;
@@ -295,7 +300,7 @@ function PipelineCard(props: {
         <AdmissionStepTrack
           steps={admissionSteps(entry().screening_build_only)}
           stage={screener()?.screening_progress?.stage ?? null}
-          waiting={entry().status === "waiting_screening"}
+          waiting={entry().status !== "screening"}
         />
         {/* Source review is one segment of the track above and most of its
             wall-clock; the ladder opens that segment into the four stages
@@ -470,8 +475,15 @@ export function PipelineBoard(props: PipelineBoardProps): JSX.Element {
             }
             const active = Number(props.statusCounts.screening || 0);
             const queued = Number(props.statusCounts.waiting_screening || 0);
-            if (active + queued <= 0) return "";
-            return active + " in progress · " + queued + " queued";
+            const incomplete = Number(props.statusCounts.screening_failed || 0);
+            if (active + queued + incomplete <= 0) return "";
+            return (
+              active +
+              " in progress · " +
+              queued +
+              " queued" +
+              (incomplete > 0 ? " · " + incomplete + " incomplete" : "")
+            );
           };
           // The count and the item window are reconciled independently. Keep
           // active admission work visible if a delayed snapshot has the count
@@ -594,7 +606,7 @@ export function PipelineBoard(props: PipelineBoardProps): JSX.Element {
   );
 }
 
-/** The conditional post-scoring source-integrity branch (weekend drift
+/** The conditional post-scoring deferred source-review branch (weekend drift
  * #623/#635; markup 2833–2838, renderIntegrityReviewBranch 8330–8359). Only
  * leaderboard qualifiers and robust anomaly holds enter it — the aside says
  * so instead of implying every submission passes through review. */
@@ -614,7 +626,7 @@ export function IntegrityReviewBranch(props: {
         <span>
           <span class="pipeline-review-eyebrow">Conditional after scoring</span>
           <strong class="pipeline-review-title" id="pipeline-review-title">
-            Source integrity review
+            Deferred source review
           </strong>
         </span>
         <span class="pipeline-review-count" id="pipeline-review-count">
@@ -622,8 +634,9 @@ export function IntegrityReviewBranch(props: {
         </span>
       </summary>
       <p class="pipeline-review-copy">
-        Only leaderboard qualifiers and robust anomaly holds enter this branch. Other admitted
-        submissions go directly through validator scoring.
+        Only leaderboard qualifiers and robust anomaly holds enter this branch, and entering it is
+        not a finding. Each row names its trigger and what the automated review concluded; only a
+        raised concern is flagged. Other admitted submissions go directly through validator scoring.
       </p>
       <div class="pipeline-review-items" id="pipeline-review-items">
         <Show
@@ -634,7 +647,9 @@ export function IntegrityReviewBranch(props: {
             <Show
               when={shown().length > 0}
               fallback={
-                <div class="pipeline-empty">No submissions are held for integrity review.</div>
+                <div class="pipeline-empty">
+                  No submissions are held for deferred source review.
+                </div>
               }
             >
               <For each={shown()}>
@@ -649,7 +664,7 @@ export function IntegrityReviewBranch(props: {
                       agentName(item.entry.name) +
                       ", " +
                       agentVersionLabel(item.entry.version) +
-                      " integrity review details"
+                      " deferred source review details"
                     }
                     onClick={(ev) => cardClick(ev, String(item.entry.agent_id || ""))}
                   >
@@ -670,6 +685,13 @@ export function IntegrityReviewBranch(props: {
                     <span class="pipeline-item-priority-detail">
                       {integrityReviewReason(item.entry)}
                     </span>
+                    <Show when={deferredReviewSummary(item.entry)}>
+                      {(summary) => (
+                        <span class="pipeline-item-priority-detail deferred-review-summary">
+                          {summary()}
+                        </span>
+                      )}
+                    </Show>
                   </a>
                 )}
               </For>

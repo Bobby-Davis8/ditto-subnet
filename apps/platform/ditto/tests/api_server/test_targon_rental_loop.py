@@ -79,7 +79,10 @@ def test_gce_first_keeps_submission_work_on_the_local_fleet() -> None:
     assert remote_lane_selected(("targon", "gcp")) is True
 
 
-def test_source_review_layer_env_pins_l2_and_l3() -> None:
+def test_source_review_layer_env_pins_l2_and_l3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCREENER_REQUIRE_SIGNED_RUNTIME_LEASE", "true")
     env = dict(
         _source_review_layer_env(
             ScreenerReviewSettings(mode="enforce", l3_enabled=True)
@@ -88,6 +91,21 @@ def test_source_review_layer_env_pins_l2_and_l3() -> None:
     assert env["SCREENER_L2_REVIEW_MODE"] == "enforce"
     assert env["SCREENER_L3_REVIEW_ENABLED"] == "true"
     assert env["SCREENER_L2_REVIEW_MODEL"] == "openai/gpt-5.6-terra"
+    assert env["SCREENER_REQUIRE_SIGNED_RUNTIME_LEASE"] == "true"
+    assert "SCREENER_ADJUDICATOR_MAX_COMPLETION_TOKENS" not in env
+
+
+def test_source_review_layer_env_pins_separate_l4_cap() -> None:
+    env = dict(
+        _source_review_layer_env(
+            ScreenerReviewSettings(
+                max_completion_tokens=16_000,
+                adjudicator_max_completion_tokens=4_000,
+            )
+        )
+    )
+    assert env["SCREENER_L2_MAX_COMPLETION_TOKENS"] == "16000"
+    assert env["SCREENER_ADJUDICATOR_MAX_COMPLETION_TOKENS"] == "4000"
 
 
 def test_private_failure_text_escapes_postgres_nul_bytes() -> None:

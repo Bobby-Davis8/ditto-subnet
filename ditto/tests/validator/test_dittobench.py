@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -805,6 +806,44 @@ async def test_binary_derived_revision_matching_the_pin_is_verified() -> None:
 
 
 @pytest.mark.asyncio
+async def test_verified_v13_scorer_packet_enters_signed_capability() -> None:
+    keys = ["DITTOBENCH_DB", "DITTOBENCH_MODEL"]
+    material = "scored-runtime-env-v1\n13\n" + _REVISION + "\n" + "\n".join(keys)
+    packet = {
+        "bench_version": 13,
+        "scope": "scorer-injected-env-only",
+        "source_revision": _REVISION,
+        "injected_keys": keys,
+        "sha256": hashlib.sha256(material.encode()).hexdigest(),
+    }
+    client, http = _capability_client(
+        {
+            **_STAMPED,
+            "supported_bench_versions": [13],
+            "features": ["v13-deterministic-enterprise-v1"],
+            "scored_runtime_env": packet,
+        }
+    )
+    async with http:
+        observed = await client.scorer_benchmark_capability(_stack())
+    assert observed.status == "fresh_verified"
+    assert observed.scored_runtime_env is not None
+    assert observed.scored_runtime_env.sha256 == packet["sha256"]
+    assert (
+        observed.model_dump(mode="json")["scored_runtime_env"]["injected_keys"] == keys
+    )
+
+    bad = {**packet, "sha256": "0" * 64}
+    client, http = _capability_client(
+        {**_STAMPED, "supported_bench_versions": [13], "scored_runtime_env": bad}
+    )
+    async with http:
+        observed = await client.scorer_benchmark_capability(_stack())
+    assert observed.status == "fresh_verified"
+    assert observed.scored_runtime_env is None
+
+
+@pytest.mark.asyncio
 async def test_a_pin_that_cannot_stamp_keeps_the_previous_behaviour() -> None:
     """The requirement is committed beside the pin and must move with it.
 
@@ -1350,6 +1389,67 @@ async def test_timeout_tolerates_older_scorer_without_cancel_route() -> None:
         client = DittobenchClient(config, http)  # type: ignore[arg-type]
         with pytest.raises(DittobenchError, match="did not finish"):
             await client._poll("run-1", expected_bench_version=8)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("poll", "match"),
+    [
+        (lambda: httpx.Response(503, text="scorer restarting"), "poll rejected"),
+        (lambda: httpx.Response(200, json=["running"]), "not a JSON object"),
+        (lambda: httpx.Response(200, text="<html>bad gateway"), "not a JSON object"),
+        (
+            lambda: (_ for _ in ()).throw(httpx.ConnectError("connection reset")),
+            "poll failed",
+        ),
+    ],
+    ids=["non-200", "non-object", "invalid-json", "transport-error"],
+)
+async def test_unreadable_poll_cancels_background_run(
+    poll: Callable[[], httpx.Response], match: str
+) -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if request.method == "DELETE":
+            return httpx.Response(202, json={"status": "failed"})
+        return poll()
+
+    config = SimpleNamespace(
+        dittobench_api_url="http://dittobench.test",
+        dittobench_timeout_seconds=60,
+        dittobench_poll_seconds=0.01,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = DittobenchClient(config, http)  # type: ignore[arg-type]
+        with pytest.raises(DittobenchError, match=match):
+            await client._poll("run-1", expected_bench_version=8)
+
+    assert methods == ["GET", "DELETE"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_failed_run_is_not_cancelled() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        return httpx.Response(
+            200, json={"run_id": "run-1", "status": "failed", "error": "boom"}
+        )
+
+    config = SimpleNamespace(
+        dittobench_api_url="http://dittobench.test",
+        dittobench_timeout_seconds=60,
+        dittobench_poll_seconds=0.01,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = DittobenchClient(config, http)  # type: ignore[arg-type]
+        with pytest.raises(DittobenchError, match="failed: boom"):
+            await client._poll("run-1", expected_bench_version=8)
+
+    assert methods == ["GET"]
 
 
 def _done_job() -> dict[str, object]:

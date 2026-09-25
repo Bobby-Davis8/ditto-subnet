@@ -15,12 +15,13 @@ from ditto_screening_protocol import SCREENING_POLICY_VERSION
 ReviewMode = Literal["off", "shadow", "enforce", "inherit"]
 ReviewModel = Literal[
     "openai/gpt-5.6-terra",
+    "openai/gpt-6-sol",
     "moonshotai/kimi-k3",
     "z-ai/glm-5.2",
     "openai/gpt-5.6-sol",
 ]
 ReasoningEffort = Literal["low", "medium", "high"]
-SourceReviewModel = Literal["openai/gpt-5.6-luna"]
+SourceReviewModel = Literal["openai/gpt-5.6-luna", "openai/gpt-6-luna"]
 AdjudicatorModel = Literal["z-ai/glm-5.3-flash"]
 FanoutShadowModel = Literal["z-ai/glm-5.3-flash"]
 FANOUT_SHADOW_SETTINGS_FIELDS = (
@@ -82,9 +83,9 @@ class ScreenerReviewSettings(BaseModel):
         "openai/gpt-5.6-sol",
     )
     l3_enabled: bool = True
-    l3_model: Literal["openai/gpt-5.6-sol"] = "openai/gpt-5.6-sol"
+    l3_model: Literal["openai/gpt-5.6-sol", "openai/gpt-6-sol"] = "openai/gpt-5.6-sol"
     timeout_seconds: Annotated[int, Field(ge=30, le=1_800)] = 1_200
-    max_steps: Annotated[int, Field(ge=1, le=48)] = 32
+    max_steps: Annotated[int, Field(ge=1, le=256)] = 32
     # L1 Luna inspection depth. Distinct from ``max_steps``, which bounds L2.
     # Exhausting either bound no longer decides the artifact's fate on its
     # own: the recorded notes ledger does, through the gradient thresholds
@@ -104,10 +105,11 @@ class ScreenerReviewSettings(BaseModel):
     source_review_reasoning_effort: Literal["low", "medium", "high"] = "high"
     source_review_model: SourceReviewModel = "openai/gpt-5.6-luna"
     source_review_timeout_seconds: Annotated[int, Field(ge=60, le=3_600)] = 3_600
-    max_input_tokens: Annotated[int, Field(ge=1, le=1_000_000)] = 425_000
-    max_output_tokens: Annotated[int, Field(ge=1, le=128_000)] = 20_000
+    # Worker counts uncached input plus 10% of cached input against this cap.
+    max_input_tokens: Annotated[int, Field(ge=1, le=5_000_000)] = 425_000
+    max_output_tokens: Annotated[int, Field(ge=1, le=1_000_000)] = 20_000
     max_completion_tokens: Annotated[int, Field(ge=1, le=128_000)] = 2_400
-    max_cost_usd: Annotated[float, Field(gt=0, le=10)] = 6.0
+    max_cost_usd: Annotated[float, Field(gt=0, le=25)] = 6.0
     critic_reasoning_effort: ReasoningEffort = "medium"
     # Gradient thresholds for a budget-terminated review's notes ledger.
     # ``concern_hold_count`` counts SUBSTANTIATED concerns -- distinct cited
@@ -128,6 +130,10 @@ class ScreenerReviewSettings(BaseModel):
     adjudicator_model: AdjudicatorModel = "z-ai/glm-5.3-flash"
     adjudicator_max_steps: Annotated[int, Field(ge=1, le=1_024)] = 128
     adjudicator_timeout_seconds: Annotated[int, Field(ge=60, le=3_600)] = 600
+    # None preserves existing revisions: L4 inherits the L2 completion cap.
+    adjudicator_max_completion_tokens: Annotated[
+        int | None, Field(ge=1_000, le=128_000)
+    ] = None
     # Independent report-only source-review experiment.  ``off`` is the code
     # and rolling-deploy default; ``shadow`` may only create observations and
     # cannot participate in the signed screening verdict.
@@ -193,6 +199,13 @@ class ScreenerReviewSettings(BaseModel):
         if self.max_completion_tokens > self.max_output_tokens:
             raise ValueError("completion budget must not exceed output budget")
         if (
+            self.adjudicator_max_completion_tokens is not None
+            and self.adjudicator_max_completion_tokens > self.max_output_tokens
+        ):
+            raise ValueError(
+                "adjudicator completion budget must not exceed output budget"
+            )
+        if (
             self.fanout_shadow_mode == "shadow"
             and self.fanout_shadow_image_source_sha == "0" * 40
         ):
@@ -209,6 +222,9 @@ def review_settings_checksum(settings: ScreenerReviewSettings) -> str:
     if not settings.l2_always_escalate:
         # Workers that predate the control cannot hash a key they drop.
         value.pop("l2_always_escalate")
+    if settings.adjudicator_max_completion_tokens is None:
+        # Keep the checksums of already-persisted revisions unchanged.
+        value.pop("adjudicator_max_completion_tokens")
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 

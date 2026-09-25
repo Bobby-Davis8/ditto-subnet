@@ -88,9 +88,11 @@ from ditto.api_server.endpoints import (
     admin_inference_concurrency_settings_router,
     admin_inference_observability_router,
     admin_inference_routes_router,
+    admin_l2_report_canary_router,
     admin_leaderboard_router,
     admin_lease_revocations_router,
     admin_miner_fees_router,
+    admin_outlier_escalation_router,
     admin_owner_router,
     admin_quarantine_router,
     admin_queue_policy_settings_router,
@@ -100,9 +102,13 @@ from ditto.api_server.endpoints import (
     admin_screener_fanout_shadow_router,
     admin_screener_policy_activation_router,
     admin_screener_review_settings_router,
+    admin_screening_infra_retry_router,
+    admin_source_review_queue_slo_router,
     admin_submission_deposit_address_router,
     admin_submission_settings_router,
     admin_traces_router,
+    admin_v13_private_generation_router,
+    admin_v13_scorer_cohort_router,
     admin_validation_retry_router,
     admin_validator_slot_settings_router,
     admin_validator_weights_router,
@@ -121,6 +127,7 @@ from ditto.api_server.endpoints import (
     public_router,
     retrieval_router,
     scoring_router,
+    screener_l2_report_canary_router,
     screener_router,
     upload_router,
     validator_coding_certification_leases_router,
@@ -152,6 +159,12 @@ from ditto.api_server.endpoints.validator_coding_hosted import (
 from ditto.api_server.endpoints.validator_coding_inference import (
     coding_inference_transport_from_env,
 )
+from ditto.api_server.endpoints.verification_replay import (
+    admin_router as admin_verification_replay_router,
+)
+from ditto.api_server.endpoints.verification_replay import (
+    screener_router as screener_verification_replay_router,
+)
 from ditto.api_server.errors import ApiServerConfigError, ApiServerLifespanError
 from ditto.api_server.inference_concurrency_settings import (
     InferenceConcurrencySettingsResolver,
@@ -159,7 +172,6 @@ from ditto.api_server.inference_concurrency_settings import (
 from ditto.api_server.inference_routing import ProviderRouteRefresher
 from ditto.api_server.ledger_pin import LedgerPinLoop, LedgerPinMaterializer
 from ditto.api_server.middleware import (
-    AuthPassThroughMiddleware,
     PublicCacheMiddleware,
     RequestIDMiddleware,
     SizedGZipMiddleware,
@@ -662,7 +674,11 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     # add_middleware call ends up outermost on the wire. RequestIDMiddleware
     # must be outermost so its contextvar is live for every downstream
     # middleware + handler + log line, including any future auth that
-    # short-circuits before reaching the app.
+    # short-circuits before reaching the app. There is deliberately no auth
+    # middleware: every endpoint authenticates itself through its own
+    # dependency (ValidatorDep, the signed-nonce dependencies, AdminDep, the
+    # screener dependencies), so a stack entry named for auth would only
+    # suggest a gate that does not exist.
     # Gzip is inside the public cache: each identity/gzip representation is
     # built once and cached independently, so a 200KB operations cache HIT
     # does not burn CPU recompressing the same user-agnostic bytes.
@@ -673,7 +689,6 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     from ditto.api_server.admin_activity import AdminActivityMiddleware
 
     app.add_middleware(AdminActivityMiddleware)
-    app.add_middleware(AuthPassThroughMiddleware)
     app.add_middleware(RequestIDMiddleware)
 
     register_exception_handlers(app)
@@ -720,6 +735,7 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     app.include_router(validator_confirmation_router, prefix="/api/v1")
     app.include_router(inference_router, prefix="/api/v1")
     app.include_router(screener_router, prefix="/api/v1")
+    app.include_router(screener_l2_report_canary_router, prefix="/api/v1")
     app.include_router(scoring_router, prefix="/api/v1")
     app.include_router(public_router, prefix="/api/v1")
     app.include_router(admin_artifact_release_settings_router, prefix="/api/v1")
@@ -728,6 +744,8 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     app.include_router(admin_benchmark_canary_router, prefix="/api/v1")
     app.include_router(admin_queue_policy_settings_router, prefix="/api/v1")
     app.include_router(admin_screener_policy_activation_router, prefix="/api/v1")
+    app.include_router(admin_v13_private_generation_router, prefix="/api/v1")
+    app.include_router(admin_v13_scorer_cohort_router, prefix="/api/v1")
     app.include_router(admin_inference_concurrency_settings_router, prefix="/api/v1")
     app.include_router(admin_inference_observability_router, prefix="/api/v1")
     app.include_router(admin_traces_router, prefix="/api/v1")
@@ -745,7 +763,11 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     app.include_router(admin_scoring_readiness_router, prefix="/api/v1")
     app.include_router(admin_screener_review_settings_router, prefix="/api/v1")
     app.include_router(admin_screener_fanout_shadow_router, prefix="/api/v1")
+    app.include_router(admin_l2_report_canary_router, prefix="/api/v1")
     app.include_router(admin_screener_capacity_router, prefix="/api/v1")
+    app.include_router(admin_screening_infra_retry_router, prefix="/api/v1")
+    app.include_router(admin_source_review_queue_slo_router, prefix="/api/v1")
+    app.include_router(admin_outlier_escalation_router, prefix="/api/v1")
     app.include_router(admin_submission_settings_router, prefix="/api/v1")
     app.include_router(admin_submission_deposit_address_router, prefix="/api/v1")
     app.include_router(admin_copy_review_router, prefix="/api/v1")
@@ -766,6 +788,8 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     app.include_router(admin_miner_fees_router, prefix="/api/v1")
     app.include_router(admin_conversation_router, prefix="/api/v1")
     app.include_router(screener_conversation_router, prefix="/api/v1")
+    app.include_router(admin_verification_replay_router, prefix="/api/v1")
+    app.include_router(screener_verification_replay_router, prefix="/api/v1")
 
     # Serve the public dashboard SPA same-origin at ``/`` so the platform is the
     # transparency front door (its ``/api/v1/public/*`` calls need no CORS). The

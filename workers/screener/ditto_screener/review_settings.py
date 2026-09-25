@@ -18,11 +18,12 @@ from ditto_screener.config import ScreenerConfig
 
 ReviewModel = Literal[
     "openai/gpt-5.6-terra",
+    "openai/gpt-6-sol",
     "moonshotai/kimi-k3",
     "z-ai/glm-5.2",
     "openai/gpt-5.6-sol",
 ]
-SourceReviewModel = Literal["openai/gpt-5.6-luna"]
+SourceReviewModel = Literal["openai/gpt-5.6-luna", "openai/gpt-6-luna"]
 FanoutShadowModel = Literal["z-ai/glm-5.3-flash"]
 
 _MAX_SHADOW_PROVIDER_STAGES = 50
@@ -88,9 +89,9 @@ class ReviewSettings(BaseModel):
     l2_model: ReviewModel
     l2_fallback_models: tuple[ReviewModel, ...]
     l3_enabled: bool = True
-    l3_model: Literal["openai/gpt-5.6-sol"]
+    l3_model: Literal["openai/gpt-5.6-sol", "openai/gpt-6-sol"]
     timeout_seconds: Annotated[int, Field(ge=30, le=1_800)]
-    max_steps: Annotated[int, Field(ge=1, le=48)]
+    max_steps: Annotated[int, Field(ge=1, le=256)]
     source_review_max_steps: Annotated[int, Field(ge=1, le=240)] = 200
     source_review_max_read_bytes: Annotated[int, Field(ge=32_000, le=16_000_000)] = (
         8_000_000
@@ -110,6 +111,9 @@ class ReviewSettings(BaseModel):
     # 128 and always carry the field explicitly.
     adjudicator_max_steps: Annotated[int, Field(ge=1, le=1_024)] = 24
     adjudicator_timeout_seconds: Annotated[int, Field(ge=60, le=3_600)] = 600
+    adjudicator_max_completion_tokens: Annotated[
+        int | None, Field(ge=1_000, le=128_000)
+    ] = None
     fanout_shadow_mode: Literal["off", "shadow"] = "off"
     fanout_shadow_image_source_sha: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] = (
         "0" * 40
@@ -127,10 +131,11 @@ class ReviewSettings(BaseModel):
     fanout_shadow_daily_cost_usd: Annotated[float, Field(gt=0, le=100)] = 20.0
     fanout_shadow_global_concurrency: Literal[1] = 1
     fanout_shadow_reserved_targon_slots: Annotated[int, Field(ge=1, le=4)] = 1
-    max_input_tokens: Annotated[int, Field(ge=1, le=1_000_000)]
-    max_output_tokens: Annotated[int, Field(ge=1, le=128_000)]
+    # Aggregate effective input: uncached tokens plus 10% of cached tokens.
+    max_input_tokens: Annotated[int, Field(ge=1, le=5_000_000)]
+    max_output_tokens: Annotated[int, Field(ge=1, le=1_000_000)]
     max_completion_tokens: Annotated[int, Field(ge=1, le=128_000)]
-    max_cost_usd: Annotated[float, Field(gt=0, le=10)]
+    max_cost_usd: Annotated[float, Field(gt=0, le=25)]
     critic_reasoning_effort: Literal["low", "medium", "high"]
     cache_ttl_seconds: Annotated[int, Field(ge=60, le=2_592_000)]
     audit_retention_days: Annotated[int, Field(ge=1, le=365)]
@@ -172,6 +177,13 @@ class ReviewSettings(BaseModel):
         if self.max_completion_tokens > self.max_output_tokens:
             raise ValueError("completion budget must not exceed output budget")
         if (
+            self.adjudicator_max_completion_tokens is not None
+            and self.adjudicator_max_completion_tokens > self.max_output_tokens
+        ):
+            raise ValueError(
+                "adjudicator completion budget must not exceed output budget"
+            )
+        if (
             self.fanout_shadow_mode == "shadow"
             and self.fanout_shadow_image_source_sha == "0" * 40
         ):
@@ -209,6 +221,7 @@ _POST_CHECKSUM_FIELDS: tuple[str, ...] = (
     "fanout_shadow_global_concurrency",
     "fanout_shadow_reserved_targon_slots",
     "l2_always_escalate",
+    "adjudicator_max_completion_tokens",
 )
 _DEFAULTS = {
     name: ReviewSettings.model_fields[name].default for name in _POST_CHECKSUM_FIELDS
@@ -230,6 +243,15 @@ class EffectiveReviewSettings(BaseModel):
         payload = json.dumps(current, sort_keys=True, separators=(",", ":")).encode()
         if hashlib.sha256(payload).hexdigest() == self.checksum:
             return self
+        if self.settings.adjudicator_max_completion_tokens is None:
+            # Platform omits an inherited cap from the checksum so existing
+            # immutable revisions keep verifying across a rolling deploy.
+            current.pop("adjudicator_max_completion_tokens")
+            payload = json.dumps(
+                current, sort_keys=True, separators=(",", ":")
+            ).encode()
+            if hashlib.sha256(payload).hexdigest() == self.checksum:
+                return self
 
         # Platform deliberately hashes an inactive fan-out block in the legacy
         # shape. Old native workers ignore these new response fields, so this
@@ -315,6 +337,7 @@ class EffectiveReviewSettings(BaseModel):
             adjudicator_model=value.adjudicator_model,
             adjudicator_max_steps=value.adjudicator_max_steps,
             adjudicator_timeout_seconds=float(value.adjudicator_timeout_seconds),
+            adjudicator_max_completion_tokens=(value.adjudicator_max_completion_tokens),
             l2_max_input_tokens=value.max_input_tokens,
             l2_max_output_tokens=value.max_output_tokens,
             l2_max_completion_tokens=value.max_completion_tokens,
@@ -392,6 +415,9 @@ def bootstrap_review_settings(config: ScreenerConfig) -> EffectiveReviewSettings
             "adjudicator_model": config.adjudicator_model,
             "adjudicator_max_steps": config.adjudicator_max_steps,
             "adjudicator_timeout_seconds": int(config.adjudicator_timeout_seconds),
+            "adjudicator_max_completion_tokens": (
+                config.adjudicator_max_completion_tokens
+            ),
             "max_input_tokens": config.l2_max_input_tokens,
             "max_output_tokens": config.l2_max_output_tokens,
             "max_completion_tokens": config.l2_max_completion_tokens,
@@ -405,9 +431,10 @@ def bootstrap_review_settings(config: ScreenerConfig) -> EffectiveReviewSettings
             "policy_manifest_rotation_id": "policy-v10-bootstrap",
         }
     )
-    payload = json.dumps(
-        settings.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    ).encode()
+    canonical = settings.model_dump(mode="json")
+    if settings.adjudicator_max_completion_tokens is None:
+        canonical.pop("adjudicator_max_completion_tokens")
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     return EffectiveReviewSettings(
         revision=0,
         scope="bootstrap",
