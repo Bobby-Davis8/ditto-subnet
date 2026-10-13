@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.358.2 (2026-10-13)
+
+### Bug Fixes
+
+- **backroom**: Publish the quarantine batch execute input schema
+  ([#2865](https://github.com/ditto-assistant/ditto-subnet/pull/2865),
+  [`7ffb648`](https://github.com/ditto-assistant/ditto-subnet/commit/7ffb64851bb0cf903c66889c92cd293606da6214))
+
+
 ## v0.358.1 (2026-10-13)
 
 ### Bug Fixes
