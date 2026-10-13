@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.357.1 (2026-10-13)
+
+### Bug Fixes
+
+- **platform**: Let the source-emission collector outpace the chain
+  ([#2852](https://github.com/ditto-assistant/ditto-subnet/pull/2852),
+  [`1a7bb89`](https://github.com/ditto-assistant/ditto-subnet/commit/1a7bb89ad0eaf6cf5e00c3b082d67e143c661f26))
+
+
 ## v0.357.0 (2026-10-10)
 
 ### Chores
