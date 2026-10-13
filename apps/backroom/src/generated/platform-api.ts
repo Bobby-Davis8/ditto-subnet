@@ -32616,6 +32616,23 @@ export interface components {
             jaccard_threshold: number;
         };
         /**
+         * SourceArchiveProviderStatus
+         * @description Served configuration only; never a URL, credential, or health claim.
+         */
+        SourceArchiveProviderStatus: {
+            /**
+             * Auth Mode
+             * @enum {string}
+             */
+            auth_mode: "none" | "query" | "path";
+            /** Configured */
+            configured: boolean;
+            /** Credential Configured */
+            credential_configured: boolean;
+            /** Host */
+            host: string | null;
+        };
+        /**
          * SourceDisclosure
          * @description Whether the public source-release path is reachable at all.
          * @enum {string}
@@ -32653,6 +32670,7 @@ export interface components {
         };
         /** SourceReleaseGateStatus */
         SourceReleaseGateStatus: {
+            archive_provider?: components["schemas"]["SourceArchiveProviderStatus"] | null;
             /**
              * Automatic Confirmation Enabled
              * @default false
