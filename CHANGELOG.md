@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.358.1 (2026-10-13)
+
+### Bug Fixes
+
+- **dittobench**: Stop charging stale request timestamps to the agent
+  ([#2866](https://github.com/ditto-assistant/ditto-subnet/pull/2866),
+  [`8875f2c`](https://github.com/ditto-assistant/ditto-subnet/commit/8875f2ce76655b33d26e674ef2cf28a94b077bb6))
+
+
 ## v0.358.0 (2026-10-13)
 
 ### Documentation
