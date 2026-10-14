@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.362.1 (2026-10-14)
+
+### Bug Fixes
+
+- **screener**: Name the provider's fault code on a parked L2/L3 review
+  ([#2907](https://github.com/ditto-assistant/ditto-subnet/pull/2907),
+  [`ca5ec54`](https://github.com/ditto-assistant/ditto-subnet/commit/ca5ec54246a0bd0265291bbe731d5dcca3167b1d))
+
+
 ## v0.362.0 (2026-10-13)
 
 ### Features
