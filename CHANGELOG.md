@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.365.0 (2026-10-14)
+
+### Features
+
+- **treasury**: Support cold-approved manual transfers up to 2500 alpha
+  ([#2923](https://github.com/ditto-assistant/ditto-subnet/pull/2923),
+  [`a408ab3`](https://github.com/ditto-assistant/ditto-subnet/commit/a408ab3acabe7f532b9bfe684567f6e04f8d35d4))
+
+
 ## v0.364.0 (2026-10-14)
 
 ### Features
