@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.369.2 (2026-10-15)
+
+### Bug Fixes
+
+- **validator**: Cancel continual retests when their lease is revoked
+  ([#2905](https://github.com/ditto-assistant/ditto-subnet/pull/2905),
+  [`7c4fa4a`](https://github.com/ditto-assistant/ditto-subnet/commit/7c4fa4a5d41fe1a57335eea3926812d9c4e0ccec))
+
+### Chores
+
+- **skills**: Add rolling top-5 board sweep workflow
+  ([#2924](https://github.com/ditto-assistant/ditto-subnet/pull/2924),
+  [`37e6f78`](https://github.com/ditto-assistant/ditto-subnet/commit/37e6f780e2388bd993d1d1907eb9548e71764558))
+
+
 ## v0.369.1 (2026-10-15)
 
 ### Bug Fixes
