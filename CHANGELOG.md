@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.369.3 (2026-10-15)
+
+### Bug Fixes
+
+- **validator**: Name a missed /seed deadline instead of an anonymous scoring_error
+  ([#2922](https://github.com/ditto-assistant/ditto-subnet/pull/2922),
+  [`b9f9805`](https://github.com/ditto-assistant/ditto-subnet/commit/b9f98052aae6aaf071907d21e0dc1bf15775a3c4))
+
+
 ## v0.369.2 (2026-10-15)
 
 ### Bug Fixes
