@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.366.1 (2026-10-15)
+
+### Bug Fixes
+
+- **platform**: Require payout ambiguity to reproduce and rescan discarded payouts
+  ([#2935](https://github.com/ditto-assistant/ditto-subnet/pull/2935),
+  [`d7bcc8e`](https://github.com/ditto-assistant/ditto-subnet/commit/d7bcc8e50963d44b965e9dc50f6247a27ae69200))
+
+
 ## v0.366.0 (2026-10-14)
 
 ### Bug Fixes
