@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.369.1 (2026-10-15)
+
+### Bug Fixes
+
+- **platform**: Admit audited Subtensor v475-v478 source receipts under Yuma
+  ([#2941](https://github.com/ditto-assistant/ditto-subnet/pull/2941),
+  [`85ac8fa`](https://github.com/ditto-assistant/ditto-subnet/commit/85ac8fac165191f089ec0ccaff0235adabe4d9fe))
+
+
 ## v0.369.0 (2026-10-15)
 
 ### Features
