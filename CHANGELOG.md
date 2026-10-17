@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.369.4 (2026-10-17)
+
+### Bug Fixes
+
+- **platform**: Rebind block-less v13 dataset pins at lease time
+  ([#2992](https://github.com/ditto-assistant/ditto-subnet/pull/2992),
+  [`adff43a`](https://github.com/ditto-assistant/ditto-subnet/commit/adff43a6c31ca13388ba93bd996531a03f407d46))
+
+
 ## v0.369.3 (2026-10-15)
 
 ### Bug Fixes
