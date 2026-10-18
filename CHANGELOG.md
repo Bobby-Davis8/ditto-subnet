@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.371.2 (2026-10-18)
+
+### Bug Fixes
+
+- **screener**: Report an L3 safe claim on a truncated dossier as inconclusive
+  ([#2999](https://github.com/ditto-assistant/ditto-subnet/pull/2999),
+  [`29a8f4d`](https://github.com/ditto-assistant/ditto-subnet/commit/29a8f4d5d2f595a4f469b3c2557bb8db1e66de78))
+
+
 ## v0.371.1 (2026-10-18)
 
 ### Bug Fixes
