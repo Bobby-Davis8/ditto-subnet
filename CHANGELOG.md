@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.371.1 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Unstick source-emission decoding and fingerprint upgrade blocks on their own runtime
+  ([#3000](https://github.com/ditto-assistant/ditto-subnet/pull/3000),
+  [`abc2ab0`](https://github.com/ditto-assistant/ditto-subnet/commit/abc2ab06990d9b20e968e1a6ceaf3ef9758ebc19))
+
+
 ## v0.371.0 (2026-10-18)
 
 ### Bug Fixes
