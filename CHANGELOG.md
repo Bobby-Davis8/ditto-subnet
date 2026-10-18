@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.374.1 (2026-10-18)
+
+### Performance Improvements
+
+- **platform**: Bound payout resolution per catch-up sweep
+  ([#3012](https://github.com/ditto-assistant/ditto-subnet/pull/3012),
+  [`b198707`](https://github.com/ditto-assistant/ditto-subnet/commit/b198707de8c1f1a1153f26a043c23bcf0d5a95c9))
+
+
 ## v0.374.0 (2026-10-18)
 
 ### Features
