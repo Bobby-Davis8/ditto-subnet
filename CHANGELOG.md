@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.372.2 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Stop payout resolution before the sweep budget expires
+  ([#3005](https://github.com/ditto-assistant/ditto-subnet/pull/3005),
+  [`1ea4d25`](https://github.com/ditto-assistant/ditto-subnet/commit/1ea4d258ce4c8694c28bdf6d989970f5d61745db))
+
+
 ## v0.372.1 (2026-10-18)
 
 ### Bug Fixes
