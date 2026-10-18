@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.374.0 (2026-10-18)
+
+### Features
+
+- **platform**: Plan catch-up by reveals and read planned blocks concurrently
+  ([#3011](https://github.com/ditto-assistant/ditto-subnet/pull/3011),
+  [`99c0d2e`](https://github.com/ditto-assistant/ditto-subnet/commit/99c0d2e62176ce045dc090865a891a85330d2d3b))
+
+
 ## v0.373.1 (2026-10-18)
 
 ### Bug Fixes
