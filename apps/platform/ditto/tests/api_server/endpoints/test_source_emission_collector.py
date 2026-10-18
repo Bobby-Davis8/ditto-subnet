@@ -725,7 +725,7 @@ async def test_sweep_widens_batch_and_skips_leading_resolution_in_catchup(
 
     resolved = []
 
-    async def resolve(_substrate):
+    async def resolve(_substrate, **_kwargs):
         resolved.append(True)
         return 0
 
@@ -765,7 +765,7 @@ async def test_failed_catchup_scan_still_resolves_pending_payouts(
 
     resolved = []
 
-    async def resolve(_substrate):
+    async def resolve(_substrate, **_kwargs):
         resolved.append(True)
         return 0
 
@@ -800,7 +800,7 @@ async def test_resolver_failure_cannot_mask_why_the_scan_stopped(
     async def read(_substrate, **_reads):
         raise ValueError("runtime fingerprint is not audited: 0xnew")
 
-    async def resolve(_substrate):
+    async def resolve(_substrate, **_kwargs):
         raise AttributeError("'scale_info::460' object has no attribute 'index'")
 
     substrate = SimpleNamespace(
@@ -838,7 +838,7 @@ async def test_sweep_keeps_steady_state_batch_and_leading_resolution(
 
     resolved = []
 
-    async def resolve(_substrate):
+    async def resolve(_substrate, **_kwargs):
         resolved.append(True)
         return 0
 
@@ -905,6 +905,9 @@ async def test_sweep_timeout_tracks_backlog_depth(app, session_maker, monkeypatc
         async def __aenter__(self):
             await self._inner.__aenter__()
             return self
+
+        def when(self):
+            return self._inner.when()
 
         def reschedule(self, when):
             loop = collector_module.asyncio.get_running_loop()
@@ -1044,6 +1047,67 @@ async def test_reopened_receiptless_payout_refetches_and_confirms(
     # The persisted receipt is reused; no further historical reads.
     assert await collector.resolve_pending_payouts(SimpleNamespace()) == 0
     receipt.assert_awaited_once()
+
+
+async def test_payout_resolution_stops_at_its_deadline_and_resumes_later(
+    app, client, session_maker, monkeypatch
+):
+    """A spent deadline leaves rows untouched for the next sweep."""
+    from ditto.db.models import SourceEmissionPayout
+
+    a, collector = await _reopened_payout(app, client, session_maker, monkeypatch)
+    receipt = AsyncMock(return_value=_payout(a, 201))
+    app.state.chain = SimpleNamespace(
+        get_miner_emission_receipt=receipt, _safe_rpc_error=str
+    )
+    past = asyncio.get_running_loop().time() - 1
+    assert (
+        await collector.resolve_pending_payouts(SimpleNamespace(), deadline=past) == 0
+    )
+    receipt.assert_not_awaited()
+    async with session_maker() as session:
+        row = await session.get(SourceEmissionPayout, (a["netuid"], _hash(201)))
+        assert row.last_checked_at is None
+    assert await collector.resolve_pending_payouts(SimpleNamespace()) == 1
+
+
+async def test_a_payout_row_cut_short_by_the_deadline_stays_pending(
+    app, client, session_maker, monkeypatch
+):
+    from ditto.db.models import SourceEmissionPayout
+
+    a, collector = await _reopened_payout(app, client, session_maker, monkeypatch)
+
+    async def slow_receipt(**_kwargs):
+        await asyncio.sleep(5)
+
+    app.state.chain = SimpleNamespace(
+        get_miner_emission_receipt=slow_receipt, _safe_rpc_error=str
+    )
+    soon = asyncio.get_running_loop().time() + 0.05
+    assert (
+        await collector.resolve_pending_payouts(SimpleNamespace(), deadline=soon) == 0
+    )
+    async with session_maker() as session:
+        row = await session.get(SourceEmissionPayout, (a["netuid"], _hash(201)))
+        # At most a transient retry note: never terminal, never confirmed.
+        assert row.terminal is False
+        assert row.blocked_reason is None or row.blocked_reason.startswith(
+            "receipt_retry"
+        )
+
+
+async def test_a_provider_timeout_is_not_mistaken_for_the_deadline(
+    app, client, session_maker, monkeypatch
+):
+    a, collector = await _reopened_payout(app, client, session_maker, monkeypatch)
+    del a
+    monkeypatch.setattr(
+        collector, "_refetch_receipt", AsyncMock(side_effect=TimeoutError)
+    )
+    later = asyncio.get_running_loop().time() + 60
+    with pytest.raises(TimeoutError):
+        await collector.resolve_pending_payouts(SimpleNamespace(), deadline=later)
 
 
 async def test_reopened_payout_reproduced_ambiguity_is_terminal_again(
@@ -1358,7 +1422,7 @@ async def test_reveal_plan_shadow_runs_after_payouts_within_the_budget(
         order.append("shadow")
         return _sparse_plan(100, end, (150, 151))
 
-    async def resolve(_substrate):
+    async def resolve(_substrate, **_kwargs):
         order.append("resolve")
         return 0
 
