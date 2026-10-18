@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.373.1 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Read epoch consensus under the runtime that wrote the state
+  ([#3008](https://github.com/ditto-assistant/ditto-subnet/pull/3008),
+  [`430a634`](https://github.com/ditto-assistant/ditto-subnet/commit/430a634edca57b6a9c67a02b8465b7d697bd02e5))
+
+
 ## v0.373.0 (2026-10-18)
 
 ### Features
