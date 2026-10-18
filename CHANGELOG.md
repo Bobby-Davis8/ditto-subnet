@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.372.1 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Give the reveal-plan shadow its own window after each sweep
+  ([#3004](https://github.com/ditto-assistant/ditto-subnet/pull/3004),
+  [`73cc093`](https://github.com/ditto-assistant/ditto-subnet/commit/73cc0930c59e477b4ae9080298fe17f2ccdccb14))
+
+
 ## v0.372.0 (2026-10-18)
 
 ### Features
