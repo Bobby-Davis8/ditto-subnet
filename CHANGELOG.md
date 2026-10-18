@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.373.0 (2026-10-18)
+
+### Features
+
+- **screening**: Enforce per-file source limits with a vendored upstream allowlist
+  ([#3002](https://github.com/ditto-assistant/ditto-subnet/pull/3002),
+  [`b4d0cf7`](https://github.com/ditto-assistant/ditto-subnet/commit/b4d0cf76562df6c34dc9a7f219aeb5d3876cccce))
+
+
 ## v0.372.3 (2026-10-18)
 
 ### Bug Fixes
