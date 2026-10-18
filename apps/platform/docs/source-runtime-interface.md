@@ -19,10 +19,11 @@ interface** matches an audited runtime's:
 - `ditto/chain/runtime_interface.py` reads the runtime's own metadata
   (`init_runtime(block_hash=…)`) and hashes the SCALE shape of exactly the
   storage items, event variants and calls the verifier and the payout receipt
-  reader decode (`CONSUMED_STORAGE`, `CONSUMED_EVENTS`, `CONSUMED_CALLS`).
-  Storage modifiers, hashers and defaults are included; docs and type names
-  are not. `System.Events` is not hashed whole, since it embeds every
-  pallet's events; the consumed variants are hashed by name instead.
+  reader decode (`SOURCE_EMISSION_SURFACE`). Storage modifiers, hashers and
+  defaults are included; docs and type names are not. `System.Events` is not
+  hashed whole, since it embeds every pallet's events; the consumed variants
+  are hashed by name instead. The outer `RuntimeCall`/`RuntimeEvent` enums
+  are hashed by path only for the same reason.
 - `ditto/chain/audited_runtime_interfaces.py` pins the audited digests,
   derived from live metadata of audited v473 (no epoch consensus) and v478
   (with `SubnetEpochConsensus`).
@@ -46,16 +47,40 @@ runtime fingerprint is not audited: 0x… (interface changed since v478:
 event:SubtensorModule.IncentiveAlphaEmittedToMiners)
 ```
 
-Audit only the named entries against the reader's assumptions. If the reader
-still decodes them correctly, regenerate the pinned entry for that runtime:
+Backroom `get_runtime_interface_report` shows the same verdict for any
+finalized block before the collector reaches it.
 
-```python
-from ditto.chain.runtime_interface import runtime_interface
-interface = runtime_interface((await substrate.init_runtime(block_hash=h)).metadata)
+Audit only the named entries against the reader's assumptions. If the reader
+still decodes them correctly, add the release and a block that ran it to
+`PINS` in `scripts/pin_runtime_interfaces.py` and regenerate:
+
+```bash
+uv run python scripts/pin_runtime_interfaces.py --write
 ```
 
-Add it to `AUDITED_RUNTIME_INTERFACES` with the release it came from. If the
-reader's logic must change, change it and the consumed lists together.
+If the reader's logic must change, change it and the surface together.
+
+## Treasury receipts
+
+Platform's treasury receipt reader (`ditto/chain/treasury_receipts.py`) uses
+the same admission over its own `TREASURY_RECEIPT_SURFACE`: collector
+identity storage, stake/transfer/proxy events and the `Proxy.proxy`,
+`Balances.transfer_keep_alive` and `SubtensorModule.transfer_stake` calls,
+pinned as `TREASURY_RECEIPT_INTERFACES` from audited v473 and v478. Exact
+collector artifacts are still admitted directly. When either side of a
+receipt block is interface-admitted, the chain's spec versions order the
+upgrade, so a reverse change still refuses. The interface is identical for
+v472–v479 except v475 (`SubnetEpochConsensus`).
+
+This admits **reading** only. The validator collector signer
+(`ditto/treasury/collector_chain.py`) still signs only on the runtime its
+cold-signed policy binds and halts on any other, by design: an upgrade can
+change what a proxy may dispatch without changing any type the reader
+decodes. `get_runtime_interface_report` lists, under `treasury_signer`,
+every `Pallet.call` added, removed or reshaped since that runtime (pinned as
+`TREASURY_CALL_BASELINE`). That list is what a new cold approval has to
+review. For v479 it is one call,
+`SubtensorModule.set_reject_staking_hotkey_growth`.
 
 ## Residual risk
 

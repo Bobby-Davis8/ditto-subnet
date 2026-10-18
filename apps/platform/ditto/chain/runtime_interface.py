@@ -1,4 +1,4 @@
-"""Fingerprint the slice of a Subtensor runtime that source attribution reads.
+"""Fingerprint the slice of a Subtensor runtime that a chain reader decodes.
 
 The source-emission collector used to admit a runtime only when its WASM
 ``:code`` hash matched a hand-audited release artifact. Every Finney upgrade
@@ -13,7 +13,13 @@ automatically; any change to that surface still fails closed and names the
 entries that moved, so a human audits only upgrades that touch it.
 
 Docs and type names are cosmetic and excluded. Storage defaults and modifiers
-are included because they change what an absent value decodes to.
+are included because they change what an absent value decodes to. The outer
+``RuntimeCall``/``RuntimeEvent`` enums are hashed by path only: they embed
+every pallet, so hashing them whole would move on any unrelated upgrade.
+``runtime_call_digests`` reports per-pallet call changes for an operator.
+
+Each reader declares its own ``RuntimeSurface``: source attribution and the
+treasury receipt reader decode different items and are pinned separately.
 """
 
 from __future__ import annotations
@@ -22,6 +28,17 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class RuntimeSurface:
+    """The storage items, event variants and calls one reader decodes."""
+
+    name: str
+    storage: tuple[tuple[str, str], ...]
+    events: tuple[tuple[str, str], ...]
+    calls: tuple[tuple[str, str], ...]
+
 
 # Storage the verifier (source_emission_verifier) and the payout receipt reader
 # (ChainClient.get_miner_emission_receipt) decode. ``SubnetEpochConsensus`` is
@@ -63,6 +80,48 @@ CONSUMED_CALLS: tuple[tuple[str, str], ...] = (
     ("SubtensorModule", "commit_timelocked_mechanism_weights"),
     ("SubtensorModule", "commit_timelocked_weights"),
 )
+
+SOURCE_EMISSION_SURFACE = RuntimeSurface(
+    "source_emission", CONSUMED_STORAGE, CONSUMED_EVENTS, CONSUMED_CALLS
+)
+
+# Platform's read-only treasury receipt reader (chain/treasury_receipts.py)
+# and the shared decoders it calls (ditto_screening_protocol.collector_receipts
+# and treasury_identity). This admits receipt *reading* only; the validator
+# signer still requires the runtime named in its cold-signed policy.
+TREASURY_RECEIPT_SURFACE = RuntimeSurface(
+    "treasury_receipt",
+    storage=(
+        ("SubtensorModule", "AutoStakeDestination"),
+        ("SubtensorModule", "Keys"),
+        ("SubtensorModule", "LastEpochBlock"),
+        ("SubtensorModule", "Owner"),
+        ("SubtensorModule", "SubnetEpochConsensus"),
+        ("SubtensorModule", "SubnetEpochIndex"),
+        ("SubtensorModule", "SubnetOwner"),
+        ("SubtensorModule", "Uids"),
+        ("SubtensorModule", "ValidatorPermit"),
+        ("Timestamp", "Now"),
+    ),
+    events=(
+        ("Balances", "Transfer"),
+        ("Proxy", "ProxyExecuted"),
+        ("SubtensorModule", "AutoStakeAdded"),
+        ("SubtensorModule", "IncentiveAlphaEmittedToMiners"),
+        ("SubtensorModule", "StakeAdded"),
+        ("SubtensorModule", "StakeRemoved"),
+        ("System", "ExtrinsicFailed"),
+        ("System", "ExtrinsicSuccess"),
+    ),
+    calls=(
+        ("Balances", "transfer_keep_alive"),
+        ("Proxy", "proxy"),
+        ("SubtensorModule", "transfer_stake"),
+    ),
+)
+
+# Outer enums aggregating every pallet; hashed by path, not structure.
+_OPAQUE_TYPES = frozenset({"RuntimeCall", "RuntimeEvent"})
 
 
 @dataclass(frozen=True)
@@ -118,6 +177,8 @@ class _Types:
         """Structure of ``type_id`` with ids replaced by what they mean."""
         node = self.get(type_id)
         path = list(node.get("path") or [])
+        if path and path[-1] in _OPAQUE_TYPES:
+            return {"opaque": path}
         if type_id in stack:
             # Recursive types: refer back by path rather than recurse forever.
             return {"recursive": path}
@@ -200,15 +261,29 @@ def _digest(value: Any) -> str:
     ).hexdigest()
 
 
-def runtime_interface(metadata: Any) -> RuntimeInterface:
-    """Fingerprint the consumed surface of decoded runtime metadata.
+# What malformed metadata raises below the explicit shape checks.
+_MALFORMED = (KeyError, IndexError, TypeError, AttributeError, RecursionError)
+
+
+def _pallets(body: dict[str, Any]) -> dict[Any, dict[str, Any]]:
+    return {
+        pallet.get("name"): pallet
+        for pallet in body.get("pallets") or []
+        if isinstance(pallet, dict)
+    }
+
+
+def runtime_interface(
+    metadata: Any, surface: RuntimeSurface = SOURCE_EMISSION_SURFACE
+) -> RuntimeInterface:
+    """Fingerprint ``surface`` in decoded runtime metadata.
 
     Raises ``ValueError`` on any metadata shape it does not understand, so an
     unreadable runtime fails closed exactly like an unaudited one.
     """
     try:
-        return _runtime_interface(metadata)
-    except (KeyError, IndexError, TypeError, AttributeError, RecursionError) as error:
+        return _runtime_interface(metadata, surface)
+    except _MALFORMED as error:
         # Malformed nodes deeper than the explicit checks still fail closed
         # through the one documented error type.
         raise ValueError(
@@ -216,16 +291,12 @@ def runtime_interface(metadata: Any) -> RuntimeInterface:
         ) from error
 
 
-def _runtime_interface(metadata: Any) -> RuntimeInterface:
+def _runtime_interface(metadata: Any, surface: RuntimeSurface) -> RuntimeInterface:
     body = _metadata_body(metadata)
     types = _Types(body.get("types"))
-    pallets = {
-        pallet.get("name"): pallet
-        for pallet in body.get("pallets") or []
-        if isinstance(pallet, dict)
-    }
+    pallets = _pallets(body)
     entries: dict[str, Any] = {}
-    for pallet_name, item_name in CONSUMED_STORAGE:
+    for pallet_name, item_name in surface.storage:
         storage = (pallets.get(pallet_name) or {}).get("storage") or {}
         items = {
             item.get("name"): item
@@ -263,8 +334,8 @@ def _runtime_interface(metadata: Any) -> RuntimeInterface:
             "default": item.get("default"),
         }
     for label, consumed, field in (
-        ("event", CONSUMED_EVENTS, "event"),
-        ("call", CONSUMED_CALLS, "calls"),
+        ("event", surface.events, "event"),
+        ("call", surface.calls, "calls"),
     ):
         for pallet_name, variant_name in consumed:
             key = f"{label}:{pallet_name}.{variant_name}"
@@ -286,21 +357,72 @@ def _runtime_interface(metadata: Any) -> RuntimeInterface:
     return RuntimeInterface(
         digest=_digest(digests),
         entries=digests,
-        has_epoch_consensus=entries[_EPOCH] is not None,
+        has_epoch_consensus=entries.get(_EPOCH) is not None,
     )
 
 
-def require_audited_interface(interface: RuntimeInterface) -> None:
-    """Raise ``ValueError`` naming what moved unless the surface was audited."""
-    from ditto.chain.audited_runtime_interfaces import AUDITED_RUNTIME_INTERFACES
+def runtime_call_digests(metadata: Any) -> dict[str, str]:
+    """Short digest of every ``Pallet.call`` variant, for reporting.
 
-    if interface.digest in AUDITED_RUNTIME_INTERFACES:
-        return
+    Never an admission input: an operator reads it to see which calls an
+    upgrade added, removed or reshaped behind the opaque outer ``RuntimeCall``
+    (for example the calls a proxy may dispatch). 64-bit digests are ample for
+    naming what changed between two runtimes. Raises ``ValueError`` on
+    metadata it cannot read.
+    """
+    try:
+        return _runtime_call_digests(metadata)
+    except _MALFORMED as error:
+        raise ValueError(
+            f"malformed runtime metadata: {type(error).__name__}"
+        ) from error
+
+
+def _runtime_call_digests(metadata: Any) -> dict[str, str]:
+    body = _metadata_body(metadata)
+    types = _Types(body.get("types"))
+    digests = {}
+    for name, pallet in sorted(_pallets(body).items(), key=lambda item: str(item[0])):
+        holder = pallet.get("calls")
+        if not isinstance(name, str) or not isinstance(holder, dict):
+            continue
+        if "ty" not in holder:
+            continue
+        for call, variant in sorted(types.variants(holder["ty"]).items()):
+            digests[f"{name}.{call}"] = _digest(types.variant(variant, ()))[:16]
+    return digests
+
+
+def nearest_audited_change(
+    interface: RuntimeInterface,
+    audited: dict[str, tuple[str, RuntimeInterface]],
+) -> tuple[str, list[str]]:
+    """The closest audited release and the entries that differ from it."""
     changed, release = min(
         (
-            (interface.changed_entries(audited), release)
-            for release, audited in AUDITED_RUNTIME_INTERFACES.values()
+            (interface.changed_entries(pinned), release)
+            for release, pinned in audited.values()
         ),
         key=lambda item: len(item[0]),
     )
+    return release, changed
+
+
+def require_audited_interface(
+    interface: RuntimeInterface,
+    audited: dict[str, tuple[str, RuntimeInterface]] | None = None,
+) -> None:
+    """Raise ``ValueError`` naming what moved unless the surface was audited.
+
+    ``audited`` defaults to the source-emission pins.
+    """
+    if audited is None:
+        from ditto.chain.audited_runtime_interfaces import (
+            AUDITED_RUNTIME_INTERFACES,
+        )
+
+        audited = AUDITED_RUNTIME_INTERFACES
+    if interface.digest in audited:
+        return
+    release, changed = nearest_audited_change(interface, audited)
     raise ValueError(f"interface changed since {release}: " + ", ".join(changed))

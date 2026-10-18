@@ -165,8 +165,12 @@ def test_unknown_metadata_envelope_fails_closed(value) -> None:
         runtime_interface(value)
 
 
-def test_pinned_audited_interfaces_are_self_consistent() -> None:
-    pinned = PINNED
+@pytest.mark.parametrize(
+    "pinned",
+    [PINNED, audited_runtime_interfaces.TREASURY_RECEIPT_INTERFACES],
+    ids=["source_emission", "treasury_receipt"],
+)
+def test_pinned_audited_interfaces_are_self_consistent(pinned) -> None:
     assert {release for release, _ in pinned.values()} == {"v473", "v478"}
     for digest, (_, interface) in pinned.items():
         assert interface.digest == digest
@@ -177,6 +181,13 @@ def test_pinned_audited_interfaces_are_self_consistent() -> None:
         "storage:SubtensorModule.SubnetEpochConsensus"
     ]
     assert (v473.has_epoch_consensus, v478.has_epoch_consensus) == (False, True)
+
+
+def test_treasury_call_baseline_names_the_signed_runtime() -> None:
+    release, calls = audited_runtime_interfaces.TREASURY_CALL_BASELINE
+    assert release == "v478"
+    assert {"Proxy.proxy", "SubtensorModule.transfer_stake"} <= set(calls)
+    assert all(len(digest) == 16 for digest in calls.values())
 
 
 async def test_upgrade_with_audited_interface_is_admitted_once() -> None:
