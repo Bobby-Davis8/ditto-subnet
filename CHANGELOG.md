@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.377.3 (2026-10-20)
+
+### Bug Fixes
+
+- **treasury**: Read consensus at the v475 upgrade boundary
+  ([#3033](https://github.com/ditto-assistant/ditto-subnet/pull/3033),
+  [`2f7380d`](https://github.com/ditto-assistant/ditto-subnet/commit/2f7380d8f54c3401435dfc2926bde5344a73b4f3))
+
+### Chores
+
+- **ci**: Make standalone checks and previews manual-only
+  ([#3031](https://github.com/ditto-assistant/ditto-subnet/pull/3031),
+  [`a5ee432`](https://github.com/ditto-assistant/ditto-subnet/commit/a5ee432b5c05cdb1c170960184f51e39ab60a2db))
+
+
 ## v0.377.2 (2026-10-20)
 
 ### Bug Fixes
