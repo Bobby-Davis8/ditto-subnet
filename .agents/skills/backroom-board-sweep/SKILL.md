@@ -116,10 +116,33 @@ front-load artifact downloads.
   recipe is I5 (Harry v14 `30d854e5`).
 - **Ported constructs cross hotkeys and languages.** Once a mechanism is
   charged, grep its prompt text (not identifiers) with `search_screening_source`
-  across every ranked and evaluating row. On 2026-10-19 one
-  preliminary-reader I2 stage turned up in Python, Rust, C++ and a renamed
-  Python port on five hotkeys. Building on a publicly released king is allowed;
-  shipping its charged stage is not.
+  across every ranked and evaluating row. A stage can be ported into Python,
+  Rust, C++ or renamed copies across several hotkeys. Building on a publicly
+  released king is allowed; shipping a proven charged stage is not.
+- **Before charging I2, check the request the agent actually receives.**
+  Quote the exact instruction from the served request and show it applies
+  (`workers/screener/docs/policy-v13.md`, I2 clarification). Every scored v13
+  `/run` carries only the validator's tool-discipline system prompt, and
+  `/seed` carries none. A preliminary model stage without the system prompt is
+  a lead, not a finding. On 2026-10-19 ten I2 rejects charged that shape
+  without naming an applicable instruction. They were withdrawn as precedent
+  and reversed (reopen, then clear), so check the proof bar before porting a
+  charge across a lineage. `search_ath_precedents` still lists their original
+  rejects, so never cite one of these UUIDs as I2 precedent:
+  - dan0l v19 `3e9fe610-9759-44bb-b6ec-6f221d9d58dc`
+  - dan0l v18 `55c69c6f-b0e2-4b92-a9bb-9aa3cddbef00`
+  - dan0l v16 `f169e0d7-87a0-41e7-9cf6-2073e31619f0`
+  - lucas-v91 `39d6abd4-bd10-4602-8c16-f2d553040276`
+  - blinkrazor v2 `dc2a8f4f-a877-4ea0-ae44-a1dd6118666a`
+  - Omar-miner v48 `ca7133c8-f328-4124-bdd8-b8f30b85f382`
+  - Harry v20 `1ea576ea-d317-4da2-9f4b-ce86a5ca4541`
+  - T v4 `3f53b09d-25a1-48ce-9b91-09da6e9f2cd0`
+  - T v5 `bfd1d558-30a8-4162-ac5f-9e3c32b923fc`
+  - King v8 `4a431bd8-4819-4dd4-b419-aa8c69a09e6e`
+- **Reward reality-bearing innovation.** The subnet wants harness ideas that
+  would work for any real user: model-written notes at `/seed`, memory graphs,
+  deliberation and auditable tools. Reject only what the policy proves.
+  Novelty, complexity and departing from the starter kit are never grounds.
 
 ## Report
 
