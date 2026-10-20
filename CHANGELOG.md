@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.377.0 (2026-10-20)
+
+### Bug Fixes
+
+- **treasury**: Recover custody on audited Finney v481
+  ([#3020](https://github.com/ditto-assistant/ditto-subnet/pull/3020),
+  [`f09877f`](https://github.com/ditto-assistant/ditto-subnet/commit/f09877f83aaf29335f0dd3f7ffd847aa089f1573))
+
+### Features
+
+- **platform**: Configure github contributor oauth deployment
+  ([#3021](https://github.com/ditto-assistant/ditto-subnet/pull/3021),
+  [`3a5bdc9`](https://github.com/ditto-assistant/ditto-subnet/commit/3a5bdc9a322f9a59b0d694c57d7df4c286e84bfc))
+
+
 ## v0.376.0 (2026-10-20)
 
 ### Bug Fixes
