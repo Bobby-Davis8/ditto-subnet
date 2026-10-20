@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.378.0 (2026-10-20)
+
+### Features
+
+- **platform**: Issue a uniform sandbox memory cap and treat startup SIGILL as host fault
+  ([#3034](https://github.com/ditto-assistant/ditto-subnet/pull/3034),
+  [`50dca25`](https://github.com/ditto-assistant/ditto-subnet/commit/50dca2573e26e543b6b02e3cb19d00d6d7655283))
+
+### Testing
+
+- **ci**: Assert the manual-only standalone CI policy from #3031
+  ([#3035](https://github.com/ditto-assistant/ditto-subnet/pull/3035),
+  [`07bdb8a`](https://github.com/ditto-assistant/ditto-subnet/commit/07bdb8a3a357da6b909de5a1c95dd12a9a672acd))
+
+
 ## v0.377.4 (2026-10-20)
 
 ### Bug Fixes
