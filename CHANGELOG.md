@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.377.2 (2026-10-20)
+
+### Bug Fixes
+
+- **platform**: Resolve payment block hashes through archive RPCs
+  ([#3029](https://github.com/ditto-assistant/ditto-subnet/pull/3029),
+  [`20afc29`](https://github.com/ditto-assistant/ditto-subnet/commit/20afc29123d5a57a075e90e65c6087381e5547e9))
+
+
 ## v0.377.1 (2026-10-20)
 
 ### Bug Fixes
