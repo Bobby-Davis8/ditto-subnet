@@ -2,6 +2,47 @@
 
 <!-- version list -->
 
+## v0.376.0 (2026-10-20)
+
+### Bug Fixes
+
+- **platform**: Deliver public dashboard data across slow reads
+  ([#2752](https://github.com/ditto-assistant/ditto-subnet/pull/2752),
+  [`06d0ffc`](https://github.com/ditto-assistant/ditto-subnet/commit/06d0ffcd2de38caf2f95b54cda192017dc1cf0cb))
+
+- **platform**: Keep a validator nonce until its signed request expires
+  ([#2925](https://github.com/ditto-assistant/ditto-subnet/pull/2925),
+  [`c8bb1d9`](https://github.com/ditto-assistant/ditto-subnet/commit/c8bb1d9ba37463a26a407ccee680679ce082b0c7))
+
+- **screener**: Detect sibling draft fallback and record dedupe
+  ([#3016](https://github.com/ditto-assistant/ditto-subnet/pull/3016),
+  [`049d8ac`](https://github.com/ditto-assistant/ditto-subnet/commit/049d8ac5ab7998ee15843d37292942a036e1039f))
+
+### Documentation
+
+- **skills**: File screener and Ditto core tickets on every board sweep
+  ([#3018](https://github.com/ditto-assistant/ditto-subnet/pull/3018),
+  [`a8a4ca1`](https://github.com/ditto-assistant/ditto-subnet/commit/a8a4ca1c80ccd2e9e08779eda201faf1050b731c))
+
+- **validator**: Stop recommending a shared W&B key
+  ([#2666](https://github.com/ditto-assistant/ditto-subnet/pull/2666),
+  [`cd83f34`](https://github.com/ditto-assistant/ditto-subnet/commit/cd83f340db481b939e4037ae17f00cfbb943f8ab))
+
+### Features
+
+- **platform**: Add contributor identity and build bounties
+  ([#2952](https://github.com/ditto-assistant/ditto-subnet/pull/2952),
+  [`b2d7cf9`](https://github.com/ditto-assistant/ditto-subnet/commit/b2d7cf9d102281dab240e9aee2e002092041f52d))
+
+- **platform**: Record artifact language inventory in fingerprint provenance
+  ([#2838](https://github.com/ditto-assistant/ditto-subnet/pull/2838),
+  [`d9e09a4`](https://github.com/ditto-assistant/ditto-subnet/commit/d9e09a4169212624b62ffbf1d9d0c17f4c8b7c75))
+
+- **protocol**: Add report-only private statistical analysis
+  ([#2202](https://github.com/ditto-assistant/ditto-subnet/pull/2202),
+  [`dbe1122`](https://github.com/ditto-assistant/ditto-subnet/commit/dbe1122b607a5ac3a560d51fefe817bc35bf2a5a))
+
+
 ## v0.375.1 (2026-10-19)
 
 ### Bug Fixes
