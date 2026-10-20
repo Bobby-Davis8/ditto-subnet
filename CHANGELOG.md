@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.377.1 (2026-10-20)
+
+### Bug Fixes
+
+- **platform**: Prefer existing archive RPCs for treasury reads
+  ([#3023](https://github.com/ditto-assistant/ditto-subnet/pull/3023),
+  [`2523d25`](https://github.com/ditto-assistant/ditto-subnet/commit/2523d25f0f8041bea0321a1b60187286dd85c1ed))
+
+
 ## v0.377.0 (2026-10-20)
 
 ### Bug Fixes
