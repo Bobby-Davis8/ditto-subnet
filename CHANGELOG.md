@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.377.4 (2026-10-20)
+
+### Bug Fixes
+
+- **platform**: Fail over epoch schedule reads to archive RPCs
+  ([#3030](https://github.com/ditto-assistant/ditto-subnet/pull/3030),
+  [`956a425`](https://github.com/ditto-assistant/ditto-subnet/commit/956a425f8d05cc2046208a84f6a4f9882ff5f72b))
+
+
 ## v0.377.3 (2026-10-20)
 
 ### Bug Fixes
