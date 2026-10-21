@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.379.1 (2026-10-21)
+
+### Bug Fixes
+
+- **backroom**: Approve parked screening failures with guarded releases
+  ([#3040](https://github.com/ditto-assistant/ditto-subnet/pull/3040),
+  [`9c6b0c6`](https://github.com/ditto-assistant/ditto-subnet/commit/9c6b0c6588403e491f04b484a294faf67fe94808))
+
+
 ## v0.379.0 (2026-10-21)
 
 ### Features
