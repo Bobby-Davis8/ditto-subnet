@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.380.1 (2026-10-21)
+
+### Bug Fixes
+
+- **scorer**: Accept already pinned reasoning privacy
+  ([#3049](https://github.com/ditto-assistant/ditto-subnet/pull/3049),
+  [`8505de8`](https://github.com/ditto-assistant/ditto-subnet/commit/8505de811008617b2eb1419138e15aa23aa64c47))
+
+
 ## v0.380.0 (2026-10-21)
 
 ### Features
