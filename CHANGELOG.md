@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.378.2 (2026-10-21)
+
+### Bug Fixes
+
+- **platform**: Find every identity change in sparse catch-up and prove it replays like the full
+  scan ([#3022](https://github.com/ditto-assistant/ditto-subnet/pull/3022),
+  [`b70c083`](https://github.com/ditto-assistant/ditto-subnet/commit/b70c083eae19a5a5e8b8d84e6e0f0609678d1c6e))
+
+
 ## v0.378.1 (2026-10-21)
 
 ### Bug Fixes
