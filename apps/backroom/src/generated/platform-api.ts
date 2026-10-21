@@ -2612,6 +2612,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/screener-l2-report-canaries/fixture/operator-proof/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Canonical Fixture Operator Proof
+         * @description Check a body-bound authenticated proof without touching fixture state.
+         */
+        post: operations["verify_canonical_fixture_operator_proof_api_v1_admin_screener_l2_report_canaries_fixture_operator_proof_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/screener-l2-report-canaries/fixture/preflight": {
         parameters: {
             query?: never;
@@ -17351,6 +17371,31 @@ export interface components {
             /** Scope */
             scope: string;
             settings: components["schemas"]["BurnSettings"];
+        };
+        /**
+         * CanonicalFixturePreflightView
+         * @description Public fixture identity and advisory readiness; no mutation authority.
+         */
+        CanonicalFixturePreflightView: {
+            /** Archive Sha256 */
+            archive_sha256: string;
+            /** Archive Size Bytes */
+            archive_size_bytes: number;
+            /** Can Schedule */
+            can_schedule: boolean;
+            fixture: components["schemas"]["L2CanaryView"] | null;
+            /** Fixture Capable Worker Ready */
+            fixture_capable_worker_ready: boolean;
+            /** Operator Proof Configured */
+            operator_proof_configured: boolean;
+            /** Release */
+            release: string;
+            /** Release Commit */
+            release_commit: string;
+            /** Source Tree */
+            source_tree: string;
+            /** Stored Object Matches */
+            stored_object_matches: boolean;
         };
         /** CanonicalFixtureRegisterRequest */
         CanonicalFixtureRegisterRequest: {
@@ -46661,6 +46706,45 @@ export interface operations {
             };
         };
     };
+    verify_canonical_fixture_operator_proof_api_v1_admin_screener_l2_report_canaries_fixture_operator_proof_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_canonical_fixture_preflight_api_v1_admin_screener_l2_report_canaries_fixture_preflight_get: {
         parameters: {
             query?: never;
@@ -46678,9 +46762,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CanonicalFixturePreflightView"];
                 };
             };
             /** @description Validation Error */
