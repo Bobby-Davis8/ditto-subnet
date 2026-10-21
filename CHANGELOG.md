@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v0.378.1 (2026-10-21)
+
+### Bug Fixes
+
+- **gamma**: Backfill wallet receipts after source audit refusal
+  ([#3039](https://github.com/ditto-assistant/ditto-subnet/pull/3039),
+  [`5ed91e9`](https://github.com/ditto-assistant/ditto-subnet/commit/5ed91e9e78ddbbd059adee75d4a6b61dbf8326a8))
+
+- **treasury**: Publish finalized manual wallet receipts
+  ([#3036](https://github.com/ditto-assistant/ditto-subnet/pull/3036),
+  [`41e3a76`](https://github.com/ditto-assistant/ditto-subnet/commit/41e3a76649c08b3d02f941108f8839c5cf5153e0))
+
+### Chores
+
+- **tests**: Align screener contracts with manual-only CI
+  ([#3038](https://github.com/ditto-assistant/ditto-subnet/pull/3038),
+  [`7d0635f`](https://github.com/ditto-assistant/ditto-subnet/commit/7d0635fbf5ee656ccf728e754ef3cae7ad4687ab))
+
+### Documentation
+
+- **screener**: Require a named applicable instruction for I2 and exclude /seed
+  ([#3019](https://github.com/ditto-assistant/ditto-subnet/pull/3019),
+  [`96182e3`](https://github.com/ditto-assistant/ditto-subnet/commit/96182e3432ba7bb11f42660820ef9a34c3dab2c7))
+
+
 ## v0.378.0 (2026-10-20)
 
 ### Features
