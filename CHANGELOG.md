@@ -2,6 +2,38 @@
 
 <!-- version list -->
 
+## v0.381.0 (2026-10-21)
+
+### Bug Fixes
+
+- **backroom**: Verify canonical fixture operator proof
+  ([#3044](https://github.com/ditto-assistant/ditto-subnet/pull/3044),
+  [`34cf307`](https://github.com/ditto-assistant/ditto-subnet/commit/34cf3079bf824092867df92aa9e0c43291345887))
+
+- **relay**: Regenerate schema after targeted retry migration
+  ([#3051](https://github.com/ditto-assistant/ditto-subnet/pull/3051),
+  [`c4d4e36`](https://github.com/ditto-assistant/ditto-subnet/commit/c4d4e3689cb4e585aed132a43c9f1d97866644bd))
+
+- **relay**: Synchronize schema with official control migration
+  ([`b940bfe`](https://github.com/ditto-assistant/ditto-subnet/commit/b940bfe0b65fa8136fb5fc8e28f768ea4f6cbb72))
+
+### Documentation
+
+- **skills**: Reconcile miner communications before board rulings
+  ([#3052](https://github.com/ditto-assistant/ditto-subnet/pull/3052),
+  [`4bc9b10`](https://github.com/ditto-assistant/ditto-subnet/commit/4bc9b10daca743e30bb0c976d931a7fcd17166a3))
+
+### Features
+
+- **backroom**: Manage official controls with one operator
+  ([#3048](https://github.com/ditto-assistant/ditto-subnet/pull/3048),
+  [`04f2191`](https://github.com/ditto-assistant/ditto-subnet/commit/04f21912c81a41ddcf02c4aa6f7c1614df99d2f3))
+
+- **backroom**: Target a compatible validator for final-quorum recovery
+  ([#3050](https://github.com/ditto-assistant/ditto-subnet/pull/3050),
+  [`b05ad65`](https://github.com/ditto-assistant/ditto-subnet/commit/b05ad65072619764aa2a5f0b37db744507b8d92b))
+
+
 ## v0.380.1 (2026-10-21)
 
 ### Bug Fixes
