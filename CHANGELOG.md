@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.381.1 (2026-10-21)
+
+### Bug Fixes
+
+- **screener**: Verify containerd image handles before launch
+  ([#3055](https://github.com/ditto-assistant/ditto-subnet/pull/3055),
+  [`03c4299`](https://github.com/ditto-assistant/ditto-subnet/commit/03c4299270d2fe2b0b181c475b50d43f3338a9c8))
+
+
 ## v0.381.0 (2026-10-21)
 
 ### Bug Fixes
