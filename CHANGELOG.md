@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.379.2 (2026-10-21)
+
+### Bug Fixes
+
+- **platform**: Synchronize the published screener policy digest
+  ([#3043](https://github.com/ditto-assistant/ditto-subnet/pull/3043),
+  [`a9468ac`](https://github.com/ditto-assistant/ditto-subnet/commit/a9468ac72a69c7b157b8ea07cb94f30af3c97b35))
+
+- **screener**: Keep incomplete reviews parked for manual review
+  ([#3041](https://github.com/ditto-assistant/ditto-subnet/pull/3041),
+  [`1243f13`](https://github.com/ditto-assistant/ditto-subnet/commit/1243f13720e0f2be26fe99bab7695f1b08ea8015))
+
+
 ## v0.379.1 (2026-10-21)
 
 ### Bug Fixes
