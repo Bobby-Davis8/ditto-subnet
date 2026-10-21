@@ -36,6 +36,8 @@ import {
   publishBountyRevision,
   reassignBountyReviewer,
   reconcileBountyTransfer,
+  recordBountyEvaluationDecision,
+  recordBountyEvaluationEntry,
   recordBountyFact,
   reviewBountySubmission,
   setBountyClaimsPaused,
@@ -521,6 +523,8 @@ export const WRITE_TOOL_NAMES = new Set([
   'dispatch_bounty_obligation',
   'reconcile_bounty_transfer',
   'record_bounty_fact',
+  'record_bounty_evaluation',
+  'decide_bounty_evaluation',
   'set_burn_settings',
   'set_confirmation_bundle_settings',
   'authorize_confirmation_bundle_retest',
@@ -899,7 +903,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_bounty_board: 'List build bounties: terms, slots, pause, awards.',
   get_bounty: 'Operator view of one bounty: claims, appeals, full private audit.',
   get_bounty_claim: 'Read one bounty claim: submissions, obligations, facts.',
-  get_bounty_queue: 'Review queue (overdue first) or settlement queue with approvers.',
+  get_bounty_queue: 'Review queue (overdue first), settlement queue with approvers, or pending appeals.',
   get_bounty_payout_policy: 'Read approval thresholds in force, or one exact revision; null when unset.',
   preview_bounty_revision: 'Digest, exact phrase and refusals for a revision; writes nothing.',
   publish_bounty_revision: 'Publish a previewed bounty revision. Write; see help.',
@@ -914,6 +918,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   dispatch_bounty_obligation: 'Dispatch an approved round once. Write; see help.',
   reconcile_bounty_transfer: 'Settle a dispatched or uncertain transfer. Write; see help.',
   record_bounty_fact: 'Record a merge, deploy or adoption fact. Write; see help.',
+  record_bounty_evaluation: 'Record a bounty estimate or actual. Write; see help.',
+  decide_bounty_evaluation: 'Record expand, revise or stop for a bounty pilot. Write; see help.',
   get_owner_attestations:
     'Read signed direct owner links/revocations; non-transitive copy-review evidence.',
   list_lease_revocations:
@@ -1762,7 +1768,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
 
   registerTool('get_bounty', {
     title: 'Get bounty operator view',
-    description: 'One bounty with everything public views hide: the reviewer in force, each revision\'s operator, reviewer and reason, every claim with submissions, obligations and facts, appeal statements, and a chronological audit of every operator record (publication, pause, reassignment, review, appeal decision, cancel, reopen, award, approval, dispatch, fact) with actor and reason, plus a source-safe report with settlement checks. Use it before any bounty write and to verify one after. Requires backroom:read.',
+    description: 'One bounty with everything public views hide: the reviewer in force, each revision\'s operator, reviewer and reason, every claim with submissions, obligations and facts, appeal statements, the evaluation records, and a chronological audit of every operator record (publication, pause, reassignment, review, appeal decision, cancel, reopen, award, approval, dispatch, fact, evaluation) with actor and reason, plus a source-safe report with settlement checks and the evaluation. Use it before any bounty write and to verify one after. Requires backroom:read.',
     inputSchema: bountyCatalogInputs.bounty, annotations: toolAnnotations('read'),
   }, async (input) => result(await fetchBounty(input)))
 
@@ -1774,7 +1780,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
 
   registerTool('get_bounty_queue', {
     title: 'Get bounty work queue',
-    description: 'queue=reviews lists submissions awaiting a decision, the most overdue first, with the reviewer in force; overdueOnly narrows it. queue=settlement lists obligations still needing an operator (awaiting_approval, over_policy_limit, approved, dispatched, uncertain, failed) with the operators who approved the current round; state narrows it, and state=confirmed shows paid ones. Requires backroom:read.',
+    description: 'queue=reviews lists submissions awaiting a decision, the most overdue first, with the reviewer in force; overdueOnly narrows it. queue=settlement lists obligations still needing an operator (awaiting_approval, over_policy_limit, approved, dispatched, uncertain, failed) with the operators who approved the current round; state narrows it, and state=confirmed shows paid ones. queue=appeals lists undecided appeals, the longest waiting first, each with its bounty, claim, the appealed event (rejected or deadline_missed) and the private statement; decide one with decide_bounty_appeal. Requires backroom:read.',
     inputSchema: bountyQueueInputSchema, annotations: toolAnnotations('read'),
   }, async (input) => result(await fetchBountyQueue(input)))
 
@@ -1816,7 +1822,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
 
   registerTool('control_bounty_slot', {
     title: 'Cancel or reopen bounty slot',
-    description: 'action=cancel (CANCEL BOUNTY SLOT {repo}#{issue} ROUND {r} SLOT {p}; kind team or system_fault) cancels an open, claimed, submitted or rework slot and refunds a paid fee in full; a held slot is refused. action=reopen (REOPEN BOUNTY SLOT ...) reopens an expired, withdrawn, rejected or cancelled slot for a new claim, records a retained fee for a rejected, expired or withdrawn claim, and is refused while an appeal is pending. Requires backroom:write.',
+    description: 'action=cancel (CANCEL BOUNTY SLOT {repo}#{issue} ROUND {r} SLOT {p}; kind team or system_fault) cancels an open, claimed, submitted or rework slot and refunds a paid fee in full; a held slot is refused. action=reopen (REOPEN BOUNTY SLOT ...) reopens an expired, withdrawn, rejected or cancelled slot for a new claim, records a retained fee for a rejected, expired or withdrawn claim, and is refused while an appeal is pending or, for a rejected or expired slot, until 3 days after the rejection or the missed deadline is recorded, unless its appeal was decided (the 409 names when). Requires backroom:write.',
     inputSchema: bountyCatalogInputs.slot, annotations: toolAnnotations('write', true),
   }, async (input) => write(() => controlBountySlot(props.session.email, input)))
 
@@ -1861,6 +1867,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     description: 'Record a public merged, deployed or adopted fact for accepted work (RECORD BOUNTY {KIND} {claimId}). Facts are never payment conditions. Requires backroom:write.',
     inputSchema: bountyCatalogInputs.fact, annotations: toolAnnotations('write', true),
   }, async (input) => write(() => recordBountyFact(props.session.email, input)))
+
+  registerTool('record_bounty_evaluation', {
+    title: 'Record bounty evaluation entry',
+    description: 'Record an estimate or actual of one evaluation metric of a bounty pilot (#2944): build_hours, reviewer_hours, integration_hours, operator_hours or turnaround_days, as a non-negative value up to 1,000,000, with an optional note and a private reason (RECORD BOUNTY {KIND} {METRIC} {repo}#{issue}). expectedEntryId names the current entry of that kind and metric, which this one supersedes (0 before the first); a stale one is refused. The history stays; the latest entry is current. get_bounty shows every entry with its operator; the report shows current estimates and actuals apart, without operators or notes. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.evaluationEntry, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => recordBountyEvaluationEntry(props.session.email, input)))
+
+  registerTool('decide_bounty_evaluation', {
+    title: 'Decide bounty evaluation',
+    description: 'Record the decision to expand, revise or stop a bounty pilot (#2944) with its integrationStatus (not_integrated, integrating, integrated, adopted or not_adopted) and non-blank reasons (DECIDE BOUNTY EVALUATION {repo}#{issue} {DECISION}). expectedDecisionId names the current decision, which this one supersedes (0 before the first); a stale one is refused. The history stays; the latest is current, and the public report shows it with its reasons verbatim, but not its operator. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.evaluationDecision, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => recordBountyEvaluationDecision(props.session.email, input)))
 
   registerTool(
     'get_owner_attestations',
