@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.380.0 (2026-10-21)
+
+### Features
+
+- **screener**: Load protected V13 blueprint banks
+  ([#2226](https://github.com/ditto-assistant/ditto-subnet/pull/2226),
+  [`5beb567`](https://github.com/ditto-assistant/ditto-subnet/commit/5beb5678f3e03746fc8591c5af885d31cff45908))
+
+
 ## v0.379.2 (2026-10-21)
 
 ### Bug Fixes
