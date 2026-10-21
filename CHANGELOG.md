@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.379.0 (2026-10-21)
+
+### Features
+
+- **platform**: Add bounty operator controls and durable pilot evaluation records
+  ([#3024](https://github.com/ditto-assistant/ditto-subnet/pull/3024),
+  [`68778c9`](https://github.com/ditto-assistant/ditto-subnet/commit/68778c9270c7238172097a021fb12c5abd32a3d1))
+
+
 ## v0.378.2 (2026-10-21)
 
 ### Bug Fixes
