@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.382.0 (2026-10-22)
+
+### Bug Fixes
+
+- **validator**: Bound every Docker call in the stack update transaction
+  ([#3037](https://github.com/ditto-assistant/ditto-subnet/pull/3037),
+  [`fb2f96c`](https://github.com/ditto-assistant/ditto-subnet/commit/fb2f96c7068aae74b7928323d308a7f308d45903))
+
+### Features
+
+- **platform**: Reconsider a rejected agent through the ATH rulings court
+  ([#3082](https://github.com/ditto-assistant/ditto-subnet/pull/3082),
+  [`e403390`](https://github.com/ditto-assistant/ditto-subnet/commit/e40339051e2407fb225d851b8dc3fce8c262dc80))
+
+
 ## v0.381.2 (2026-10-22)
 
 ### Bug Fixes
