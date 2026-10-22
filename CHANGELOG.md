@@ -2,6 +2,45 @@
 
 <!-- version list -->
 
+## v0.381.2 (2026-10-22)
+
+### Bug Fixes
+
+- **dittobench**: Charge the agent, not the relay, for embedding declines after its chat token wall
+  ([#3026](https://github.com/ditto-assistant/ditto-subnet/pull/3026),
+  [`ce1938e`](https://github.com/ditto-assistant/ditto-subnet/commit/ce1938e9c69caa38ffd6f6a611b35bf1185a9d0f))
+
+- **gamma**: Settle delivery fence on a verified wallet movement
+  ([#3070](https://github.com/ditto-assistant/ditto-subnet/pull/3070),
+  [`8edd4e4`](https://github.com/ditto-assistant/ditto-subnet/commit/8edd4e4b451d1d08f348b4bac79ef37cb6ad8c10))
+
+- **infra**: Preserve platform environment include boundaries
+  ([#3057](https://github.com/ditto-assistant/ditto-subnet/pull/3057),
+  [`155a422`](https://github.com/ditto-assistant/ditto-subnet/commit/155a422b45958c503d1f1d98dae0673992e4cbd3))
+
+- **miner-cli**: Fail ditto verify on RUN --network=host / --security=insecure before the fee
+  ([#3027](https://github.com/ditto-assistant/ditto-subnet/pull/3027),
+  [`c040fd4`](https://github.com/ditto-assistant/ditto-subnet/commit/c040fd4d1819368f9f2af8e14b836678021939e0))
+
+- **treasury**: Recover custody on audited Finney v482
+  ([#3071](https://github.com/ditto-assistant/ditto-subnet/pull/3071),
+  [`ad16bed`](https://github.com/ditto-assistant/ditto-subnet/commit/ad16bed72e2791e1941f35b255a40436584124b2))
+
+- **validator**: Honor runtime settings on continual retests
+  ([#3056](https://github.com/ditto-assistant/ditto-subnet/pull/3056),
+  [`115ca38`](https://github.com/ditto-assistant/ditto-subnet/commit/115ca38f4b67b71917e5cf2ec0f8c3ba3cff23d3))
+
+- **validator,dittobench**: Stop charging miners for scorer-image and private-dataset outages
+  ([#3025](https://github.com/ditto-assistant/ditto-subnet/pull/3025),
+  [`c88a900`](https://github.com/ditto-assistant/ditto-subnet/commit/c88a9002215b84e0178d48a2aaad198b4caf13f9))
+
+### Code Style
+
+- **infra**: Format platform env include test
+  ([#3072](https://github.com/ditto-assistant/ditto-subnet/pull/3072),
+  [`2ccbc6d`](https://github.com/ditto-assistant/ditto-subnet/commit/2ccbc6d1e5890802fd5e76d4bba107417d29ec4e))
+
+
 ## v0.381.1 (2026-10-21)
 
 ### Bug Fixes
