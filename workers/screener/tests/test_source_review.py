@@ -4059,11 +4059,16 @@ def test_policy_v13_binds_the_two_security_charges_to_their_defining_element() -
         "report cross_user_access only when two substantively different",
         "the request user are not a second principal.",
         "transmission path out of the request",
-        "stdout or stderr crosses no",
+        "write to stdout or stderr is not that path by itself",
+        "the authorized review scope for that submission",
     ):
         assert fragment in v13, fragment
         assert fragment not in v12, fragment
 
+    # Worker stdout and stderr reach operator-readable logs, so the clause
+    # names why that scope is authorized rather than claiming the stream
+    # never leaves the request.
+    assert "crosses no" not in v13
     assert _prompt_revision(13) == "source-review-v34-policy-v13"
     assert _prompt_revision(12) == "source-review-v24-policy-v12"
 

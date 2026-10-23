@@ -1396,9 +1396,13 @@ outbound sink. Tools scoped to the request user are not a second principal.
 S2 needs a reachable operation and an unauthorized effect, so exfiltration
 needs a transmission path out of the request -- a network destination, a store
 or file another principal reads, or an external endpoint -- or cross-principal
-data. Writing the request's own tool result or answer to stdout or stderr
-crosses no principal and leaves the sandbox unchanged; record it as an
-observation.
+data. A write to stdout or stderr is not that path by itself, and it is not
+automatically request-local either: name the collector and who can read it.
+Worker streams are collected into operator-readable screening logs, which are
+the authorized review scope for that submission, so the request's own data
+there stays an observation. Report S2 when a reader outside that scope can
+reach the stream, or when what is written is another principal's data or a
+secret.
 """
 _L2_POLICY_TAILS[13] = (
     _L2_POLICY_TAILS[12] + _L2_POLICY_V13_ADDENDUM + "\n" + DECISION_PATH_GUIDANCE
@@ -1755,8 +1759,11 @@ _V13_SAFETY_ADJUDICATOR_TASK = _SAFETY_ADJUDICATOR_TASK.replace(
     "default user on `/seed` and `/run` is one principal under W15, so clear a "
     "cross-user challenge that names no second substantively different "
     "principal. Exfiltration needs a transmission path out of the request or "
-    "cross-principal data, so clear a challenge whose only cited sink is a log "
-    "of the request's own result to stdout or stderr.",
+    "cross-principal data, and a cited stdout or stderr write is not that path "
+    "on its own: establish the collector and its readers, clear the request's "
+    "own data in the operator-readable screening log, and uphold a stream a "
+    "reader outside that scope can reach or one carrying another principal's "
+    "data or a secret.",
 )
 
 _ORDINARY_OPTIONAL_FIELD_SAFETY_TASK = """\

@@ -456,14 +456,21 @@ def test_v13_binds_i2_i3_and_two_security_charges_to_their_defining_element() ->
         "report cross_user_access only when two",
         "Tools scoped to the request user are not a second principal.",
         "transmission path out of the request",
-        "crosses no principal and leaves the sandbox unchanged",
+        "name the collector and who can read it",
+        "the authorized review scope for that submission",
     ):
         assert fragment in v13, fragment
         assert fragment not in v12, fragment
 
+    # A self-log is not automatically request-local: worker stdout and stderr
+    # are collected into operator-readable screening logs, so the clause names
+    # why that scope is authorized instead of claiming the stream never leaves.
+    assert "crosses no principal" not in v13
+    assert "leaves the sandbox unchanged" not in v13
+
     safety = l2_review._V13_SAFETY_ADJUDICATOR_TASK
     assert "one principal under W15" in safety
-    assert "only cited sink is a log" in safety
+    assert "establish the collector and its readers" in safety
     assert "one principal under W15" not in _SAFETY_ADJUDICATOR_TASK
 
     # Every role shares the versioned system prompt under one provider cache
