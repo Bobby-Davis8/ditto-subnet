@@ -459,9 +459,9 @@ def test_v13_external_tool_ids_are_not_local_memory_ids() -> None:
     assert "blocks the call before endpoint dispatch" in v13
     assert "external tool's actual name and argument schema" in v13
     assert "hypothetically use the same field name" in v13
-    assert l2_prompt_revision(13) == "l2-terra-source-review-v56-policy-v13"
-    assert l2_critic_prompt_revision(13) == "l3-sol-adversarial-critic-v28-policy-v13"
-    assert l2_safety_prompt_revision(13) == "l3-sol-safety-adjudicator-v31-policy-v13"
+    assert l2_prompt_revision(13) == "l2-terra-source-review-v57-policy-v13"
+    assert l2_critic_prompt_revision(13) == "l3-sol-adversarial-critic-v29-policy-v13"
+    assert l2_safety_prompt_revision(13) == "l3-sol-safety-adjudicator-v32-policy-v13"
     assert "Use at most four targeted analyzer" in _SAFETY_ADJUDICATOR_TASK
     assert "Use at most four targeted analyzer" not in (
         l2_review._V13_SAFETY_ADJUDICATOR_TASK
@@ -546,7 +546,7 @@ def test_l2_policy_v13_prompt_adds_i8_and_authority_boundaries() -> None:
     assert "validator mints `inference_base_url`" in v13
     assert "A URL derived from user text" in v13
     assert "validator mints `inference_base_url`" not in _l2_review_system_prompt(12)
-    assert l2_prompt_revision(13) == "l2-terra-source-review-v56-policy-v13"
+    assert l2_prompt_revision(13) == "l2-terra-source-review-v57-policy-v13"
     assert "v13" not in _benchmark_contract_capsule(12)
     assert _benchmark_contract_capsule(12)["supported_versions"] == [3, 4, 5, 6]
     assert (
@@ -9665,3 +9665,19 @@ async def test_non_auth_http_errors_are_not_waited_out(tmp_path: Path) -> None:
             )
 
     assert requests == 1
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        l2_review.l2_prompt_revision,
+        l2_review.l2_critic_prompt_revision,
+        l2_review.l2_cause_prompt_revision,
+        l2_review.l2_cause_tiebreaker_prompt_revision,
+        l2_review.l2_safety_prompt_revision,
+    ],
+)
+def test_policy_v13_prompt_revisions_carry_one_policy_suffix(revision) -> None:
+    value = revision(13)
+    assert value.endswith("-policy-v13")
+    assert value.count("-policy-v") == 1
