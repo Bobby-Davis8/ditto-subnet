@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.382.1 (2026-10-23)
+
+### Bug Fixes
+
+- **release**: Map Node runtime pins added by #3083
+  ([#3090](https://github.com/ditto-assistant/ditto-subnet/pull/3090),
+  [`12a1adb`](https://github.com/ditto-assistant/ditto-subnet/commit/12a1adbdcb9b0f6c05f1b04b80020a2791b73ccc))
+
+- **screener**: Ruff-format the case-file currency guidance test
+  ([#3091](https://github.com/ditto-assistant/ditto-subnet/pull/3091),
+  [`443e782`](https://github.com/ditto-assistant/ditto-subnet/commit/443e7826216c09be91d17750eb4fc0243b73ce54))
+
+- **screener**: Stop treating case-file currency rules as I5 on their own
+  ([#3089](https://github.com/ditto-assistant/ditto-subnet/pull/3089),
+  [`e1d5754`](https://github.com/ditto-assistant/ditto-subnet/commit/e1d57541d60568dd4d8ed2cffcc0a27023124ace))
+
+- **security**: Require patched October Node runtimes
+  ([#3083](https://github.com/ditto-assistant/ditto-subnet/pull/3083),
+  [`2de866a`](https://github.com/ditto-assistant/ditto-subnet/commit/2de866ace8ae9725268392622160ee9527c5604d))
+
+
 ## v0.382.0 (2026-10-22)
 
 ### Bug Fixes
