@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.382.3 (2026-10-23)
+
+### Bug Fixes
+
+- **screener**: Distinguish refuted I5 leads from unresolved source
+  ([#3060](https://github.com/ditto-assistant/ditto-subnet/pull/3060),
+  [`f34936d`](https://github.com/ditto-assistant/ditto-subnet/commit/f34936d5d853060956c05c19f6f145820c24cff1))
+
+
 ## v0.382.2 (2026-10-23)
 
 ### Bug Fixes
