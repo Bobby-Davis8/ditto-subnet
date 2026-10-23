@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.382.2 (2026-10-23)
+
+### Bug Fixes
+
+- **treasury**: Anchor manual movement proof at settlement when its source epoch is a gap
+  ([#3093](https://github.com/ditto-assistant/ditto-subnet/pull/3093),
+  [`8df5c3d`](https://github.com/ditto-assistant/ditto-subnet/commit/8df5c3d7c015933c5f373a7ef0a98e6a11b4620e))
+
+
 ## v0.382.1 (2026-10-23)
 
 ### Bug Fixes
