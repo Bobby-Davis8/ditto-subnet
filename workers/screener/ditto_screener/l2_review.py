@@ -132,35 +132,35 @@ _SUPPORTED_POLICY_VERSIONS = tuple(
 def l2_prompt_revision(policy_version: int) -> str:
     """Analyst prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l2-terra-source-review-v55-policy-v13"
+        return "l2-terra-source-review-v56-policy-v13"
     return f"l2-terra-source-review-v37-policy-v{policy_version}"
 
 
 def l2_critic_prompt_revision(policy_version: int) -> str:
     """Critic prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l3-sol-adversarial-critic-v27-policy-v13"
+        return "l3-sol-adversarial-critic-v28-policy-v13"
     return f"l3-sol-adversarial-critic-v21-policy-v{policy_version}"
 
 
 def l2_cause_prompt_revision(policy_version: int) -> str:
     """Violation-cause prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l3-sol-violation-cause-v32-policy-v13"
+        return "l3-sol-violation-cause-v33-policy-v13"
     return f"l3-sol-violation-cause-v27-policy-v{policy_version}"
 
 
 def l2_cause_tiebreaker_prompt_revision(policy_version: int) -> str:
     """Cause-tiebreaker prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l3-sol-cause-disagreement-v12-policy-v13"
+        return "l3-sol-cause-disagreement-v13-policy-v13"
     return f"l3-sol-cause-disagreement-v7-policy-v{policy_version}"
 
 
 def l2_safety_prompt_revision(policy_version: int) -> str:
     """Safety-adjudicator prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l3-sol-safety-adjudicator-v30-policy-v13"
+        return "l3-sol-safety-adjudicator-v31-policy-v13"
     return f"l3-sol-safety-adjudicator-v24-policy-v{policy_version}"
 
 
@@ -1285,9 +1285,20 @@ actually imposes a benchmark-derived recipe. For a V13 I5 breach, submit
 causal_evidence schema_version 3 with i5_proof naming the concrete evaluation-
 dependent assumption, an evidence index for that assumption, and a distinct
 ordinary-product exclusion. Do not fill either field with a generic claim that
-prescriptive prose is benchmark-shaped. If the source does not support these
-proof obligations, mark I5 inconclusive; an inconclusive invariant cannot
-reject. For I6,
+prescriptive prose is benchmark-shaped. These are I5 BREACH proof obligations,
+not prerequisites for a supported I5 pass. Apply this V13 distinction to every
+I5 lead, including prompt recipes described in earlier policy text.
+After a complete digest-bound served-path trace positively refutes the alleged
+compiler, record I5 pass with the supported no_family_compiler or
+runtime_described_generic_engine clause. Trace the actual context, authority,
+effect and response sink; generic model use or clearing one dormant helper
+does not establish this refutation or clear other served branches.
+If the source leaves a specific causal edge unresolved, name that edge and
+mark I5 inconclusive. Missing breach proof alone warrants neither a pass nor
+an inconclusive hold. Zero findings, dossier_complete, model agreement and
+absence of a budget stop are not positive clearance evidence. Preserve an
+I5 breach when its evaluation-dependent assumption and served effect are
+proved; an inconclusive invariant cannot reject. For I6,
 trace the condition
 guarding each alleged fabricated tool result. A fallback that returns a
 local stub only when the request omits
