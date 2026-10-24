@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.386.3 (2026-10-24)
+
+### Bug Fixes
+
+- **treasury**: Keep signing across Finney upgrades with an unchanged signer surface
+  ([#3151](https://github.com/ditto-assistant/ditto-subnet/pull/3151),
+  [`2f594b0`](https://github.com/ditto-assistant/ditto-subnet/commit/2f594b0e26a442edde6f641517dfbd874e7ab414))
+
+
 ## v0.386.2 (2026-10-24)
 
 ### Bug Fixes
