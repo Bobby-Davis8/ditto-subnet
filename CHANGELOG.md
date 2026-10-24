@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.386.1 (2026-10-24)
+
+### Bug Fixes
+
+- **platform**: Never charge a generator-round run to the scoring retry budget
+  ([#3148](https://github.com/ditto-assistant/ditto-subnet/pull/3148),
+  [`daba154`](https://github.com/ditto-assistant/ditto-subnet/commit/daba154be7198faa3badbfd08a3e5053597d3cda))
+
+- **platform**: Read the live chain through the paid provider first
+  ([#3145](https://github.com/ditto-assistant/ditto-subnet/pull/3145),
+  [`ff5ac92`](https://github.com/ditto-assistant/ditto-subnet/commit/ff5ac920e81bcdb4338fbbf71ebbf779d30f43e0))
+
+- **validator**: Read the chain through an optional paid provider
+  ([#3146](https://github.com/ditto-assistant/ditto-subnet/pull/3146),
+  [`d3bb79b`](https://github.com/ditto-assistant/ditto-subnet/commit/d3bb79b5e410c9394893c59da6e47e631847b957))
+
+
 ## v0.386.0 (2026-10-24)
 
 ### Features
