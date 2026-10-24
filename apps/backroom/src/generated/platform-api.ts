@@ -13113,6 +13113,7 @@ export interface components {
             leads: components["schemas"]["AdminProbeBatteryLead"][];
             /** Probe Count */
             probe_count: number;
+            review?: components["schemas"]["AdminProbeReview"] | null;
             /** Seed First */
             seed_first: boolean;
             /** Settings Revision */
@@ -13124,6 +13125,66 @@ export interface components {
              * @enum {string}
              */
             status: "complete" | "calibration_failed" | "timeout" | "error";
+        };
+        /**
+         * AdminProbeReview
+         * @description Bounded report-only reviewer summary: status, invariants and usage.
+         */
+        AdminProbeReview: {
+            /**
+             * Completion Tokens
+             * @default 0
+             */
+            completion_tokens: number;
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd: number;
+            /**
+             * Findings
+             * @default []
+             */
+            findings: components["schemas"]["AdminProbeReviewFinding"][];
+            /**
+             * Invariants
+             * @default []
+             */
+            invariants: string[];
+            /**
+             * Prompt Tokens
+             * @default 0
+             */
+            prompt_tokens: number;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /**
+             * Review Ms
+             * @default 0
+             */
+            review_ms: number;
+            /** Status */
+            status: string;
+            /**
+             * Verified
+             * @default false
+             */
+            verified: boolean;
+        };
+        /** AdminProbeReviewFinding */
+        AdminProbeReviewFinding: {
+            /**
+             * Citations
+             * @default []
+             */
+            citations: string[];
+            /** Invariant */
+            invariant: string;
+            /** Verified */
+            verified: boolean;
         };
         /**
          * AdminQuarantineAgentContext
@@ -29802,6 +29863,7 @@ export interface components {
              * @default 0
              */
             probe_count: number;
+            review?: components["schemas"]["ProbeReviewSummary"] | null;
             /**
              * Seed First
              * @default false
@@ -29834,6 +29896,69 @@ export interface components {
             score: number;
             /** Turn Id */
             turn_id: number;
+        };
+        /** ProbeReviewFinding */
+        ProbeReviewFinding: {
+            /**
+             * Citations
+             * @default []
+             */
+            citations: string[];
+            /** Invariant */
+            invariant: string;
+            /** Verified */
+            verified: boolean;
+        };
+        /**
+         * ProbeReviewSummary
+         * @description Bounded report-only reviewer agent result: no claims or transcripts.
+         */
+        ProbeReviewSummary: {
+            /**
+             * Completion Tokens
+             * @default 0
+             */
+            completion_tokens: number;
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd: number;
+            /**
+             * Findings
+             * @default []
+             */
+            findings: components["schemas"]["ProbeReviewFinding"][];
+            /**
+             * Invariants
+             * @default []
+             */
+            invariants: string[];
+            /**
+             * Prompt Tokens
+             * @default 0
+             */
+            prompt_tokens: number;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /**
+             * Review Ms
+             * @default 0
+             */
+            review_ms: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "complete" | "no_verdict" | "budget_exhausted" | "untracked_spend" | "skipped" | "timeout" | "error";
+            /**
+             * Verified
+             * @default false
+             */
+            verified: boolean;
         };
         /** ProviderCircuitSnapshot */
         ProviderCircuitSnapshot: {
@@ -38260,6 +38385,22 @@ export interface components {
              * @default 120
              */
             probe_battery_timeout_seconds: number;
+            /**
+             * Probe Review Max Cost Usd
+             * @default 1
+             */
+            probe_review_max_cost_usd: number;
+            /**
+             * Probe Review Mode
+             * @default off
+             * @enum {string}
+             */
+            probe_review_mode: "off" | "shadow";
+            /**
+             * Probe Review Timeout Seconds
+             * @default 420
+             */
+            probe_review_timeout_seconds: number;
             /**
              * Source Review Max Completion Tokens
              * @default 8000
