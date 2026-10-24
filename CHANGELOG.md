@@ -2,6 +2,43 @@
 
 <!-- version list -->
 
+## v0.384.0 (2026-10-24)
+
+### Bug Fixes
+
+- **infra**: Refuse a placeholder .env before it replaces the live file
+  ([#3138](https://github.com/ditto-assistant/ditto-subnet/pull/3138),
+  [`7c24658`](https://github.com/ditto-assistant/ditto-subnet/commit/7c24658bbb47e57e6371bcb0480662ad75c4798b))
+
+- **platform**: Project court restorations from frozen efficiency
+  ([#3136](https://github.com/ditto-assistant/ditto-subnet/pull/3136),
+  [`05652e3`](https://github.com/ditto-assistant/ditto-subnet/commit/05652e3d21e1d21c234d24223fe598a14e5dad18))
+
+### Continuous Integration
+
+- Run standalone component checks on PRs again, keep coding CI manual
+  ([#3128](https://github.com/ditto-assistant/ditto-subnet/pull/3128),
+  [`fc2bd2c`](https://github.com/ditto-assistant/ditto-subnet/commit/fc2bd2cd56358e217b578d28b159ab5e768b2528))
+
+### Features
+
+- **infra**: Activate confirmation backpressure retry on platform prod
+  ([#3134](https://github.com/ditto-assistant/ditto-subnet/pull/3134),
+  [`b98a9e5`](https://github.com/ditto-assistant/ditto-subnet/commit/b98a9e586f7a13e9db14e727527b57046d8059f6))
+
+- **infra**: Capability-only playbook for the probe reviewer key
+  ([#3140](https://github.com/ditto-assistant/ditto-subnet/pull/3140),
+  [`68420b0`](https://github.com/ditto-assistant/ditto-subnet/commit/68420b0b58eb6fddb07aa723f15995cc8b796aa6))
+
+- **platform**: Retire the coding competition API and dashboard surfaces
+  ([#3133](https://github.com/ditto-assistant/ditto-subnet/pull/3133),
+  [`9d04eac`](https://github.com/ditto-assistant/ditto-subnet/commit/9d04eac20cf6e4918b468489e3eb6977c4c4c897))
+
+- **screener**: Report-only probe reviewer agent after the gate battery
+  ([#3131](https://github.com/ditto-assistant/ditto-subnet/pull/3131),
+  [`735dccf`](https://github.com/ditto-assistant/ditto-subnet/commit/735dccf06fede53938f30452744ad88ee26bcbd0))
+
+
 ## v0.383.0 (2026-10-24)
 
 ### Bug Fixes
