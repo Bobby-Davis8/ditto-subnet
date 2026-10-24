@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.386.4 (2026-10-24)
+
+### Bug Fixes
+
+- **treasury**: Accept the live v483 policy and admit v484 against it
+  ([#3152](https://github.com/ditto-assistant/ditto-subnet/pull/3152),
+  [`50c08fb`](https://github.com/ditto-assistant/ditto-subnet/commit/50c08fb75085c834cc71a02b2431cec54a6f3ced))
+
+
 ## v0.386.3 (2026-10-24)
 
 ### Bug Fixes
