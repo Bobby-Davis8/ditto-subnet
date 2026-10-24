@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.385.0 (2026-10-24)
+
+### Chores
+
+- **tests**: Pin a middleware-first import of the court and error handlers
+  ([#3139](https://github.com/ditto-assistant/ditto-subnet/pull/3139),
+  [`7005fc1`](https://github.com/ditto-assistant/ditto-subnet/commit/7005fc12d34db4c7ab095e1a28f9cdda9a2b00e4))
+
+### Features
+
+- **infra**: Deploy the generator competition scorer on its own private VM
+  ([#3137](https://github.com/ditto-assistant/ditto-subnet/pull/3137),
+  [`d5e31d0`](https://github.com/ditto-assistant/ditto-subnet/commit/d5e31d0e8da3d96c31a9c569c0a8f36711067af1))
+
+
 ## v0.384.0 (2026-10-24)
 
 ### Bug Fixes
