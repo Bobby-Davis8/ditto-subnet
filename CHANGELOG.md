@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.386.0 (2026-10-24)
+
+### Features
+
+- **platform**: Register the default generator from a presigned upload
+  ([#3142](https://github.com/ditto-assistant/ditto-subnet/pull/3142),
+  [`28002aa`](https://github.com/ditto-assistant/ditto-subnet/commit/28002aa97df9d724895b955ed6bbe29c5e5260ad))
+
+
 ## v0.385.0 (2026-10-24)
 
 ### Chores
