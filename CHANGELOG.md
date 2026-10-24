@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.386.2 (2026-10-24)
+
+### Bug Fixes
+
+- **scorer**: Serve generator rounds without the private V13 transport
+  ([#3149](https://github.com/ditto-assistant/ditto-subnet/pull/3149),
+  [`792e383`](https://github.com/ditto-assistant/ditto-subnet/commit/792e383643f6965d2b4f448ad9ee82147cad0e4c))
+
+
 ## v0.386.1 (2026-10-24)
 
 ### Bug Fixes
