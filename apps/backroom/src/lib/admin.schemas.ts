@@ -7824,13 +7824,36 @@ export const athRulingExecuteItemSchema = z.object({
   agent_id: z.string().uuid(),
   status: z.enum(['applied', 'already_applied', 'failed']),
   agent_status: z.string().nullable().default(null),
-  would_change_crown: z.boolean(),
+  would_change_crown: z.boolean().nullable(),
+  write_outcome_unknown: z.boolean().default(false),
   steps_applied: z.array(athRulingStepSchema).default([]),
   // False on an applied row: the ruling landed, only the audit annotation
   // failed. Never re-run it.
   annotated: z.boolean().default(false),
   message: z.string(),
 } satisfies PlatformResponseShape<GeneratedAthRulingExecuteItem>)
+
+// Only bounded execution metadata crosses an error boundary. Server messages,
+// reasons and unrelated detail fields must never be reflected into MCP errors.
+export const athRulingsReadbackFailureSchema = z.object({
+  batch_id: z.string().uuid(),
+  items: z.array(athRulingExecuteItemSchema.pick({
+    index: true,
+    action: true,
+    agent_id: true,
+    status: true,
+    would_change_crown: true,
+    write_outcome_unknown: true,
+    steps_applied: true,
+    annotated: true,
+  }).extend({
+    index: z.number().int().min(0).max(ATH_RULINGS_MAX_ITEMS - 1),
+    steps_applied: z.array(athRulingStepSchema).max(4),
+  })).max(ATH_RULINGS_MAX_ITEMS),
+  applied_count: z.number().int().min(0).max(ATH_RULINGS_MAX_ITEMS),
+  already_applied_count: z.number().int().min(0).max(ATH_RULINGS_MAX_ITEMS),
+  failed_count: z.number().int().min(0).max(ATH_RULINGS_MAX_ITEMS),
+})
 
 export const athRulingsExecuteResponseSchema = z.object({
   batch_id: z.string().uuid(),
