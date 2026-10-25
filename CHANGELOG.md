@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.388.1 (2026-10-25)
+
+### Bug Fixes
+
+- **screener**: Permit recovery context compaction
+  ([#3159](https://github.com/ditto-assistant/ditto-subnet/pull/3159),
+  [`c3121ee`](https://github.com/ditto-assistant/ditto-subnet/commit/c3121ee4a006eceb1db45a449ca8a42939ef31cb))
+
+
 ## v0.388.0 (2026-10-25)
 
 ### Bug Fixes
