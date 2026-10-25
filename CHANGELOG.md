@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.386.5 (2026-10-25)
+
+### Bug Fixes
+
+- **screener**: Let the rootless daemon traverse the probe session root
+  ([#3150](https://github.com/ditto-assistant/ditto-subnet/pull/3150),
+  [`5d8d1b7`](https://github.com/ditto-assistant/ditto-subnet/commit/5d8d1b7eabfd7c60a9ef7456781ad8d70e607e10))
+
+- **treasury**: Keep manual readiness live when archive catch-up is refused
+  ([#3153](https://github.com/ditto-assistant/ditto-subnet/pull/3153),
+  [`7748a7b`](https://github.com/ditto-assistant/ditto-subnet/commit/7748a7b5b4313023ccb4754205ab0d124f774de0))
+
+
 ## v0.386.4 (2026-10-24)
 
 ### Bug Fixes
