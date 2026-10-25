@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.389.0 (2026-10-25)
+
+### Bug Fixes
+
+- **platform**: Stop leasing generator panel runs a round cannot finish
+  ([#3161](https://github.com/ditto-assistant/ditto-subnet/pull/3161),
+  [`0afd503`](https://github.com/ditto-assistant/ditto-subnet/commit/0afd503f007696e4be6fa5d93cf8a20da0a1957f))
+
+- **screener**: Log which probe-review stage failed and the exception class
+  ([#3158](https://github.com/ditto-assistant/ditto-subnet/pull/3158),
+  [`3cbc797`](https://github.com/ditto-assistant/ditto-subnet/commit/3cbc797725bcb498a3179d2a875e4526090006cc))
+
+- **validator**: Dispatch generator rounds independently of retests
+  ([#3163](https://github.com/ditto-assistant/ditto-subnet/pull/3163),
+  [`081d1ba`](https://github.com/ditto-assistant/ditto-subnet/commit/081d1ba5dfeed28d48618f3633795bb19ba118e0))
+
+### Features
+
+- **platform**: Per-validator slot caps and reserved generator-round slots
+  ([#3164](https://github.com/ditto-assistant/ditto-subnet/pull/3164),
+  [`28b1342`](https://github.com/ditto-assistant/ditto-subnet/commit/28b134229d321f53788e2a93d9c1c4b87cf0854e))
+
+
 ## v0.388.2 (2026-10-25)
 
 ### Bug Fixes
