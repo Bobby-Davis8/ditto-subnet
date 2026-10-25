@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.388.0 (2026-10-25)
+
+### Bug Fixes
+
+- **infra**: Refuse to converge the pre-monorepo native validator
+  ([#3154](https://github.com/ditto-assistant/ditto-subnet/pull/3154),
+  [`d592701`](https://github.com/ditto-assistant/ditto-subnet/commit/d5927017e12a5bc27848ec708cd06276a5f61226))
+
+- **scorer**: Send generator round cases the scored tool surface
+  ([#3160](https://github.com/ditto-assistant/ditto-subnet/pull/3160),
+  [`012245e`](https://github.com/ditto-assistant/ditto-subnet/commit/012245ebcb14d041bc555060b010334866d5523b))
+
+### Features
+
+- **infra**: Stop the permanent dev environment
+  ([#3155](https://github.com/ditto-assistant/ditto-subnet/pull/3155),
+  [`0113aa8`](https://github.com/ditto-assistant/ditto-subnet/commit/0113aa8b13a815cb5b2877a4099359203233fda0))
+
+- **ops**: Read Hetzner screener journals as logs
+  ([#3015](https://github.com/ditto-assistant/ditto-subnet/pull/3015),
+  [`c0b53fb`](https://github.com/ditto-assistant/ditto-subnet/commit/c0b53fbc1dc6c9356575434acc5441a507f304f0))
+
+
 ## v0.387.1 (2026-10-25)
 
 ### Bug Fixes
