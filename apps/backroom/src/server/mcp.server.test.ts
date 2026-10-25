@@ -609,6 +609,7 @@ describe('Backroom MCP tools', () => {
         'authorize_confirmation_bundle_retest',
         'read_copy_review_source_diff_file',
         'get_lineage_source_diff',
+        'get_screening_review_lineage',
         'get_screening_baseline_diff',
         'read_screening_baseline_diff_file',
         'get_screening_quarantine_context',
@@ -876,7 +877,9 @@ describe('Backroom MCP tools', () => {
     // round dataset download is artifact-scoped) publish compact string
     // inputs and one-line summaries with procedures in tool help. Measured
     // 210,748 bytes; keep about 0.5 KB headroom.
-    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(211_300)
+    // The lineage-scoped review packet read (one UUID input, one-line summary)
+    // adds about 0.5 KB on top; keep the same ~0.5 KB headroom.
+    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(211_800)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -1634,6 +1637,7 @@ describe('Backroom MCP tools', () => {
       for (const [name, fragment, scope, readOnly] of [
         ['get_copy_review_source_diff', 'per-file diff manifest', BACKROOM_ARTIFACT_SCOPE, true],
         ['get_lineage_source_diff', 'rejected ancestor', BACKROOM_ARTIFACT_SCOPE, true],
+        ['get_screening_review_lineage', 'never a verdict', BACKROOM_ARTIFACT_SCOPE, true],
         ['apply_copy_court_settings', 'complete', BACKROOM_WRITE_SCOPE, false],
         ['expand_benchmark_rollout_cohort', 'exact next ranked suffix', BACKROOM_WRITE_SCOPE, false],
         ['get_ath_review', 'ath_pending_review', undefined, true],
@@ -7865,6 +7869,9 @@ describe('Backroom MCP tools', () => {
           duplicate_of: null,
           duplicate_name: null,
           duplicate_version: null,
+          lineage_parent_agent_id: null,
+          lineage_scope: null,
+          lineage_packet_sha256: null,
         },
       ],
     }
