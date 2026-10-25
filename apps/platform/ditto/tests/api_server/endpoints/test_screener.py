@@ -247,6 +247,19 @@ def test_probe_review_is_bound_only_when_enabled_and_needs_the_battery() -> None
         ScreenerReviewSettings(probe_review_mode="shadow")
 
 
+def test_admin_probe_review_drops_an_unbounded_error_label() -> None:
+    from ditto.api_models.screener_review_settings import AdminProbeReview
+
+    kept = AdminProbeReview.model_validate(
+        {"status": "error", "error": "review:HTTPStatusError:402"}
+    )
+    assert kept.error == "review:HTTPStatusError:402"
+    dropped = AdminProbeReview.model_validate(
+        {"status": "error", "error": "Traceback: secret probe text"}
+    )
+    assert dropped.error is None
+
+
 def test_explicit_l4_cap_changes_checksum_without_changing_l2() -> None:
     inherited = ScreenerReviewSettings(max_completion_tokens=16_000)
     bounded = inherited.model_copy(update={"adjudicator_max_completion_tokens": 4_000})
@@ -2650,6 +2663,7 @@ class TestProbeBattery:
                 "completion_tokens": 2_000,
                 "cost_usd": 0.09,
                 "review_ms": 35_000,
+                "error": None,
             },
         }
         url = f"/api/v1/screener/agent/{agent_id}/probe-battery"
@@ -2661,7 +2675,10 @@ class TestProbeBattery:
         assert (await client.post(url, json=payload)).status_code == 200
         review = payload["review"]
         assert isinstance(review, dict)
-        other_review = {**payload, "review": {**review, "verified": False}}
+        other_review = {
+            **payload,
+            "review": {**review, "verified": False, "error": "review:KeyError"},
+        }
         assert (await client.post(url, json=other_review)).status_code == 409
         async with session_maker() as session:
             row = await session.get(ScreenerProbeBattery, attempt_id)
