@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.387.0 (2026-10-25)
+
+### Features
+
+- **screener**: Review same-hotkey resubmissions against their lineage
+  ([#3124](https://github.com/ditto-assistant/ditto-subnet/pull/3124),
+  [`a47e63d`](https://github.com/ditto-assistant/ditto-subnet/commit/a47e63db2a4b1001f5126b61c59079148b039ae1))
+
+
 ## v0.386.5 (2026-10-25)
 
 ### Bug Fixes
