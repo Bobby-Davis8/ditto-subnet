@@ -45,6 +45,21 @@ type Options struct {
 	// InferenceBaseURL, when set, returns the case-scoped inference URL the
 	// harness should use for one opaque case ID.
 	InferenceBaseURL func(opaqueCaseID string) string
+	// Tools is the tool catalog advertised on every /run, exactly as a scored
+	// memory case advertises the run's catalog. A pack case is a memory
+	// question, but a harness built for the scored path expects the catalog.
+	Tools []protocol.ToolDefinition
+	// ToolEndpoint, when set, returns the observed tool-execution URL for one
+	// case. It is called once per case, before its /run, with the pack case ID
+	// and the opaque case and user IDs the harness will see, so the caller can
+	// register that case's fixture first. An empty result omits tool_endpoint.
+	ToolEndpoint func(packCaseID, opaqueCaseID, opaqueUserID string) string
+	// ObservedCalls, when set, returns the tool calls the validator watched
+	// one case execute through its tool_endpoint. Grading uses them in place
+	// of the harness's self-reported trajectory whenever any were observed,
+	// exactly as the scored path does, so a harness cannot execute a tool and
+	// omit it from its response.
+	ObservedCalls func(opaqueCaseID string) []protocol.ObservedToolCall
 }
 
 // CaseOutcome is one graded case: the panel result the scorer submits plus the
@@ -110,21 +125,39 @@ func Execute(ctx context.Context, harnessURL string, p challenge.Pack, opts Opti
 
 func runCase(ctx context.Context, harnessURL string, c challenge.Case, proj *projection, opts Options) CaseOutcome {
 	opaqueID := proj.id("case", c.ID)
-	caseOpts := runner.CaseOptions{UserID: proj.id("user", c.UserID), BenchVersion: challenge.GradingBenchVersion}
+	opaqueUser := proj.id("user", c.UserID)
+	caseOpts := runner.CaseOptions{UserID: opaqueUser, BenchVersion: challenge.GradingBenchVersion}
 	if opts.InferenceBaseURL != nil {
 		caseOpts.InferenceBaseURL = opts.InferenceBaseURL(opaqueID)
 	}
+	if opts.ToolEndpoint != nil {
+		caseOpts.ToolEndpoint = opts.ToolEndpoint(c.ID, opaqueID, opaqueUser)
+	}
 	out := CaseOutcome{PanelCaseResult: challenge.PanelCaseResult{CaseID: c.ID}}
-	resp, _, err := runner.RunCaseWithTelemetry(ctx, harnessURL, opaqueID, c.Question, nil, caseOpts)
+	resp, _, err := runner.RunCaseWithTelemetry(ctx, harnessURL, opaqueID, c.Question, opts.Tools, caseOpts)
 	if err != nil {
 		out.Fault = true
 		out.Notes = []string{"no response from harness (error or timeout); excluded as a fault"}
 		return out
 	}
+	if opts.ObservedCalls != nil {
+		resp = withObservedCalls(resp, opts.ObservedCalls(opaqueID))
+	}
 	cs := scorer.GradeMemory(c.GradingCase(), resp)
 	out.Score = cs.Score
 	out.Notes = cs.Notes
 	return out
+}
+
+// withObservedCalls grades on the validator-observed trajectory whenever any
+// call was observed, the scored path's withObservedTrajectory contract. A
+// self-reported call that never reached the endpoint still stands against the
+// harness; an executed call the harness omitted is restored.
+func withObservedCalls(resp protocol.RunResponse, observed []protocol.ObservedToolCall) protocol.RunResponse {
+	if len(observed) > 0 {
+		resp.ToolCalls = observed
+	}
+	return resp
 }
 
 // projection maps pack identities to per-run opaque identities.
