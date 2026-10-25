@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.388.2 (2026-10-25)
+
+### Bug Fixes
+
+- **platform**: Pin the policy-v13 digest to the compaction-permitting text
+  ([#3162](https://github.com/ditto-assistant/ditto-subnet/pull/3162),
+  [`1d569a5`](https://github.com/ditto-assistant/ditto-subnet/commit/1d569a56208d301d649efdf70fb46139b45e8ed3))
+
+
 ## v0.388.1 (2026-10-25)
 
 ### Bug Fixes
