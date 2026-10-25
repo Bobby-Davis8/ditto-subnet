@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.387.1 (2026-10-25)
+
+### Bug Fixes
+
+- **validator**: Keep the managed Gamma guard across converges
+  ([#3156](https://github.com/ditto-assistant/ditto-subnet/pull/3156),
+  [`f32fd1d`](https://github.com/ditto-assistant/ditto-subnet/commit/f32fd1d9ede2d4eeb58fba3f5d8c300da2b16105))
+
+
 ## v0.387.0 (2026-10-25)
 
 ### Features
