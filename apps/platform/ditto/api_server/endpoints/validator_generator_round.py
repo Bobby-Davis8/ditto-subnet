@@ -40,11 +40,13 @@ from ditto.api_models.validator import ValidatorCapabilities
 from ditto.api_server.endpoints import validator as v
 from ditto.api_server.generator_competition import load_settings
 from ditto.api_server.generator_rounds import (
+    ROUND_LEASE_CUTOFF,
     RoundSubmissionRejected,
     pending_panel_agents,
     record_panel_result,
     round_case_ids,
     round_for_dataset,
+    round_seconds_left,
     running_round,
     validate_round_results,
 )
@@ -194,6 +196,27 @@ async def request_generator_round_job(
         heartbeat = await session.get(ValidatorHeartbeat, payload.validator_hotkey)
         if not _round_capable(heartbeat, now=now):
             return _no_work()
+    # The nonce is consumed and committed above. Read the chain head for the
+    # lease cutoff only for a request that passed the cheap rejections, and
+    # outside any transaction, so neither a row lock nor a pooled connection
+    # spans the RPC. It is read on whichever process serves the request
+    # because the round loop runs on one role only and its last read can be
+    # stale. An unreadable chain declines the lease; the validator polls again.
+    try:
+        head = await chain.read_epoch_schedule(config.chain.netuid)
+    except Exception as exc:  # noqa: BLE001 - any read failure declines
+        logger.warning("generator round lease: chain head unreadable: %s", exc)
+        return _no_work()
+    async with session.begin():
+        # Re-read under this transaction: the heartbeat feeds slot selection,
+        # and the settings may have changed while the chain was being read.
+        resolved = await load_settings(session)
+        settings = resolved.settings
+        if settings.mode == "off" or not settings.validator_rounds_enabled:
+            return _no_work()
+        heartbeat = await session.get(ValidatorHeartbeat, payload.validator_hotkey)
+        if not _round_capable(heartbeat, now=now):
+            return _no_work()
         # Locked so concurrent polls pick pending agents one at a time: the
         # second sees the first's committed attempt instead of leasing the
         # same panel agent.
@@ -209,6 +232,10 @@ async def request_generator_round_job(
             requested_slot_id=payload.slot_id,
         )
         if slot is None:
+            return _no_work()
+        left = round_seconds_left(row, head)
+        # A head the round cannot place (before it opened) declines too.
+        if left is None or left < ROUND_LEASE_CUTOFF.total_seconds():
             return _no_work()
         ticket: ValidatorTicket | None = None
         for agent_id in await pending_panel_agents(session, row, now=now):

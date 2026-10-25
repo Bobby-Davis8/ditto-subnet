@@ -88,6 +88,7 @@ if TYPE_CHECKING:
 
     from ditto.api_models.generator import GeneratorCompetitionSettings
     from ditto.api_server.generator_competition import ResolvedSettings
+    from ditto.chain.models import EpochSchedule
 
 logger = logging.getLogger(__name__)
 
@@ -869,6 +870,36 @@ async def record_round_score(
 
 
 # --- validator panel runs ---------------------------------------------------
+
+
+# A panel run must finish before its round closes: closing expires the round's
+# tickets and revokes their inference grants, so a run leased minutes before
+# the boundary loses inference mid-seed and faults every case. No lease is
+# issued once less than this remains.
+ROUND_LEASE_CUTOFF = timedelta(minutes=20)
+CHAIN_BLOCK_SECONDS = 12
+
+
+def round_seconds_left(row: GeneratorRound, head: EpochSchedule) -> float | None:
+    """Estimated seconds until ``row`` closes, at a chain ``head`` read now.
+
+    The round closes when ``SubnetEpochIndex`` reaches the first epoch of the
+    next round. The next epoch fires at the chain client's predicted
+    ``next_epoch_block``, which honors an owner-scheduled ``PendingEpochAt``
+    and the stateful scheduler; each further epoch the round still spans adds
+    ``tempo`` blocks. The caller reads ``head`` at lease time,
+    so nothing is extrapolated from a stale snapshot. Zero once the head has
+    reached the closing epoch; None when the head predates the round.
+    """
+    closing_epoch = (row.round_index + 1) * row.epochs_per_round
+    epochs_after_next = closing_epoch - head.subnet_epoch_index - 1
+    if head.subnet_epoch_index < row.round_index * row.epochs_per_round:
+        return None
+    if epochs_after_next < 0:
+        # The chain is already past the round's closing boundary.
+        return 0.0
+    close_block = head.next_epoch_block + epochs_after_next * head.tempo
+    return (close_block - head.block) * CHAIN_BLOCK_SECONDS
 
 
 async def running_round(

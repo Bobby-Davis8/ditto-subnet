@@ -52,18 +52,21 @@ from ditto.api_models.ticket_status import TicketPurpose, TicketStatus
 from ditto.api_server.dependencies import get_chain_client, get_session
 from ditto.api_server.generator_competition import load_settings
 from ditto.api_server.generator_rounds import (
+    ROUND_LEASE_CUTOFF,
     ChainPosition,
     GeneratorRoundLoop,
     advance_rounds,
     get_round,
     round_column_seed,
     round_commitment,
+    round_seconds_left,
     round_seed,
 )
-from ditto.chain.models import NeuronInfo
+from ditto.chain.models import EpochSchedule, NeuronInfo
 from ditto.db.models import (
     Agent,
     GeneratorOperatorAction,
+    GeneratorRound,
     GeneratorRoundAttempt,
     GeneratorRoundCaseVerdict,
     GeneratorSubmission,
@@ -96,6 +99,7 @@ def _install(app: FastAPI, maker: async_sessionmaker[AsyncSession]) -> MagicMock
         generator_scorer_token=_SCORER_TOKEN,
     )
     app.state.session_maker = maker
+    _LOOP_EPOCH["epoch"] = 0
 
     async def _session() -> AsyncIterator[AsyncSession]:
         async with maker() as session:
@@ -114,6 +118,12 @@ def _install(app: FastAPI, maker: async_sessionmaker[AsyncSession]) -> MagicMock
         ]
     )
     chain.set_commitment = AsyncMock()
+    # The lease endpoint reads the head at lease time. By default it is the
+    # position the test last advanced the round loop to, five blocks into
+    # that epoch, as on chain. Tests that need another head override this.
+    chain.read_epoch_schedule = AsyncMock(
+        side_effect=lambda _netuid: _head_at(_LOOP_EPOCH["epoch"])
+    )
 
     async def _chain() -> MagicMock:
         return chain
@@ -226,6 +236,25 @@ async def _qualify_all(maker: async_sessionmaker[AsyncSession]) -> None:
             row.qualified_at = row.qualified_at or datetime.now(UTC)
 
 
+_LOOP_EPOCH = {"epoch": 0}
+
+
+def _head_at(epoch: int) -> EpochSchedule:
+    last = 1000 + epoch * 360
+    return EpochSchedule(
+        netuid=118,
+        subnet_epoch_index=epoch,
+        last_epoch_block=last,
+        pending_epoch_at=0,
+        tempo=360,
+        blocks_since_last_step=5,
+        block=last + 5,
+        block_hash=_BLOCK,
+        block_timestamp=None,
+        next_epoch_block=last + 360,
+    )
+
+
 def _position(epoch: int, *, block_hash: str = _BLOCK) -> ChainPosition:
     return ChainPosition(
         subnet_epoch_index=epoch,
@@ -239,6 +268,7 @@ def _position(epoch: int, *, block_hash: str = _BLOCK) -> ChainPosition:
 async def _advance(
     maker: async_sessionmaker[AsyncSession], epoch: int, **kwargs: Any
 ) -> list[str]:
+    _LOOP_EPOCH["epoch"] = epoch
     async with maker() as session, session.begin():
         resolved = await load_settings(session)
         out = await advance_rounds(
@@ -476,7 +506,7 @@ class TestRoundLifecycle:
         session_maker: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _install(app, session_maker)
+        chain = _install(app, session_maker)
         await _apply_settings(client, validator_rounds_enabled=True)
         agents = [await _seed_agent(session_maker, rank) for rank in range(3)]
         _patch_panel(monkeypatch, agents)
@@ -547,6 +577,38 @@ class TestRoundLifecycle:
             "/api/v1/generator-scorer/round-results", headers=_SCORER, json=generated
         )
         assert replay.status_code == 409
+
+        # No lease too close to the round's close: closing revokes the run's
+        # inference grant mid-seed, so the run could only fault every case.
+        # The head is read at lease time; an unreadable chain declines too.
+        async with session_maker() as session:
+            row = await get_round(session, 3)
+            assert row is not None and row.open_block is not None
+            close_block = row.open_block + row.epochs_per_round * 360
+        first = row.round_index * row.epochs_per_round
+        last_epoch = first + row.epochs_per_round - 1
+        for read in (
+            AsyncMock(
+                return_value=_head(
+                    epoch=last_epoch,
+                    last_epoch_block=close_block - 360,
+                    block=close_block - 10,
+                )
+            ),
+            AsyncMock(side_effect=RuntimeError("rpc down")),
+        ):
+            chain.read_epoch_schedule = read
+            declined = await client.post(
+                "/api/v1/validator/generator-round-job",
+                headers={"X-Validator-Hotkey": _VALIDATOR.ss58_address},
+                json=_signed_job(),
+            )
+            assert declined.status_code == 204, declined.text
+        chain.read_epoch_schedule = AsyncMock(
+            return_value=_head(
+                epoch=first, last_epoch_block=row.open_block, block=row.open_block + 5
+            )
+        )
 
         # Validators run every panel agent on round tickets.
         case_ids: list[str] = []
@@ -1291,3 +1353,44 @@ def test_round_capability_does_not_need_the_private_v13_transport() -> None:
     assert lane_mod._round_capable(heartbeat, now=now)
     scorer["generator_rounds"] = False
     assert not lane_mod._round_capable(heartbeat, now=now)
+
+
+def _head(
+    *, epoch: int, last_epoch_block: int, block: int, next_epoch: int | None = None
+) -> EpochSchedule:
+    return EpochSchedule(
+        netuid=118,
+        subnet_epoch_index=epoch,
+        last_epoch_block=last_epoch_block,
+        pending_epoch_at=0 if next_epoch is None else next_epoch,
+        tempo=360,
+        blocks_since_last_step=block - last_epoch_block,
+        block=block,
+        block_hash=_BLOCK,
+        block_timestamp=None,
+        next_epoch_block=(last_epoch_block + 360 if next_epoch is None else next_epoch),
+    )
+
+
+def test_round_seconds_left_tracks_the_closing_boundary() -> None:
+    row = GeneratorRound(round_index=7, epochs_per_round=1, open_block=9_000)
+    cutoff = ROUND_LEASE_CUTOFF.total_seconds()
+    closing = round_seconds_left(
+        row, _head(epoch=7, last_epoch_block=9_000, block=9_300)
+    )
+    assert closing == 60 * 12
+    assert closing < cutoff
+    opened = round_seconds_left(
+        row, _head(epoch=7, last_epoch_block=9_000, block=9_005)
+    )
+    assert opened is not None and opened > cutoff
+    # An owner-scheduled early epoch closes the round sooner than the tempo.
+    early = _head(epoch=7, last_epoch_block=9_000, block=9_005, next_epoch=9_050)
+    assert round_seconds_left(row, early) == 45 * 12
+    # A multi-epoch round adds a tempo per epoch still to run after the next.
+    row = GeneratorRound(round_index=7, epochs_per_round=4, open_block=9_000)
+    mid = round_seconds_left(row, _head(epoch=29, last_epoch_block=9_360, block=9_400))
+    assert mid == ((9_360 + 360 + 2 * 360) - 9_400) * 12
+    # Past the closing epoch no time is left; before the round, no estimate.
+    assert round_seconds_left(row, _head(epoch=32, last_epoch_block=0, block=1)) == 0
+    assert round_seconds_left(row, _head(epoch=27, last_epoch_block=0, block=1)) is None
