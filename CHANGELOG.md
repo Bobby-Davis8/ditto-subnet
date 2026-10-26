@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.392.0 (2026-10-26)
+
+### Documentation
+
+- **generator**: Describe the paid generator competition
+  ([#3181](https://github.com/ditto-assistant/ditto-subnet/pull/3181),
+  [`5790355`](https://github.com/ditto-assistant/ditto-subnet/commit/57903552c35176e9abf0b246936b2ff2a1d87897))
+
+### Features
+
+- **platform**: Generator competition dashboard page
+  ([#3183](https://github.com/ditto-assistant/ditto-subnet/pull/3183),
+  [`eed33a1`](https://github.com/ditto-assistant/ditto-subnet/commit/eed33a1689cde237b6f9d82f57e7976512a82093))
+
+- **platform**: One typed-weights emission allocation (SN-350)
+  ([#3182](https://github.com/ditto-assistant/ditto-subnet/pull/3182),
+  [`9d08966`](https://github.com/ditto-assistant/ditto-subnet/commit/9d0896668186be50f2c78daf4e7e8eef01eac514))
+
+- **platform,miner**: Per-competition submission fees and terms
+  ([#3180](https://github.com/ditto-assistant/ditto-subnet/pull/3180),
+  [`774d73a`](https://github.com/ditto-assistant/ditto-subnet/commit/774d73a46755df742a34c48ea86cc9955b934ba3))
+
+
 ## v0.391.1 (2026-10-26)
 
 ### Bug Fixes
