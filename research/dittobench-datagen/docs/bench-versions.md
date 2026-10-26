@@ -1127,8 +1127,49 @@ NFKC turns a completion's U+2011 into U+2010, a separator. So from v14
 (every ASCII/U+2010 mix up to four hyphens), and an honest completion that
 wrote U+2011 is not flagged `served_text_not_model_emitted`. The twin
 post-pass compares asserted answers and the result-usage check reads the reply
-after the same fold, so a hyphen variant cannot make two credited answers
-compare unequal.
+after the same fold (memory twins also after the hyphen-joined-value rewrite
+below), so a hyphen variant cannot make two credited answers compare unequal.
+
+The same v14 floor adds three memory-axis matcher changes from #2734; v13 and
+older grade byte-identically:
+
+- **Hyphen-joined multi-word values.** A hyphen (after the fold) that joins
+  two letter-ended words of a known multi-word value reads as the space it
+  replaces, so `blue‑purple` grades as `blue purple` and `true‑blue accent`
+  as `true blue accent` on every rule, including the
+  `conversational-declarative` acknowledgement. Known values are every hidden
+  value (expected, accepted, list items, claim values, distractors, forbidden,
+  dump guard), so a joined distractor or forbidden value is still caught. The
+  words must match (`blue‑green` stays a miss for `bluey green`), values
+  without a space are unaffected, and a join is not undone where it would
+  break a known value that itself contains a hyphen.
+- **Set removal with a place phrase.** A set-membership clause ending in
+  ` has been removed` / ` was removed` / ` is removed` followed only by a
+  preposition (`from`, `in`, `off`) and at most three plain words
+  (`from the list`, `from it`, `from your packing list`) reads as removal, as
+  does the bare form with trailing punctuation. A phrase that names a case
+  value, names a time (`is removed on Friday`, `in two weeks`; `on` is not a
+  place preposition at all), runs longer, or sits in a hedged clause does not:
+  a scheduled removal is a plan. An item asserted in another clause is still
+  asserted.
+- **Progressive action claims.** An `action` claim also accepts the -ing form
+  of the first word of each accepted form (`pausing` for `pause`,
+  `upgrading`, `stopping`, `canceling`/`cancelling`; a multisyllabic verb
+  doubles its final consonant only as a listed exception such as `admitting`
+  or `cancelling`, so `open` gives `opening`), and the case's
+  distractors get the same forms so a progressive distractor is caught. Past
+  -ed forms stay misses. Because the -ing form makes gerund negation
+  natural, an action claim also reads a gerund-taking negator (`avoid`,
+  `against`, `stop`, `quit` and their inflections) immediately before a
+  reviewed action value, and a post-posed predicate (`isn't possible`,
+  `is not an option`, `isn't allowed`) right after one, as rejecting that
+  value: `I'd avoid pausing it`, `we decided against pausing it`,
+  `we stopped pausing it` and `pausing isn't possible` are misses. The
+  negator must govern the value directly (`to stop the charges, we are
+  pausing it` still states the action), and the post-posed predicate rejects
+  only the value before it, not the rest of its clause.
+
+Audit bank `v14-1` carries reviewed positives and negatives for each.
 
 V14 also files case-file records in story order (#3088). V13 stamped each
 case-file row from where it landed after the presentation shuffle, so a plain
