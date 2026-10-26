@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.391.1 (2026-10-26)
+
+### Bug Fixes
+
+- **platform,backroom**: Keep agent score medians per benchmark
+  ([#3178](https://github.com/ditto-assistant/ditto-subnet/pull/3178),
+  [`6ca3e84`](https://github.com/ditto-assistant/ditto-subnet/commit/6ca3e847d50c83bcdd13a58db95369c5136364ae))
+
+
 ## v0.391.0 (2026-10-26)
 
 ### Features
