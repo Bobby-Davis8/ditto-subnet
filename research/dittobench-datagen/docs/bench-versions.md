@@ -1108,8 +1108,27 @@ V14 also owns grading policy floor 14 with one claim-set correction. A sentence
 that is wholly one of the case's own claim values no longer retracts the
 sentence before it when that value is also a correction cue: the published
 `world-story-lesson-claims` answer `safe; sorry` scores 0.5 at v13 and 1 at v14.
-A cue sentence carrying anything beyond the value is still a correction. The v14
-audit bank (`v14-1`) extends `v13-1` with one negative and two positives for it.
+A cue sentence carrying anything beyond the value is still a correction.
+
+V14 also folds the typographic hyphens U+2010 and U+2011 in the reply text
+(answer slot and `final_text`) to the ASCII hyphen before grading, on the
+memory axis and on the text-graded tool cases (restraint, effect reads)
+(#2734). The pinned model writes U+2011 inside most identifiers and compounds
+it copies from an ASCII record, so V13 misses `VK‑48HJXP6A63` for
+`VK-48HJXP6A63`. The fold also catches a forbidden or distractor value
+written with those hyphens. V13 keeps the unfolded match. The v14 audit bank
+(`v14-1`) extends `v13-1` with positives and negatives for both changes.
+
+The rest of the v14 scorer reads the reply the same way. The claim-span
+provenance gate keeps the published `NormalizeSpan` unchanged; that normaliser
+keeps the ASCII `-` (so `VK-48HJXP6A63` tokenizes with a signed `-48`) while
+NFKC turns a completion's U+2011 into U+2010, a separator. So from v14
+`ClaimAlternatives` adds the U+2010 variants of every hyphenated claim form
+(every ASCII/U+2010 mix up to four hyphens), and an honest completion that
+wrote U+2011 is not flagged `served_text_not_model_emitted`. The twin
+post-pass compares asserted answers and the result-usage check reads the reply
+after the same fold, so a hyphen variant cannot make two credited answers
+compare unequal.
 
 V14 also files case-file records in story order (#3088). V13 stamped each
 case-file row from where it landed after the presentation shuffle, so a plain
@@ -1124,10 +1143,10 @@ change. The enterprise case files already instruct the model to apply events by
 `effective_step` rather than document order and are unchanged. Every v13 seed is
 untouched.
 
-Question-family identifiers, the envelope, grader policy (apart from the
-claim-set correction above), v13 gate postures, the
-LongMem instrument, and public harness wire version (9) carry forward. The
-generated surface carries forward apart from the case-file filing dates above. V14 has its own seed rotation, epoch `2027-06-01T00:00:00Z`, and artifact
+Question-family identifiers, the envelope, the rest of the grader policy, v13
+gate postures, the LongMem instrument, and public harness wire version (9)
+carry forward. The generated surface carries forward apart from the case-file
+filing dates above. V14 has its own seed rotation, epoch `2027-06-01T00:00:00Z`, and artifact
 version. It introduces no deferred private surface research or screening-policy
 activation. `CurrentBenchVersion` stays at its existing value (8).
 

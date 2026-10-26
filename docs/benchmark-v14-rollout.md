@@ -7,8 +7,11 @@ alter emissions, or change a production setting.
 
 ## Immutable boundary
 
-V14 changes only the declarative memory over-call rule, one claim-set grading
-correction, and benchmark identity. V13 keeps its whole-case exclusion. V2–v12 keep their existing rules. Lifecycle
+V14 changes the declarative memory over-call rule, one claim-set grading
+correction, folds the typographic hyphens U+2010/U+2011 in graded reply text to
+ASCII (#2734) with matching claim-gate forms and twin/result-usage reads, and
+changes benchmark identity.
+V13 keeps its whole-case exclusion. V2–v12 keep their existing rules. Lifecycle
 write cases remain excluded at every version. V14 counts each observed
 declarative-ack case and permits save/update/delete memory actions on that case;
 unrelated actions count once even when mixed with permitted writes.
@@ -31,7 +34,7 @@ that value is also a correction cue. "better safe than sorry" is published as
 The v14 full/public vector at seed 123456789 is
 `cb5962df023627c294be1de814ae22b65a3c58f6eb9a2bc9601bee8439f10432`,
 with epoch `2027-06-01T00:00:00Z`. The grader (apart from the claim-set
-correction above), v13 gate postures, LongMem
+correction above and the hyphen fold), v13 gate postures, LongMem
 instrument and public harness wire (9) carry forward. The surface carries
 forward apart from case-file records, which v14 files in story order instead of
 shuffled-presentation order (#3088); that moves the v14 vector and leaves every

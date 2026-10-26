@@ -61,15 +61,3 @@ func TestV14ProtectedPhraseThatIsNotAClaimValueStillCorrects(t *testing.T) {
 		}
 	}
 }
-
-func TestV14PolicyAddsOnlyTheClaimValueGate(t *testing.T) {
-	v13 := gradingPolicyForVersion(protocol.BenchVersionV13)
-	v14 := gradingPolicyForVersion(protocol.BenchVersionV14)
-	if v13.claimValuesAreNotCorrections || !v14.claimValuesAreNotCorrections {
-		t.Fatalf("claim-value gate must be v14-only: v13=%+v v14=%+v", v13, v14)
-	}
-	v14.claimValuesAreNotCorrections = false
-	if v14 != v13 {
-		t.Fatalf("v14 changed more than the claim-value gate: v13=%+v v14=%+v", v13, v14)
-	}
-}
