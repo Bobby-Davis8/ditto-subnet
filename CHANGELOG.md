@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.391.0 (2026-10-26)
+
+### Features
+
+- **platform,miner**: Optional TAO fee for generator uploads
+  ([#3173](https://github.com/ditto-assistant/ditto-subnet/pull/3173),
+  [`1b4973c`](https://github.com/ditto-assistant/ditto-subnet/commit/1b4973cda79a805c6ca2a7cc4b6df66429e871c8))
+
+
 ## v0.390.0 (2026-10-26)
 
 ### Bug Fixes
