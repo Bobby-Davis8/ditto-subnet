@@ -2,6 +2,63 @@
 
 <!-- version list -->
 
+## v0.390.0 (2026-10-26)
+
+### Bug Fixes
+
+- **bench**: Accept hyphen-joined values, place-qualified removals and progressive actions at v14
+  ([#2839](https://github.com/ditto-assistant/ditto-subnet/pull/2839),
+  [`74f0e65`](https://github.com/ditto-assistant/ditto-subnet/commit/74f0e65b7b1a88da4cd9730bcbff1c0c3b3e11ef))
+
+- **bench**: Fold typographic hyphens in v14 reply text
+  ([#2827](https://github.com/ditto-assistant/ditto-subnet/pull/2827),
+  [`f750628`](https://github.com/ditto-assistant/ditto-subnet/commit/f7506283f615084d4975c6f774519fd20e88e7d4))
+
+- **datagen**: Credit v14 claim values that read as correction cues
+  ([#2769](https://github.com/ditto-assistant/ditto-subnet/pull/2769),
+  [`7b9930e`](https://github.com/ditto-assistant/ditto-subnet/commit/7b9930e24600192b8011662de11cc96198e01f84))
+
+- **datagen**: File v14 case-file records in story order
+  ([#3099](https://github.com/ditto-assistant/ditto-subnet/pull/3099),
+  [`dc2c12e`](https://github.com/ditto-assistant/ditto-subnet/commit/dc2c12e717d9da41fb558e43c8afea74a9fddfbd))
+
+- **miner**: Wrap the workbench stylesheet under the source line limit
+  ([#3176](https://github.com/ditto-assistant/ditto-subnet/pull/3176),
+  [`d723ae6`](https://github.com/ditto-assistant/ditto-subnet/commit/d723ae66c902cae82dd5d47de9126ac8de31a7ff))
+
+- **platform**: Refill generator panels and void fault-only rounds
+  ([#3169](https://github.com/ditto-assistant/ditto-subnet/pull/3169),
+  [`2707514`](https://github.com/ditto-assistant/ditto-subnet/commit/270751478f21ec1a4ad972574962a78e505f06b1))
+
+### Documentation
+
+- **backroom-review**: Record October 24 bold-strip W8 and generator-parser I5 holdings
+  ([#3168](https://github.com/ditto-assistant/ditto-subnet/pull/3168),
+  [`8b73027`](https://github.com/ditto-assistant/ditto-subnet/commit/8b730276e5532f8b6931f4d4313ba3a1d7659e9e))
+
+- **dittobench**: Design the dueling bench version
+  ([#3166](https://github.com/ditto-assistant/ditto-subnet/pull/3166),
+  [`72bba4b`](https://github.com/ditto-assistant/ditto-subnet/commit/72bba4b177ff9978301f12e12d9a9ae3c0e41c65))
+
+### Features
+
+- **platform**: Allow up to 80 generator cases per column
+  ([#3175](https://github.com/ditto-assistant/ditto-subnet/pull/3175),
+  [`94f6c31`](https://github.com/ditto-assistant/ditto-subnet/commit/94f6c3142de4254ac3958c3288a927e1eca322da))
+
+- **platform**: Enforce mode and track-share governance for the generator competition
+  ([#3174](https://github.com/ditto-assistant/ditto-subnet/pull/3174),
+  [`25b5952`](https://github.com/ditto-assistant/ditto-subnet/commit/25b5952f2e2697d74b6cca5a59a25872213ba442))
+
+- **validator**: Let the generator track pay a governed share
+  ([#3171](https://github.com/ditto-assistant/ditto-subnet/pull/3171),
+  [`f5c4b50`](https://github.com/ditto-assistant/ditto-subnet/commit/f5c4b50ba3c3375f62446266a080f422f999034e))
+
+- **validator**: Publish generator round commitments from elected validators
+  ([#3172](https://github.com/ditto-assistant/ditto-subnet/pull/3172),
+  [`07b3b0b`](https://github.com/ditto-assistant/ditto-subnet/commit/07b3b0b2e673c82fe109bab208b35ef9dcb14781))
+
+
 ## v0.389.0 (2026-10-25)
 
 ### Bug Fixes
