@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.395.1 (2026-10-27)
+
+### Bug Fixes
+
+- **platform,scorer**: Never reject generators for scorer faults
+  ([#3201](https://github.com/ditto-assistant/ditto-subnet/pull/3201),
+  [`2622f3a`](https://github.com/ditto-assistant/ditto-subnet/commit/2622f3ad85a9cef5ca38ecc348a02dc87c5fadd6))
+
+
 ## v0.395.0 (2026-10-27)
 
 ### Bug Fixes
