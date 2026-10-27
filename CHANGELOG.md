@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.393.0 (2026-10-27)
+
+### Bug Fixes
+
+- **validator**: Read the confirmation receipt for every receipt version
+  ([#3184](https://github.com/ditto-assistant/ditto-subnet/pull/3184),
+  [`2f9a7e3`](https://github.com/ditto-assistant/ditto-subnet/commit/2f9a7e3d276dfeaa477e1cbffe4bf55570168562))
+
+### Documentation
+
+- **benchmark**: List the open v14 activation blockers
+  ([#3186](https://github.com/ditto-assistant/ditto-subnet/pull/3186),
+  [`d3e37ff`](https://github.com/ditto-assistant/ditto-subnet/commit/d3e37ffbf6e5cb8ae67c7ca4dac539f3018e2a79))
+
+### Features
+
+- **datagen**: Qualify v14 public adversary controls
+  ([#3179](https://github.com/ditto-assistant/ditto-subnet/pull/3179),
+  [`079285c`](https://github.com/ditto-assistant/ditto-subnet/commit/079285c58c68ac1773088cdcacbd202024003e7a))
+
+
 ## v0.392.0 (2026-10-26)
 
 ### Documentation
