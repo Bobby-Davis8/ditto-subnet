@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.400.1 (2026-10-27)
+
+### Bug Fixes
+
+- **platform**: Never lease an agent beside a live lease at another bench version
+  ([#3230](https://github.com/ditto-assistant/ditto-subnet/pull/3230),
+  [`d27b1da`](https://github.com/ditto-assistant/ditto-subnet/commit/d27b1dae2658cb44d1d4ca0730208584cd0f5dd1))
+
+
 ## v0.400.0 (2026-10-27)
 
 ### Features
