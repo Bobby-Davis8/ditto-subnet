@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.399.1 (2026-10-27)
+
+### Bug Fixes
+
+- **platform**: Defer generator round openings through validator capacity gaps
+  ([#3229](https://github.com/ditto-assistant/ditto-subnet/pull/3229),
+  [`7f7f49e`](https://github.com/ditto-assistant/ditto-subnet/commit/7f7f49e14b156384c720b2707e518182f54b3292))
+
+### Documentation
+
+- **benchmark**: Record v14 top-five canaries and gate 4 feasibility
+  ([#3220](https://github.com/ditto-assistant/ditto-subnet/pull/3220),
+  [`dd74180`](https://github.com/ditto-assistant/ditto-subnet/commit/dd741802745f01a83d11cf70673773fa5c004d0a))
+
+
 ## v0.399.0 (2026-10-27)
 
 ### Bug Fixes
