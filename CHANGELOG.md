@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.398.0 (2026-10-27)
+
+### Features
+
+- **datagen**: Add the public wire parser for the v14 role families
+  ([#3210](https://github.com/ditto-assistant/ditto-subnet/pull/3210),
+  [`7852c80`](https://github.com/ditto-assistant/ditto-subnet/commit/7852c80c328baaafe2f8208dd27dc927e755c4bd))
+
+
 ## v0.397.0 (2026-10-27)
 
 ### Features
