@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.397.0 (2026-10-27)
+
+### Features
+
+- **longmemeval**: Swap the frozen judge to deepseek-v4.1-flash
+  ([#3167](https://github.com/ditto-assistant/ditto-subnet/pull/3167),
+  [`937296f`](https://github.com/ditto-assistant/ditto-subnet/commit/937296fcc8dadf2394ee7f19c094796a45800d1f))
+
+
 ## v0.396.0 (2026-10-27)
 
 ### Bug Fixes
