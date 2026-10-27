@@ -2,6 +2,49 @@
 
 <!-- version list -->
 
+## v0.395.0 (2026-10-27)
+
+### Bug Fixes
+
+- **infra**: Parse base role go version without regex_search
+  ([#3199](https://github.com/ditto-assistant/ditto-subnet/pull/3199),
+  [`bac8b63`](https://github.com/ditto-assistant/ditto-subnet/commit/bac8b630eab8c2ad73ca4136639380af2d147824))
+
+- **miner**: Default local rehearsal to the live scoring bench
+  ([#3191](https://github.com/ditto-assistant/ditto-subnet/pull/3191),
+  [`5ce1c5e`](https://github.com/ditto-assistant/ditto-subnet/commit/5ce1c5e7ca79051f95c176c9d66d2d6b24a49a55))
+
+- **treasury**: Recover expired unsigned Gamma intents
+  ([#3192](https://github.com/ditto-assistant/ditto-subnet/pull/3192),
+  [`d6a9df4`](https://github.com/ditto-assistant/ditto-subnet/commit/d6a9df4cd17359adf7a03091370a9f8f9d1831f7))
+
+### Features
+
+- **datagen**: Explain the generator 0.5 ceiling and hold half-credit families (SN-352)
+  ([#3194](https://github.com/ditto-assistant/ditto-subnet/pull/3194),
+  [`0b9a021`](https://github.com/ditto-assistant/ditto-subnet/commit/0b9a02193266e129963c748c83b6a4518078221f))
+
+- **datagen**: V14 supersession chains without announcing cues (SN-353, SN-354)
+  ([#3193](https://github.com/ditto-assistant/ditto-subnet/pull/3193),
+  [`ffd6df1`](https://github.com/ditto-assistant/ditto-subnet/commit/ffd6df120b3eb52b53271f0364dc1ddbc77a3332))
+
+- **dittobench**: Read v14 replies as rendered text
+  ([#3189](https://github.com/ditto-assistant/ditto-subnet/pull/3189),
+  [`19ff329`](https://github.com/ditto-assistant/ditto-subnet/commit/19ff329d5a67f24a6a558e7b59af47d16fca5194))
+
+- **platform,backroom**: Reinstate a wrongly rejected generator submission
+  ([#3200](https://github.com/ditto-assistant/ditto-subnet/pull/3200),
+  [`3402ad4`](https://github.com/ditto-assistant/ditto-subnet/commit/3402ad49879ee4feb384f2eb9482e94b6e74e87c))
+
+- **platform,miner**: Fast generator board, generator names and miner profiles
+  ([#3190](https://github.com/ditto-assistant/ditto-subnet/pull/3190),
+  [`eee000e`](https://github.com/ditto-assistant/ditto-subnet/commit/eee000ec6599b8bd3b6bb11004f889a56be081ae))
+
+- **platform,validator**: Freeze each generator round's bench contract at open
+  ([#3197](https://github.com/ditto-assistant/ditto-subnet/pull/3197),
+  [`30e1e7d`](https://github.com/ditto-assistant/ditto-subnet/commit/30e1e7d60a2996420e59c777f66db0246d07b495))
+
+
 ## v0.394.0 (2026-10-27)
 
 ### Features
