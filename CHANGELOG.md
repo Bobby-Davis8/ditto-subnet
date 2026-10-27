@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.394.0 (2026-10-27)
+
+### Features
+
+- **datagen**: Gate v14 families on generator panel evidence (SN-351)
+  ([#3185](https://github.com/ditto-assistant/ditto-subnet/pull/3185),
+  [`ce1da3a`](https://github.com/ditto-assistant/ditto-subnet/commit/ce1da3a3445f27ea3eb60ace172a916feeb3db9e))
+
+
 ## v0.393.0 (2026-10-27)
 
 ### Bug Fixes
