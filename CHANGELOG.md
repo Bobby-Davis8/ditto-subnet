@@ -2,6 +2,41 @@
 
 <!-- version list -->
 
+## v0.396.0 (2026-10-27)
+
+### Bug Fixes
+
+- **release**: Pull signed generator scorer updates automatically
+  ([#3203](https://github.com/ditto-assistant/ditto-subnet/pull/3203),
+  [`af7b704`](https://github.com/ditto-assistant/ditto-subnet/commit/af7b70465f428bfe1a63eb078d680bdb2dbfae91))
+
+- **treasury**: Reconcile manual GM funding history
+  ([#3202](https://github.com/ditto-assistant/ditto-subnet/pull/3202),
+  [`2643d99`](https://github.com/ditto-assistant/ditto-subnet/commit/2643d997e30bc04a68011970d48d2faeb5708db2))
+
+### Features
+
+- **datagen**: Add v14 holder-vs-actor and identity-join role families (SN-359, SN-360)
+  ([#3188](https://github.com/ditto-assistant/ditto-subnet/pull/3188),
+  [`50cba27`](https://github.com/ditto-assistant/ditto-subnet/commit/50cba27acf2ee06a1edd5d329c4e2dd6151a017d))
+
+- **datagen**: Ask v14 point-in-time and relative-sequence questions (SN-355, SN-358)
+  ([#3195](https://github.com/ditto-assistant/ditto-subnet/pull/3195),
+  [`c33c2b7`](https://github.com/ditto-assistant/ditto-subnet/commit/c33c2b717c9d225632f3d5780c8d149089a0ed23))
+
+- **datagen**: Fold v14 process steps and list membership across records (SN-356, SN-357)
+  ([#3198](https://github.com/ditto-assistant/ditto-subnet/pull/3198),
+  [`0735d45`](https://github.com/ditto-assistant/ditto-subnet/commit/0735d45cf2a4f1733a99319c46490a9286c650f1))
+
+- **platform**: Generator names, profiles and per-generator detail on /generators
+  ([#3196](https://github.com/ditto-assistant/ditto-subnet/pull/3196),
+  [`04ff1b9`](https://github.com/ditto-assistant/ditto-subnet/commit/04ff1b977993eacb57ee5020eeb90a055c5226c0))
+
+- **platform**: Pipeline theater, Paper Dittos from factory to arena
+  ([#3207](https://github.com/ditto-assistant/ditto-subnet/pull/3207),
+  [`61714ca`](https://github.com/ditto-assistant/ditto-subnet/commit/61714ca054ebfc4e8b7d5c81da9d4c983449a0bf))
+
+
 ## v0.395.1 (2026-10-27)
 
 ### Bug Fixes
