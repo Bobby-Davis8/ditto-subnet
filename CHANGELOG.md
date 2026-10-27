@@ -2,6 +2,63 @@
 
 <!-- version list -->
 
+## v0.399.0 (2026-10-27)
+
+### Bug Fixes
+
+- **backroom**: Read generator-round capacity leases and no-rollout qualification
+  ([#3219](https://github.com/ditto-assistant/ditto-subnet/pull/3219),
+  [`bc404cc`](https://github.com/ditto-assistant/ditto-subnet/commit/bc404cc36aa5e443d71741bee914945b3d3782c8))
+
+- **datagen**: Pin the 40-minute datagen gate everywhere
+  ([#3217](https://github.com/ditto-assistant/ditto-subnet/pull/3217),
+  [`b9c934e`](https://github.com/ditto-assistant/ditto-subnet/commit/b9c934e4afa046aa2d6fa9206854b672d47ec234))
+
+### Continuous Integration
+
+- **datagen**: Bound the datagen suite at 15 minutes
+  ([#3223](https://github.com/ditto-assistant/ditto-subnet/pull/3223),
+  [`c492716`](https://github.com/ditto-assistant/ditto-subnet/commit/c492716000080e7ca02c097b85e1fbabf7473616))
+
+- **datagen**: Give the datagen package gate 40 minutes
+  ([#3216](https://github.com/ditto-assistant/ditto-subnet/pull/3216),
+  [`16a19e9`](https://github.com/ditto-assistant/ditto-subnet/commit/16a19e9ab9353b2eaa55f83b9c33dc89771d2c05))
+
+### Documentation
+
+- **benchmark**: Record October 27 v14 qualification evidence and blockers
+  ([#3211](https://github.com/ditto-assistant/ditto-subnet/pull/3211),
+  [`8f0bcad`](https://github.com/ditto-assistant/ditto-subnet/commit/8f0bcade7ee69a26f5a8c648721e713ef23e612f))
+
+- **datagen**: Tandem upgrades for agent bench and generator pack versions
+  ([#3213](https://github.com/ditto-assistant/ditto-subnet/pull/3213),
+  [`b8c2dba`](https://github.com/ditto-assistant/ditto-subnet/commit/b8c2dba1a8d1a77caaa76f5b4187f996657e9d38))
+
+- **skills**: Route bench activations through the tandem-upgrade runbook
+  ([#3218](https://github.com/ditto-assistant/ditto-subnet/pull/3218),
+  [`4a2f26c`](https://github.com/ditto-assistant/ditto-subnet/commit/4a2f26c6ff5606dde851dfb4d01c42ddc073d3e8))
+
+### Features
+
+- **datagen,platform,scorer,backroom,dashboard**: Enforce the tandem upgrade policy for generator
+  pack versions ([#3222](https://github.com/ditto-assistant/ditto-subnet/pull/3222),
+  [`8730e77`](https://github.com/ditto-assistant/ditto-subnet/commit/8730e77d45e828c47c2a7f34969986a59453ed2a))
+
+- **datagen,scorer,platform**: V14 generator pack contract for rounds
+  ([#3212](https://github.com/ditto-assistant/ditto-subnet/pull/3212),
+  [`f86333b`](https://github.com/ditto-assistant/ditto-subnet/commit/f86333b8ac752c9929d7b8ebd6215545e4385947))
+
+- **platform,scorer,backroom**: Gate generator work on the scorer's advertised case bounds
+  ([#3204](https://github.com/ditto-assistant/ditto-subnet/pull/3204),
+  [`aefb6d9`](https://github.com/ditto-assistant/ditto-subnet/commit/aefb6d98a1abbe31a62b74ed3e51b54bb491d161))
+
+### Testing
+
+- **datagen**: Share seed sweeps, prune redundant tests, run heavy tests in parallel
+  ([#3221](https://github.com/ditto-assistant/ditto-subnet/pull/3221),
+  [`86dbbe3`](https://github.com/ditto-assistant/ditto-subnet/commit/86dbbe3b6185c4f178442ba1329a5a71fb47c4fb))
+
+
 ## v0.398.0 (2026-10-27)
 
 ### Features
