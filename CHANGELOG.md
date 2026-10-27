@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.400.0 (2026-10-27)
+
+### Features
+
+- **datagen**: Judge v14 candidate families from executed canary runs
+  ([#3228](https://github.com/ditto-assistant/ditto-subnet/pull/3228),
+  [`9e00695`](https://github.com/ditto-assistant/ditto-subnet/commit/9e006957da9c77f98d992447816b9de0501e247f))
+
+
 ## v0.399.1 (2026-10-27)
 
 ### Bug Fixes
