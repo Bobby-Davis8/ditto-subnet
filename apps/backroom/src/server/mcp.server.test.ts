@@ -558,6 +558,7 @@ describe('Backroom MCP tools', () => {
         'list_generator_rounds',
         'get_generator_round',
         'preview_generator_round',
+        'get_generator_scorer',
         'get_generator_round_loop',
         'tick_generator_rounds',
         'get_generator_round_dataset',
@@ -960,8 +961,9 @@ describe('Backroom MCP tools', () => {
       // The eleven generator-competition summaries bring it to 26,304, and
       // the eleven generator-round summaries to 27,023; keep about 200 chars
       // of headroom. The one-line emission allocation pair (SN-350) adds
-      // about 150 chars.
-      27_400,
+      // about 150 chars. The one-line generator scorer capability read
+      // measures 27,441.
+      27_600,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
