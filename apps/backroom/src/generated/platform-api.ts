@@ -11880,6 +11880,7 @@ export interface components {
         AdminGeneratorRoundPreview: {
             /** Awaiting Qualification */
             awaiting_qualification: number;
+            bench_contract?: components["schemas"]["GeneratorRoundBenchContractPreview"] | null;
             /** Blockers */
             blockers: string[];
             /** Columns */
@@ -22386,6 +22387,24 @@ export interface components {
             /** Validator Hotkey */
             validator_hotkey: string;
         };
+        /**
+         * GeneratorRoundBenchContractPreview
+         * @description The bench contract a round opened now would freeze, and why.
+         */
+        GeneratorRoundBenchContractPreview: {
+            /** Active Version */
+            active_version: number;
+            /** Bench Version */
+            bench_version: number | null;
+            /** Capable Validators */
+            capable_validators: {
+                [key: string]: number;
+            };
+            /** Reason */
+            reason?: string | null;
+            /** Round Contracts */
+            round_contracts: number[];
+        };
         /** GeneratorRoundCaseResult */
         GeneratorRoundCaseResult: {
             /** Case Id */
@@ -23100,6 +23119,8 @@ export interface components {
         };
         /** GeneratorRoundWork */
         GeneratorRoundWork: {
+            /** Bench Version */
+            bench_version?: number | null;
             /** Cases Per Column */
             cases_per_column?: number | null;
             /** Columns */
@@ -23267,6 +23288,10 @@ export interface components {
             duration_ms: number;
             /** Error */
             error?: string | null;
+            /** Grading Bench Version */
+            grading_bench_version?: number | null;
+            /** Legacy Retry */
+            legacy_retry?: string | null;
             /** Pack Sha256 */
             pack_sha256?: string | null;
             /** Seed */
@@ -23478,6 +23503,8 @@ export interface components {
         };
         /** GeneratorWorkItem */
         GeneratorWorkItem: {
+            /** Bench Version */
+            bench_version?: number | null;
             /** Cases Per Seed */
             cases_per_seed: number;
             /**
@@ -34335,6 +34362,8 @@ export interface components {
              * @default false
              */
             deterministic_v13_datasets: boolean;
+            /** Generator Round Bench Versions */
+            generator_round_bench_versions?: number[] | null;
             /** Generator Round Max Cases */
             generator_round_max_cases?: number | null;
             /**
