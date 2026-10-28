@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.401.1 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Admit submissions first queued after a benchmark rollout opened
+  ([#3237](https://github.com/ditto-assistant/ditto-subnet/pull/3237),
+  [`8e32897`](https://github.com/ditto-assistant/ditto-subnet/commit/8e32897d248d8963c55609068c2c308dee287e96))
+
+
 ## v0.401.0 (2026-10-28)
 
 ### Features
