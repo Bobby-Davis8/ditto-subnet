@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.406.1 (2026-10-28)
+
+### Performance Improvements
+
+- **platform**: Reuse built routes and the OpenAPI document across test apps
+  ([#3252](https://github.com/ditto-assistant/ditto-subnet/pull/3252),
+  [`7c18e0c`](https://github.com/ditto-assistant/ditto-subnet/commit/7c18e0ce4d2a36b6b6cda108d2f5752dae1f1e2b))
+
+
 ## v0.406.0 (2026-10-28)
 
 ### Bug Fixes
