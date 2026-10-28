@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.406.0 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Finish activated rollout members left below quorum
+  ([#3250](https://github.com/ditto-assistant/ditto-subnet/pull/3250),
+  [`1f4b57c`](https://github.com/ditto-assistant/ditto-subnet/commit/1f4b57ca5fdc88723a5055f1e6555c7f9d02484a))
+
+- **validator**: Refresh stale heartbeat before claiming jobs
+  ([#3238](https://github.com/ditto-assistant/ditto-subnet/pull/3238),
+  [`846bd5f`](https://github.com/ditto-assistant/ditto-subnet/commit/846bd5fd7fa47f08212393595a94ea78f875068b))
+
+### Features
+
+- **backroom**: Read per-validator job-poll and weight-ledger outcomes
+  ([#3251](https://github.com/ditto-assistant/ditto-subnet/pull/3251),
+  [`c1ef7a6`](https://github.com/ditto-assistant/ditto-subnet/commit/c1ef7a634bf50ac688dbabf7cb49871a3c8c4da3))
+
+
 ## v0.405.0 (2026-10-28)
 
 ### Continuous Integration
