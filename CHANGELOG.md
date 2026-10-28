@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.400.2 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Select only ranking columns when freezing the rollout cohort
+  ([#3232](https://github.com/ditto-assistant/ditto-subnet/pull/3232),
+  [`ec2d2c4`](https://github.com/ditto-assistant/ditto-subnet/commit/ec2d2c485aa4ba5919590da6473c1b8820008dd3))
+
+### Documentation
+
+- **benchmark**: Record the v14 gate 4 family panel and the no-hold-out decision
+  ([#3231](https://github.com/ditto-assistant/ditto-subnet/pull/3231),
+  [`0fbad51`](https://github.com/ditto-assistant/ditto-subnet/commit/0fbad5136f1c9141455dd3d635ddfeeabfaa4caf))
+
+
 ## v0.400.1 (2026-10-27)
 
 ### Bug Fixes
