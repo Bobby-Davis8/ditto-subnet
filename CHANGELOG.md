@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.401.3 (2026-10-28)
+
+### Bug Fixes
+
+- **validator**: Heartbeat during generator rounds and before weight ledger reads
+  ([#3241](https://github.com/ditto-assistant/ditto-subnet/pull/3241),
+  [`a0d2246`](https://github.com/ditto-assistant/ditto-subnet/commit/a0d224634df21c2a14297d212b9f43f3630b769e))
+
+
 ## v0.401.2 (2026-10-28)
 
 ### Bug Fixes
