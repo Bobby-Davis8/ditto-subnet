@@ -2,6 +2,45 @@
 
 <!-- version list -->
 
+## v0.407.0 (2026-10-28)
+
+### Chores
+
+- **bench**: Record v14 activation and bump the offline rehearsal fallback to 14
+  ([#3234](https://github.com/ditto-assistant/ditto-subnet/pull/3234),
+  [`02b4264`](https://github.com/ditto-assistant/ditto-subnet/commit/02b4264200781318fb9b0394c4f2aa887c258a17))
+
+### Documentation
+
+- Record the release-speed log through #3263
+  ([#3264](https://github.com/ditto-assistant/ditto-subnet/pull/3264),
+  [`fe57b9d`](https://github.com/ditto-assistant/ditto-subnet/commit/fe57b9dc5ef038e6dc3e610edc8aea89c94e4ed9))
+
+### Features
+
+- Forward the scorer executor stage as a confirmation failure class
+  ([#3265](https://github.com/ditto-assistant/ditto-subnet/pull/3265),
+  [`f7f1edb`](https://github.com/ditto-assistant/ditto-subnet/commit/f7f1edba6e8e60bd97f00325ef469f1131f618e7))
+
+### Testing
+
+- Delete the retired coding track's root tests and prune workflow pins
+  ([#3263](https://github.com/ditto-assistant/ditto-subnet/pull/3263),
+  [`c03c1fe`](https://github.com/ditto-assistant/ditto-subnet/commit/c03c1fe203f3c20764237b4b59bd3397eafdc80a))
+
+- **platform**: Prune 139 admin, outlier and query test cases
+  ([#3262](https://github.com/ditto-assistant/ditto-subnet/pull/3262),
+  [`53970a6`](https://github.com/ditto-assistant/ditto-subnet/commit/53970a6b3850607702e1743badb42975c1391621))
+
+- **platform**: Prune 145 bounty, receipt, canary and harness test cases
+  ([#3261](https://github.com/ditto-assistant/ditto-subnet/pull/3261),
+  [`2e11ada`](https://github.com/ditto-assistant/ditto-subnet/commit/2e11ada820628f9ff6be2f1d02da905dc9421b08))
+
+- **platform**: Prune 611 low-value unit cases from confirmation, chain and scoring suites
+  ([#3260](https://github.com/ditto-assistant/ditto-subnet/pull/3260),
+  [`0f939f0`](https://github.com/ditto-assistant/ditto-subnet/commit/0f939f0df29995c7f0a3ce1e45e6f91142613f80))
+
+
 ## v0.406.2 (2026-10-28)
 
 ### Bug Fixes
