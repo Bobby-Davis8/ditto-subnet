@@ -2,6 +2,41 @@
 
 <!-- version list -->
 
+## v0.406.2 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Restore the ATH replay fixture Backroom's schema test parses
+  ([#3259](https://github.com/ditto-assistant/ditto-subnet/pull/3259),
+  [`24b292d`](https://github.com/ditto-assistant/ditto-subnet/commit/24b292d1836613a8fca2f25ffc9ff7dab4b7212f))
+
+### Testing
+
+- **platform**: Drop round-trips of migrations already applied in prod
+  ([#3253](https://github.com/ditto-assistant/ditto-subnet/pull/3253),
+  [`9be7011`](https://github.com/ditto-assistant/ditto-subnet/commit/9be70112bab161248db9fb43308fb8ff8c3f1238))
+
+- **platform**: Prune 113 low-value screener endpoint test cases
+  ([#3254](https://github.com/ditto-assistant/ditto-subnet/pull/3254),
+  [`6e25218`](https://github.com/ditto-assistant/ditto-subnet/commit/6e25218ed7fbcab4b9170c04a99df8af066dc702))
+
+- **platform**: Prune 182 low-value cases from ten admin and identity endpoint suites
+  ([#3257](https://github.com/ditto-assistant/ditto-subnet/pull/3257),
+  [`59af345`](https://github.com/ditto-assistant/ditto-subnet/commit/59af3456fcfcd3babec0c3ed0fc750ac012f012b))
+
+- **platform**: Prune 197 db-query, scoring and script test cases
+  ([#3258](https://github.com/ditto-assistant/ditto-subnet/pull/3258),
+  [`8837105`](https://github.com/ditto-assistant/ditto-subnet/commit/8837105e0069e9b670449a56b329cb7584bb06a3))
+
+- **platform**: Prune 47 low-value public endpoint test cases
+  ([#3255](https://github.com/ditto-assistant/ditto-subnet/pull/3255),
+  [`8dc20a6`](https://github.com/ditto-assistant/ditto-subnet/commit/8dc20a601f54ee09b302d5e9cefd09d726f6d074))
+
+- **platform**: Prune 61 validator endpoint test cases and dead retry helpers
+  ([#3256](https://github.com/ditto-assistant/ditto-subnet/pull/3256),
+  [`5ec096a`](https://github.com/ditto-assistant/ditto-subnet/commit/5ec096a2b28aae618be130586dddca024ead9ecf))
+
+
 ## v0.406.1 (2026-10-28)
 
 ### Performance Improvements
