@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.400.3 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Accept the served generator split in V2 treasury payout backings
+  ([#3235](https://github.com/ditto-assistant/ditto-subnet/pull/3235),
+  [`49d1b7d`](https://github.com/ditto-assistant/ditto-subnet/commit/49d1b7ddd0953899119e33ab7e3020cbaf07ff30))
+
+
 ## v0.400.2 (2026-10-28)
 
 ### Bug Fixes
