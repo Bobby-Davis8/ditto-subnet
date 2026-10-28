@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.403.0 (2026-10-28)
+
+### Features
+
+- **screener**: Diff-scope screening against released bases and same-owner parents
+  ([#3244](https://github.com/ditto-assistant/ditto-subnet/pull/3244),
+  [`78454f0`](https://github.com/ditto-assistant/ditto-subnet/commit/78454f077b7579d1dbedb148b757cc8f447e5145))
+
+
 ## v0.402.0 (2026-10-28)
 
 ### Features
