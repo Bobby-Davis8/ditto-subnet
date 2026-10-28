@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.401.0 (2026-10-28)
+
+### Features
+
+- Expose lease costs and gate OpenRouter cache affinity
+  ([#3224](https://github.com/ditto-assistant/ditto-subnet/pull/3224),
+  [`822f037`](https://github.com/ditto-assistant/ditto-subnet/commit/822f0379de92912ea6399d9838f6a33b1b22656b))
+
+### Performance Improvements
+
+- **backroom**: Defer MCP registry initialization until authorized
+  ([#3233](https://github.com/ditto-assistant/ditto-subnet/pull/3233),
+  [`3a3e5c2`](https://github.com/ditto-assistant/ditto-subnet/commit/3a3e5c212aa6e521407c9a288aa48580dcd607a8))
+
+- **backroom**: Read runtime metrics and grant costs concurrently
+  ([#3226](https://github.com/ditto-assistant/ditto-subnet/pull/3226),
+  [`9c7a248`](https://github.com/ditto-assistant/ditto-subnet/commit/9c7a248719ab69196d1ff1777a0e5355c1eda590))
+
+
 ## v0.400.4 (2026-10-28)
 
 ### Bug Fixes
