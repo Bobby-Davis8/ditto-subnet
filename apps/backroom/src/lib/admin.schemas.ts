@@ -9955,6 +9955,11 @@ export type AthReviewQueueSlo = z.infer<typeof athReviewQueueSloSchema>
 type GeneratedValidatorCapacityAssignment =
   PlatformComponents['schemas']['ValidatorCapacityAssignment']
 type GeneratedValidatorCapacityEntry = PlatformComponents['schemas']['ValidatorCapacityEntry']
+type GeneratedRequestOutcomeCount = PlatformComponents['schemas']['RequestOutcomeCount']
+type GeneratedValidatorRequestOutcomes =
+  PlatformComponents['schemas']['ValidatorRequestOutcomes']
+type GeneratedValidatorRequestOutcomeSummary =
+  PlatformComponents['schemas']['ValidatorRequestOutcomeSummary']
 type GeneratedRelayLaneSaturation = PlatformComponents['schemas']['RelayLaneSaturation']
 type GeneratedValidatorCapacitySummary =
   PlatformComponents['schemas']['ValidatorCapacitySummary']
@@ -10327,3 +10332,29 @@ export const outlierEscalationDryRunInputSchema = z.object({
 })
 
 export type OutlierEscalationDryRun = z.infer<typeof outlierEscalationDryRunSchema>
+
+const requestOutcomeCountSchema = z.object({
+  outcome: z.string(),
+  total: z.number().int().nonnegative(),
+  recent_15m: z.number().int().nonnegative(),
+  first_at: z.string().nullable(),
+  last_at: z.string().nullable(),
+  last_detail: z.string().nullable(),
+  last_slot_id: z.string().nullable(),
+} satisfies PlatformResponseShape<GeneratedRequestOutcomeCount>)
+
+const validatorRequestOutcomesSchema = z.object({
+  validator_hotkey: z.string(),
+  lane: z.enum(['job', 'top5_confirmation', 'scoring_ledger']),
+  last_poll_at: z.string().nullable(),
+  last_outcome: z.string().nullable(),
+  outcomes: z.array(requestOutcomeCountSchema),
+} satisfies PlatformResponseShape<GeneratedValidatorRequestOutcomes>)
+
+export const validatorRequestOutcomeSummarySchema = z.object({
+  observed_at: z.string(),
+  tracking_since: z.string(),
+  recent_window_seconds: z.number().int().positive(),
+  unauthenticated: z.record(z.string(), z.number().int().nonnegative()),
+  validators: z.array(validatorRequestOutcomesSchema),
+} satisfies PlatformResponseShape<GeneratedValidatorRequestOutcomeSummary>)
