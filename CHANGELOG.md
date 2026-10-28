@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.402.0 (2026-10-28)
+
+### Features
+
+- **platform**: Copy court family-diff triage for near-duplicate holds
+  ([#3243](https://github.com/ditto-assistant/ditto-subnet/pull/3243),
+  [`3ec4a42`](https://github.com/ditto-assistant/ditto-subnet/commit/3ec4a4254f7212026b3f655bd50bf1174060f94d))
+
+
 ## v0.401.3 (2026-10-28)
 
 ### Bug Fixes
