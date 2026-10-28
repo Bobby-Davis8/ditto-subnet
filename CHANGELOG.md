@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.404.1 (2026-10-28)
+
+### Bug Fixes
+
+- **screener**: Treat one-time reply drafts and reply checks as W7, not I3
+  ([#3242](https://github.com/ditto-assistant/ditto-subnet/pull/3242),
+  [`c392172`](https://github.com/ditto-assistant/ditto-subnet/commit/c3921723dc711053257a7c66e0a07b6063f4c57a))
+
+
 ## v0.404.0 (2026-10-28)
 
 ### Features
