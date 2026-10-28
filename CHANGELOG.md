@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.401.2 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Serve only full-quorum rows on the settled authority ledger
+  ([#3240](https://github.com/ditto-assistant/ditto-subnet/pull/3240),
+  [`ee73cb2`](https://github.com/ditto-assistant/ditto-subnet/commit/ee73cb21ef3b79d523c7f5bdf9e61652fff4662c))
+
+
 ## v0.401.1 (2026-10-28)
 
 ### Bug Fixes
