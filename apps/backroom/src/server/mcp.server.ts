@@ -186,7 +186,6 @@ import {
   claimProvenanceCasesInputSchema,
   agentScoresInputSchema,
   agentScoresLookupInputSchema,
-  continualRetestDiagnosticInputSchema,
   scoreLeaderboardInputSchema,
   ownerFootprintLookupInputSchema,
   agentEmissionEligibilityInputSchema,
@@ -327,6 +326,7 @@ import {
   fetchInferenceConcurrencySettings,
   fetchScoringLeaseSettings,
   fetchInferenceRuntimeMetrics,
+  fetchInferenceGrantCosts,
   fetchSourceReviewQueueSlo,
   fetchAthReviewQueueSlo,
   fetchOutlierEscalation,
@@ -786,7 +786,7 @@ function toolAnnotations(kind: 'read' | 'write', destructive = false) {
   }
 }
 
-// Agent ids on the artifact-scope source readers publish as plain
+// Exact-agent readers (source and retest diagnostics) publish as plain
 // `format: uuid`, without zod's ~170-byte uuid regex, to hold the catalog byte
 // budget. Each tool's service function parses its input with the strict
 // `z.string().uuid()` schema before any Platform request, so validation is
@@ -917,7 +917,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   set_inference_concurrency_settings:
     'Apply complete inference policy with CAS/reason/confirmation. See tool help.',
   get_inference_runtime_metrics:
-    'Read inference load and relay health.',
+    'Read inference load, relay health and optional grant costs.',
   get_source_review_queue_slo:
     'Read ordinary source-review and ATH/copy-review queue age, throughput, and ghosts.',
   get_claim_provenance_cases:
@@ -2445,7 +2445,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Explain exact agent continual retest admission',
       description:
         'Read one exact submission UUID: canonical and official composites with sample counts and completed-wave depth, the same-owner representative and the comparison that selected it, raw/folded seed IDs, membership in the raw wave, folded emission set and resolved cohort with the cutoff/tie-band comparison and exclusion reason, seed anchor, retest tickets with the latest result, and claimability (scheduled round, catch-up, spare capacity, idle gate). A negative cohort_cutoff.gap on an agent that is still out of the cohort means the exclusion is structural owner suppression, not a score it failed. Outstanding work is a count; no confirmation dataset, prompt, or answer key is returned. This snapshot does not grant work. Seed IDs are exact decimal strings. Requires backroom:read.',
-      inputSchema: continualRetestDiagnosticInputSchema,
+      inputSchema: { agentId: sourceAgentId() },
       annotations: toolAnnotations('read'),
     },
     async (input) => result(await fetchContinualRetestDiagnostic(input)),
@@ -3589,9 +3589,28 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Get hosted inference runtime metrics',
       description:
         'Read the current hosted chat and embedding load plus 1, 5, 15, and 60 minute calls, tokens, latency, failures, timeouts, concurrency peaks, live concurrency AND request-per-minute admission limits, exact relay revisions, and per-process capacity-decline counters. Compare peak_*_concurrency_60m to per_*_limit AND to per_*_rpm_limit. A ticket glued to per_ticket_rpm_limit with idle concurrency is a rate-limit failure, not a full lane. This is the first tool to call before changing a concurrency or RPM setting.',
+      inputSchema: {
+        costWindowHours: z.number().int().min(1).max(744).optional()
+          .describe('Optional grant lifetime costs; not an invoice.'),
+      },
       annotations: toolAnnotations('read'),
     },
-    async () => result(await fetchInferenceRuntimeMetrics()),
+    async ({ costWindowHours }) => {
+      const metrics = await fetchInferenceRuntimeMetrics()
+      if (costWindowHours === undefined) return result(metrics)
+      const costs = await fetchInferenceGrantCosts(costWindowHours).then(
+        (value) => ({ value, error: null }),
+        (error: unknown) => ({
+          value: null,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+      return result({
+        ...metrics,
+        grant_costs: costs.value,
+        ...(costs.error === null ? {} : { grant_costs_error: costs.error }),
+      })
+    },
   )
 
   registerTool(
