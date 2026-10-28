@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.404.0 (2026-10-28)
+
+### Features
+
+- Forward the scorer confirmation failure class to Platform
+  ([#3247](https://github.com/ditto-assistant/ditto-subnet/pull/3247),
+  [`a69756b`](https://github.com/ditto-assistant/ditto-subnet/commit/a69756b4636e15eb59cc85d3be088315fafd2f5e))
+
+
 ## v0.403.1 (2026-10-28)
 
 ### Bug Fixes
