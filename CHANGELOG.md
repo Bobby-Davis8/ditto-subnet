@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.400.4 (2026-10-28)
+
+### Bug Fixes
+
+- **validator**: Submit v14 generator round datasets to the scorer
+  ([#3236](https://github.com/ditto-assistant/ditto-subnet/pull/3236),
+  [`8b7188e`](https://github.com/ditto-assistant/ditto-subnet/commit/8b7188e1d5466a5d771a0e85e50f532a3dfad14f))
+
+
 ## v0.400.3 (2026-10-28)
 
 ### Bug Fixes
