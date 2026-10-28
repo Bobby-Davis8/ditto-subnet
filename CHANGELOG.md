@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.405.0 (2026-10-28)
+
+### Continuous Integration
+
+- **platform**: Deal the pytest suite across 8 uniform shards
+  ([#3249](https://github.com/ditto-assistant/ditto-subnet/pull/3249),
+  [`b3a1c97`](https://github.com/ditto-assistant/ditto-subnet/commit/b3a1c978d39fc286e5d5ee559c3c8d2f41fa969b))
+
+### Features
+
+- **screener**: Record per-attempt review token and cost telemetry
+  ([#3245](https://github.com/ditto-assistant/ditto-subnet/pull/3245),
+  [`5ca2fa8`](https://github.com/ditto-assistant/ditto-subnet/commit/5ca2fa8d2f9ac347dfe0cc51244b680bd569d859))
+
+
 ## v0.404.1 (2026-10-28)
 
 ### Bug Fixes
