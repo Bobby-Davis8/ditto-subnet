@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.403.1 (2026-10-28)
+
+### Bug Fixes
+
+- **platform**: Tighten copy court family triage after first prod pass
+  ([#3246](https://github.com/ditto-assistant/ditto-subnet/pull/3246),
+  [`18f3c60`](https://github.com/ditto-assistant/ditto-subnet/commit/18f3c6028774e71fd99c594f6bd7b6877623302b))
+
+
 ## v0.403.0 (2026-10-28)
 
 ### Features
