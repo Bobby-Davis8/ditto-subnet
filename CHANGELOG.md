@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.408.1 (2026-10-29)
+
+### Bug Fixes
+
+- **validator**: Heartbeat while a drain waits and exit a silent worker
+  ([#3267](https://github.com/ditto-assistant/ditto-subnet/pull/3267),
+  [`e4b2628`](https://github.com/ditto-assistant/ditto-subnet/commit/e4b2628fe7ead1e5d43a81ec591d2ef45eaa19e2))
+
+
 ## v0.408.0 (2026-10-29)
 
 ### Features
