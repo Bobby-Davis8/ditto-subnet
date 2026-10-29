@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.410.0 (2026-10-29)
+
+### Documentation
+
+- **backroom-review**: Add reused-draft no-disagree-clause precedent
+  ([#3270](https://github.com/ditto-assistant/ditto-subnet/pull/3270),
+  [`cf2ee6b`](https://github.com/ditto-assistant/ditto-subnet/commit/cf2ee6bed77cde75fd6dc27483b25649dccc8bb5))
+
+### Features
+
+- **platform**: Add the dark decision-model lane grant schema and knob
+  ([#3273](https://github.com/ditto-assistant/ditto-subnet/pull/3273),
+  [`719e350`](https://github.com/ditto-assistant/ditto-subnet/commit/719e3504e36704e162643016b104cf4386fd7f6a))
+
+
 ## v0.409.1 (2026-10-29)
 
 ### Bug Fixes
