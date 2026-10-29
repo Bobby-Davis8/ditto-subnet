@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.409.1 (2026-10-29)
+
+### Bug Fixes
+
+- Accept the scorer's zdr in the confirmation judge route lock
+  ([#3269](https://github.com/ditto-assistant/ditto-subnet/pull/3269),
+  [`a45c47f`](https://github.com/ditto-assistant/ditto-subnet/commit/a45c47fa3517b24cb8bb24d030b9a838dc0d99da))
+
+
 ## v0.409.0 (2026-10-29)
 
 ### Features
