@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.413.0 (2026-10-29)
+
+### Features
+
+- **platform**: Add a per-attempt screening review budget read
+  ([#3278](https://github.com/ditto-assistant/ditto-subnet/pull/3278),
+  [`c901e4e`](https://github.com/ditto-assistant/ditto-subnet/commit/c901e4e394832b4bfeefc4ba44454dd5ffb1c264))
+
+
 ## v0.412.0 (2026-10-29)
 
 ### Features
