@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.411.0 (2026-10-29)
+
+### Features
+
+- **relay**: Broker the dark decision lane through OpenRouter System One
+  ([#3274](https://github.com/ditto-assistant/ditto-subnet/pull/3274),
+  [`623d9e5`](https://github.com/ditto-assistant/ditto-subnet/commit/623d9e516326d236d179d08dbeeb2b50777a2735))
+
+
 ## v0.410.0 (2026-10-29)
 
 ### Documentation
