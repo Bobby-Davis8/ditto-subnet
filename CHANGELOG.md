@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.409.0 (2026-10-29)
+
+### Features
+
+- **platform**: Require an own runtime delta before a released-base copy clear
+  ([#3268](https://github.com/ditto-assistant/ditto-subnet/pull/3268),
+  [`96a9cb5`](https://github.com/ditto-assistant/ditto-subnet/commit/96a9cb5ce0eb6fe0e879d8b8a7f9703686b9e9c8))
+
+
 ## v0.408.1 (2026-10-29)
 
 ### Bug Fixes
