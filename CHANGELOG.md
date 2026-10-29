@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.412.0 (2026-10-29)
+
+### Features
+
+- **backroom**: Trace the decision lane and read it through Backroom MCP
+  ([#3276](https://github.com/ditto-assistant/ditto-subnet/pull/3276),
+  [`4474b1e`](https://github.com/ditto-assistant/ditto-subnet/commit/4474b1e1bc6c68d80d397cb8d08685ac2c212458))
+
+
 ## v0.411.0 (2026-10-29)
 
 ### Features
