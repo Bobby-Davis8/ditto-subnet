@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.408.0 (2026-10-29)
+
+### Features
+
+- Name the LongMemEval phase and accounting check behind a confirmation failure
+  ([#3266](https://github.com/ditto-assistant/ditto-subnet/pull/3266),
+  [`0044998`](https://github.com/ditto-assistant/ditto-subnet/commit/004499827462e9d8e31a3d2a4adc1382e82a252d))
+
+
 ## v0.407.0 (2026-10-28)
 
 ### Chores
