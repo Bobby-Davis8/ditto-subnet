@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.413.3 (2026-10-30)
+
+### Bug Fixes
+
+- **screener**: Treat a reused draft that reaches the deciding prompt only as text as not I4
+  ([#3281](https://github.com/ditto-assistant/ditto-subnet/pull/3281),
+  [`7ac8582`](https://github.com/ditto-assistant/ditto-subnet/commit/7ac8582138d1c3be1ea205622b6da49c004c3332))
+
+
 ## v0.413.2 (2026-10-30)
 
 ### Bug Fixes
