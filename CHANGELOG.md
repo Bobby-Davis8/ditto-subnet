@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.413.1 (2026-10-30)
+
+### Bug Fixes
+
+- **bench**: Read multi-word case values as one phrase from the v15 grading floor
+  ([#3279](https://github.com/ditto-assistant/ditto-subnet/pull/3279),
+  [`dcb7808`](https://github.com/ditto-assistant/ditto-subnet/commit/dcb780895fcdccb5da2c9e3dd8e408404ecd5287))
+
+
 ## v0.413.0 (2026-10-29)
 
 ### Features
