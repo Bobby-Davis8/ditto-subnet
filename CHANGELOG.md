@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.413.2 (2026-10-30)
+
+### Bug Fixes
+
+- Stop mislabeling model faults as infra and never-scored agents as earning
+  ([#3280](https://github.com/ditto-assistant/ditto-subnet/pull/3280),
+  [`3fc9df6`](https://github.com/ditto-assistant/ditto-subnet/commit/3fc9df6165b29d092a5131e321915914389f9839))
+
+
 ## v0.413.1 (2026-10-30)
 
 ### Bug Fixes
